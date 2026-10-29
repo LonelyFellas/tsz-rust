@@ -19,6 +19,14 @@ pub fn router() -> Router<AppState> {
         )
         .route("/sentences/targets", get(super::shared_sentences::targets))
         .route(
+            "/sentences/{id}/publication-audio/check",
+            axum::routing::post(handler::audio_publication::check_sentence),
+        )
+        .route(
+            "/sentences/{id}/publication-audio/confirm",
+            axum::routing::post(handler::audio_publication::confirm_sentence),
+        )
+        .route(
             "/sentences/{id}/publications",
             get(super::shared_sentences::reading::history)
                 .post(super::shared_sentences::publication::publish),
@@ -57,6 +65,14 @@ pub fn router() -> Router<AppState> {
             axum::routing::patch(handler::commands::update_annotation),
         )
         .route("/entries", get(handler::list).post(handler::create))
+        .route(
+            "/entries/{id}/publication-audio/check",
+            axum::routing::post(handler::audio_publication::check),
+        )
+        .route(
+            "/entries/{id}/publication-audio/confirm",
+            axum::routing::post(handler::audio_publication::confirm),
+        )
         .route(
             "/entries/archive-impact",
             axum::routing::post(handler::lifecycle::archive_impact),

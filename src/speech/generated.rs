@@ -263,25 +263,9 @@ impl GeneratedAudioService {
         security_version: i64,
         input: GenerateVoiceAudioRequest,
     ) -> Result<GenerateVoiceAudioResponse, AppError> {
-        let _permit = GENERATION_SLOTS
-            .acquire()
-            .await
-            .map_err(|_| in_progress())?;
-        let lock = sqlx::postgres::PgAdvisoryLock::new(format!(
-            "dubbing-generation:{actor}:{}",
-            input.request_id
-        ));
-        let connection = self.pool.acquire().await.map_err(AppError::internal)?;
-        let sqlx::Either::Left(guard) = lock
-            .try_acquire(connection)
-            .await
-            .map_err(AppError::internal)?
-        else {
-            return Err(in_progress());
-        };
-        let result = self.generate_locked(actor, security_version, input).await;
-        guard.release_now().await.map_err(AppError::internal)?;
-        result
+        // Interactive and background requests must share the actor lease so that
+        // distinct requests cannot synthesize the same effect simultaneously.
+        self.generate(actor, security_version, input).await
     }
 
     async fn generate_locked(
@@ -457,9 +441,20 @@ impl GeneratedAudioService {
             .await
             .map_err(AppError::internal)?;
         tx.commit().await.map_err(AppError::internal)?;
-        let result = self
-            .finish(actor, security_version, id, &key, storage.clone(), request)
-            .await;
+        let result = async {
+            // An existing selection means the editor explicitly requested a new
+            // rendition. Preserve that operation and its request-id retry semantics.
+            if input.setting.audio_asset_id.is_none()
+                && self
+                    .reuse_owned_audio(actor, security_version, id, &key, &storage, &effect_hash)
+                    .await?
+            {
+                return Ok(());
+            }
+            self.finish(actor, security_version, id, &key, storage.clone(), request)
+                .await
+        }
+        .await;
         if let Err(error) = result {
             // A commit error may have committed successfully. Only compensate after proving
             // the row is still pending; unknown outcomes retain the registered object key.
@@ -486,6 +481,55 @@ impl GeneratedAudioService {
             .await?
             .map(|asset| GenerateVoiceAudioResponse { asset })
             .ok_or_else(unavailable)
+    }
+
+    async fn reuse_owned_audio(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        id: Uuid,
+        key: &ObjectKey,
+        storage: &Arc<dyn ObjectStore>,
+        effect: &[u8],
+    ) -> Result<bool, AppError> {
+        self.authorize(actor, security_version).await?;
+        let prefix = format!("{}/", key.as_str().rsplit_once('/').ok_or_else(invalid)?.0);
+        let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+        // Ownership and the qualified storage prefix are part of the reuse boundary.
+        // Keep the source locked until the bounded copy completes: reclamation must
+        // not delete it between lookup and copying. Never share the business asset ID.
+        let row = sqlx::query(
+            "SELECT a.object_key,a.size_bytes FROM lexicon.audio_generations g
+             JOIN lexicon.audio_assets a ON a.id=g.asset_id
+             WHERE g.created_by_admin_id=$1 AND g.effect_hash=$2 AND g.state='ready'
+               AND a.reclamation_started_at IS NULL AND starts_with(a.object_key,$3)
+               AND a.id<>$4 ORDER BY a.created_at DESC,a.id DESC
+             LIMIT 1 FOR SHARE OF a SKIP LOCKED",
+        )
+        .bind(actor)
+        .bind(effect)
+        .bind(prefix)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let source =
+            ObjectKey::parse(row.get::<String, _>("object_key")).map_err(AppError::internal)?;
+        let metadata = storage
+            .copy(&source, key)
+            .await
+            .map_err(|_| storage_error())?;
+        let size = i64::try_from(metadata.content_length).map_err(|_| storage_error())?;
+        if size <= 0 || size != row.get::<i64, _>("size_bytes") {
+            return Err(storage_error());
+        }
+        tx.commit().await.map_err(AppError::internal)?;
+        self.authorize(actor, security_version).await?;
+        self.mark_ready(id, size).await?;
+        Ok(true)
     }
 
     async fn finish(
@@ -526,6 +570,10 @@ impl GeneratedAudioService {
             .await
             .map_err(|_| storage_error())?;
         self.authorize(actor, security_version).await?;
+        self.mark_ready(id, size).await
+    }
+
+    async fn mark_ready(&self, id: Uuid, size: i64) -> Result<(), AppError> {
         let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
         sqlx::query("UPDATE lexicon.audio_assets SET size_bytes=$2 WHERE id=$1")
             .bind(id)

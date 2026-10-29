@@ -32,11 +32,11 @@ impl SpeechProvider for Provider {
 #[sqlx::test]
 async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_references(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
-    let created = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let created = create_v3_forms_fixture(&state, &pool, &bearer, false, false).await;
     let id = created["word"]["id"].as_str().unwrap();
     let entry = Uuid::parse_str(id).unwrap();
     for (alias, provider, locale) in [
@@ -139,7 +139,8 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
     .unwrap();
     assert!(stored.to_string().contains("audio_asset_id"));
     let refs:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='draft'").bind(entry).fetch_one(&pool).await.unwrap();
-    assert_eq!(refs, provider.0.load(Ordering::SeqCst) as i64);
+    assert_eq!(refs, 4);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 3);
     let jobs = audio_updates::list(&pool, group).await.unwrap();
     assert_eq!(jobs.updates[0].state, "completed", "{jobs:?}");
     assert_eq!(jobs.updates[0].total, 4);
@@ -147,6 +148,29 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
         [0]["voice_profile"]["voices"];
     assert_eq!(grammar_voices.as_array().unwrap().len(), 1);
     assert_eq!(grammar_voices[0]["locale"], "en-GB");
+    let mut expected = [
+        variant["spelling_speech"]["voice_profile"]["voices"][0]["audio_asset_id"].clone(),
+        variant["pronunciations"][0]["synthesis"]["uk"]["ipa_speech"]["voice_profile"]["voices"][0]
+            ["audio_asset_id"]
+            .clone(),
+        variant["pronunciations"][0]["synthesis"]["uk"]["ups_speech"]["voice_profile"]["voices"][0]
+            ["audio_asset_id"]
+            .clone(),
+        grammar_voices[0]["audio_asset_id"].clone(),
+    ]
+    .into_iter()
+    .map(|id| Uuid::parse_str(id.as_str().unwrap()).unwrap())
+    .collect::<Vec<_>>();
+    expected.sort();
+    expected.dedup();
+    assert_eq!(
+        expected.len(),
+        4,
+        "each saved voice owns an independent asset"
+    );
+    let registered: Vec<Uuid> = sqlx::query_scalar("SELECT asset_id FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='draft' ORDER BY asset_id")
+        .bind(entry).fetch_all(&pool).await.unwrap();
+    assert_eq!(registered, expected);
 
     let recording = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$2,'audio/wav',48,'en-GB','female','recording.wav',$3)")

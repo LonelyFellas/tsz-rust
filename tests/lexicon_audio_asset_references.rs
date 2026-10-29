@@ -128,12 +128,269 @@ fn configure_audio(state: &mut AppState) -> Arc<dyn ObjectStore> {
     store
 }
 
+#[sqlx::test]
+async fn publication_audio_checks_real_draft_and_records_explicit_batch_confirmation(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let storage = configure_audio(&mut state);
+    let actor = seed_admin(&pool).await;
+    let token = bearer(&state, actor);
+    let entry = create_entry(&state, &pool, &token, "audioreview").await;
+    let check = format!("{ROOT}/entries/{}/publication-audio/check", entry.id);
+    let confirm = format!("{ROOT}/entries/{}/publication-audio/confirm", entry.id);
+    let (status, missing) = call(
+        &state,
+        Method::POST,
+        &check,
+        &token,
+        None,
+        Some(json!({"base_revision":entry.revision})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{missing}");
+    assert_eq!(missing["manifest"]["ready"], false);
+    assert_eq!(missing["manifest"]["items"].as_array().unwrap().len(), 2);
+    assert!(
+        missing["manifest"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["content_id"].is_string()
+                && item["source_path"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("/forms/contents/")),
+        "legacy stored drafts must expose canonical shared audio locations: {missing}"
+    );
+    let (status, _) = call(&state, Method::POST, &confirm, &token, None,
+        Some(json!({"base_revision":entry.revision,"manifest_hash":missing["manifest"]["manifest_hash"]}))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let uk = upload_asset(&state, &storage, &token, "uk.mp3").await;
+    let mut us = upload_asset(&state, &storage, &token, "us.mp3").await;
+    let us_id = Uuid::parse_str(us["id"].as_str().unwrap()).unwrap();
+    sqlx::query("UPDATE lexicon.audio_assets SET locale='en-US' WHERE id=$1")
+        .bind(us_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    us["locale"] = "en-US".into();
+    let (status, fetched) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", entry.id),
+        &token,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut content = fetched["word"]["forms"].clone();
+    content["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"] =
+        json!([uk, us]);
+    let (status, impact) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{}/steps/forms/impact", entry.id),
+        &token,
+        None,
+        Some(json!({"schema_version":3,"base_revision":entry.revision,"content":content})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    let mut input = json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":content});
+    if let Some(token) = impact["confirmation_token"].as_str() {
+        input["confirmed_impact_token"] = token.into();
+    }
+    if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+        input["confirmed_surface_match_token"] = token.into();
+    }
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{}/steps/forms", entry.id),
+        &token,
+        None,
+        Some(input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let revision = saved["word"]["revision"].as_i64().unwrap();
+    let (status, ready) = call(
+        &state,
+        Method::POST,
+        &check,
+        &token,
+        None,
+        Some(json!({"base_revision":revision})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ready}");
+    assert_eq!(ready["manifest"]["ready"], true, "{ready}");
+    assert_eq!(ready["confirmed"], false);
+    let input =
+        json!({"base_revision":revision,"manifest_hash":ready["manifest"]["manifest_hash"]});
+    let (status, confirmed) = call(
+        &state,
+        Method::POST,
+        &confirm,
+        &token,
+        None,
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    assert_eq!(confirmed["confirmed"], true);
+    let (status, refreshed) = call(
+        &state,
+        Method::POST,
+        &check,
+        &token,
+        None,
+        Some(json!({"base_revision":revision})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed["receipt_id"], confirmed["receipt_id"]);
+    let reader = seed_permission_admin(&pool, &["words.access"]).await;
+    let (status, _) = call(
+        &state,
+        Method::POST,
+        &confirm,
+        &bearer(&state, reader),
+        None,
+        Some(input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(
+        &state,
+        Method::POST,
+        &check,
+        &token,
+        None,
+        Some(json!({"base_revision":entry.revision})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Completing meanings changes the revision: the earlier audio confirmation
+    // must not authorize either single or batch publication of this new draft.
+    let entry = Entry { revision, ..entry };
+    let (status, completed) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{}/steps/meanings", entry.id),
+        &token,
+        None,
+        Some(
+            json!({"schema_version":3,"base_revision":revision,"intent":"complete",
+            "content":complete_meanings(&entry,json!([]))}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    let revision = completed["word"]["revision"].as_i64().unwrap();
+    let publish_path = format!("{ROOT}/entries/{}/publications", entry.id);
+    let publish_input = json!({"schema_version":3,"base_revision":revision});
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &publish_path,
+        &token,
+        Some(Uuid::now_v7()),
+        Some(publish_input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert!(rejected.to_string().contains("审听"), "{rejected}");
+    let batch_input = json!({"schema_version":3,"items":[{"entry_id":entry.id,
+        "base_revision":revision,"base_lifecycle_revision":completed["word"]["lifecycle_revision"]}],"sentences":[]});
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/publications/batch"),
+        &token,
+        Some(Uuid::now_v7()),
+        Some(batch_input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    let unpublished: bool = sqlx::query_scalar(
+        "SELECT current_publication_id IS NULL FROM lexicon.entries WHERE id=$1",
+    )
+    .bind(entry.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(unpublished);
+    let (status, ready) = call(
+        &state,
+        Method::POST,
+        &check,
+        &token,
+        None,
+        Some(json!({"base_revision":revision})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ready}");
+    assert_eq!(ready["confirmed"], false);
+    let (status, confirmed) = call(
+        &state,
+        Method::POST,
+        &confirm,
+        &token,
+        None,
+        Some(json!({"base_revision":revision,"manifest_hash":ready["manifest"]["manifest_hash"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    let key = Uuid::now_v7();
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &publish_path,
+        &token,
+        Some(key),
+        Some(publish_input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let receipt: Uuid = sqlx::query_scalar("SELECT p.audio_review_id FROM lexicon.entry_publications p JOIN lexicon.entries e ON e.current_publication_id=p.id WHERE e.id=$1").bind(entry.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        receipt.to_string(),
+        confirmed["receipt_id"].as_str().unwrap()
+    );
+    let (status, replayed) = call(
+        &state,
+        Method::POST,
+        &publish_path,
+        &token,
+        Some(key),
+        Some(publish_input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(replayed, published);
+}
+
 /// 走完 PR1 的三步直传，返回登记好的资产。
 async fn upload_asset(
     state: &AppState,
     store: &Arc<dyn ObjectStore>,
     bearer: &str,
     original_name: &str,
+) -> Value {
+    upload_asset_locale(state, store, bearer, original_name, "en-GB").await
+}
+
+async fn upload_asset_locale(
+    state: &AppState,
+    store: &Arc<dyn ObjectStore>,
+    bearer: &str,
+    original_name: &str,
+    locale: &str,
 ) -> Value {
     let (status, ticket) = call(
         state,
@@ -162,7 +419,7 @@ async fn upload_asset(
         None,
         Some(json!({
             "key": key.as_str(),
-            "locale": "en-GB",
+            "locale": locale,
             "gender": "female",
             "original_name": original_name
         })),
@@ -170,6 +427,135 @@ async fn upload_asset(
     .await;
     assert_eq!(status, StatusCode::CREATED, "{asset}");
     asset["asset"].clone()
+}
+
+/// Opt-in setup for successful publication cases only. It fills missing default
+/// recordings through ordinary save APIs; selected-but-unready TTS is not hidden.
+async fn prepare_fixture_publication_audio(state: &AppState, token: &str, id: Uuid) -> Value {
+    async fn latest(
+        state: &AppState,
+        token: &str,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+    ) -> Value {
+        let (status, value) = call_audio_contract(state, method, uri, token, body).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        value
+    }
+    let mut current = latest(
+        state,
+        token,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    let check_path = format!("{ROOT}/entries/{id}/publication-audio/check");
+    let (status, review) = call(
+        state,
+        Method::POST,
+        &check_path,
+        token,
+        None,
+        Some(json!({"base_revision":current["word"]["revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    let mut content = current["word"]["forms"].clone();
+    let store = state
+        .object_storage
+        .get(&StorageSpace::parse("audio").unwrap())
+        .unwrap();
+    let mut changed = false;
+    for item in review["manifest"]["items"].as_array().unwrap() {
+        if item["issue"] != "missing_configuration" {
+            continue;
+        }
+        let path = item["source_path"].as_str().unwrap();
+        let Some(path) = path.strip_prefix("/forms") else {
+            continue;
+        };
+        for accent in item["default_for"].as_array().unwrap() {
+            let locale = match accent.as_str().unwrap() {
+                "uk" => "en-GB",
+                "us" => "en-US",
+                other => panic!("unexpected default {other}"),
+            };
+            let asset = upload_asset_locale(
+                state,
+                &store,
+                token,
+                &format!("default-{locale}.mp3"),
+                locale,
+            )
+            .await;
+            let root_keys = content
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            let row = content.pointer_mut(path).unwrap_or_else(|| {
+                panic!(
+                    "source path {path}, target {}, content {}, keys {root_keys:?}",
+                    item["target_id"], item["content_id"]
+                )
+            });
+            let assets = row
+                .as_object_mut()
+                .unwrap()
+                .entry("audio_assets")
+                .or_insert_with(|| json!([]));
+            assets.as_array_mut().unwrap().push(asset);
+            changed = true;
+        }
+    }
+    if changed {
+        let revision = current["word"]["revision"].clone();
+        let impact = latest(
+            state,
+            token,
+            Method::POST,
+            &format!("{ROOT}/entries/{id}/steps/forms/impact"),
+            Some(json!({"schema_version":3,"base_revision":revision,"content":content})),
+        )
+        .await;
+        let mut input = json!({"schema_version":3,"base_revision":revision,"intent":"complete","content":content});
+        if let Some(token) = impact["confirmation_token"].as_str() {
+            input["confirmed_impact_token"] = token.into();
+        }
+        if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+            input["confirmed_surface_match_token"] = token.into();
+        }
+        current = latest(
+            state,
+            token,
+            Method::PUT,
+            &format!("{ROOT}/entries/{id}/steps/forms"),
+            Some(input),
+        )
+        .await;
+    }
+    let (status, ready) = call(
+        state,
+        Method::POST,
+        &check_path,
+        token,
+        None,
+        Some(json!({"base_revision":current["word"]["revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ready}");
+    assert_eq!(
+        ready["manifest"]["ready"], true,
+        "fixture must explicitly prepare all selected versions: {ready}"
+    );
+    let (status,confirmed) = call(state,Method::POST,&format!("{ROOT}/entries/{id}/publication-audio/confirm"),token,None,
+        Some(json!({"base_revision":current["word"]["revision"],"manifest_hash":ready["manifest"]["manifest_hash"]}))).await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    assert_eq!(confirmed["confirmed"], true);
+    current
 }
 
 async fn seed_dictionary_word(pool: &PgPool, word: &str) {
@@ -872,6 +1258,7 @@ async fn generated_version_audio_survives_save_publication_and_draft_removal(poo
         json!(-25);
     let (status,_)=call(&state,Method::PUT,&format!("{ROOT}/entries/{}/steps/meanings",entry.id),&bearer,None,Some(json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"save","content":stale}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let saved = prepare_fixture_publication_audio(&state, &bearer, entry.id).await;
     let (status, published) = call(
         &state,
         Method::POST,
@@ -1112,6 +1499,19 @@ async fn native_generated_audio_saves_reopens_publishes_and_blocks_old_writes(po
     );
     let (status,_)=call(&state,Method::PUT,&path,&bearer,None,Some(json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"save","content":old["word"]["meanings"]}))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let saved = prepare_fixture_publication_audio(&state, &bearer, entry.id).await;
+    let expected_refs: Vec<Uuid> = sqlx::query_scalar("SELECT asset_id FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='draft' ORDER BY asset_id").bind(entry.id).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        expected_refs.len(),
+        7,
+        "five selected/retained generated versions plus two default recordings"
+    );
+    for voice in &voices {
+        assert!(
+            expected_refs
+                .contains(&Uuid::parse_str(voice["audio_asset_id"].as_str().unwrap()).unwrap())
+        );
+    }
     let published = tsz_rust::router(state.clone())
         .oneshot(
             Request::builder()
@@ -1142,8 +1542,8 @@ async fn native_generated_audio_saves_reopens_publishes_and_blocks_old_writes(po
         snapshot["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"]["voices"],
         json!(voices)
     );
-    let count:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='publication'").bind(entry.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(count, 5);
+    let published_refs: Vec<Uuid> = sqlx::query_scalar("SELECT asset_id FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='publication' ORDER BY asset_id").bind(entry.id).fetch_all(&pool).await.unwrap();
+    assert_eq!(published_refs, expected_refs);
 }
 
 #[sqlx::test]
@@ -1188,6 +1588,8 @@ async fn generated_grammar_audio_can_publish_with_its_draft_target_in_one_batch(
     variant["voice_profile"] = json!({"voices":[setting]});
     let (status, source_saved) = call(&state, Method::PUT, &format!("{ROOT}/entries/{}/steps/meanings", source.id), &bearer, None, Some(json!({"schema_version":3,"base_revision":source.revision,"intent":"complete","content":meanings}))).await;
     assert_eq!(status, StatusCode::OK, "{source_saved}");
+    let target_saved = prepare_fixture_publication_audio(&state, &bearer, target.id).await;
+    let source_saved = prepare_fixture_publication_audio(&state, &bearer, source.id).await;
     let items = [&source_saved, &target_saved].map(|saved| json!({"entry_id":saved["word"]["id"],"base_revision":saved["word"]["revision"],"base_lifecycle_revision":saved["word"]["lifecycle_revision"]}));
     let (status, published) = call(
         &state,
@@ -1259,6 +1661,9 @@ async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(po
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
 
+    let saved = prepare_fixture_publication_audio(&state, &bearer, entry.id).await;
+    let expected_defaults: Vec<Uuid> = sqlx::query_scalar("SELECT asset_id FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='draft' AND asset_id<>$2 ORDER BY asset_id").bind(entry.id).bind(Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap()).fetch_all(&pool).await.unwrap();
+    assert_eq!(expected_defaults.len(), 2);
     let (status, published) = call(
         &state,
         Method::POST,
@@ -1326,6 +1731,7 @@ async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(po
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
+    let draft = prepare_fixture_publication_audio(&state, &bearer, entry.id).await;
     let (status, current) = call(
         &state,
         Method::POST,
@@ -1336,7 +1742,11 @@ async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(po
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{current}");
-    assert_eq!(draft_reference_count(&pool, entry.id).await, 0);
+    let remaining: Vec<Uuid> = sqlx::query_scalar("SELECT asset_id FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='draft' ORDER BY asset_id").bind(entry.id).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        remaining, expected_defaults,
+        "only pronunciation defaults remain; removed grammar audio is retained by history"
+    );
     age_asset(&pool, &asset["id"]).await;
     assert_eq!(
         tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
@@ -1863,6 +2273,7 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
     let mut state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let store = configure_audio(&mut state);
+    state.speech_provider = Some(Arc::new(GeneratedProvider));
     let bearer = bearer(&state, seed_publisher(&pool).await);
     let mut entry = create_entry(&state, &pool, &bearer, "pronunciationeditor").await;
     let asset = upload_asset(&state, &store, &bearer, "pronunciation.mp3").await;
@@ -1879,7 +2290,12 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
     let row = &mut forms["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0];
     let text = row["dict_phonetic"].as_str().unwrap().to_owned();
     row["dict_phonetic_rich"] = json!({"version":2,"text":text,"annotations":[{"type":"highlight","start":0,"end":1,"color":"yellow"}]});
-    row["voice_profile"] = json!({"voices":[{"voice_id":"en-GB-SoniaNeural","enabled":true,"rate_percent":-10},{"voice_id":"en-GB-RyanNeural","enabled":false,"rate_percent":25}]});
+    sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,'sonia-editor','azure','en-GB-SoniaNeural','en-GB','female','[]','v1')").bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+    let mut setting = json!({"version_id":Uuid::now_v7(),"version_name":"审听版本","locale":"en-GB","voice_id":"sonia-editor","enabled":true,"rate_percent":-10});
+    let (status,generated)=call(&state,Method::POST,"/api/v1/admin/speech/audio",&bearer,None,Some(json!({"request_id":Uuid::now_v7(),"source":{"kind":"text","content":row["dict_phonetic_rich"]},"setting":setting}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{generated}");
+    setting["audio_asset_id"] = generated["asset"]["id"].clone();
+    row["voice_profile"] = json!({"voices":[setting,{"voice_id":"en-GB-RyanNeural","enabled":false,"rate_percent":25}]});
     let expected_profile = row["voice_profile"].clone();
     let mut tampered = asset.clone();
     tampered["original_name"] = json!("forged.mp3");
@@ -1891,13 +2307,13 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
         [0];
     assert_eq!(row["audio_assets"][0]["original_name"], "pronunciation.mp3");
     assert_eq!(row["dict_phonetic_rich"], expected_rich);
-    assert_eq!(draft_reference_count(&pool, entry.id).await, 1);
+    assert_eq!(draft_reference_count(&pool, entry.id).await, 2);
     entry.revision = saved["word"]["revision"].as_i64().unwrap();
     let (status, saved) = call(&state, Method::PUT, &format!("{ROOT}/entries/{}/steps/meanings", entry.id), &bearer, None, Some(json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":complete_meanings(&entry,json!([]))}))).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(
         draft_reference_count(&pool, entry.id).await,
-        1,
+        2,
         "saving meanings must keep forms audio references"
     );
     let (status, fetched) = call(
@@ -1914,6 +2330,7 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
         [0];
     assert_eq!(row["dict_phonetic_rich"], expected_rich);
     assert_eq!(row["voice_profile"], expected_profile);
+    let saved = prepare_fixture_publication_audio(&state, &bearer, entry.id).await;
     let (status, published) = call(
         &state,
         Method::POST,
@@ -1948,7 +2365,14 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
     assert_eq!(pronunciation["dict_phonetic_rich"], expected_rich);
     assert_eq!(pronunciation["voice_profile"], expected_profile);
     let refs:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='publication'").bind(entry.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(refs, 1);
+    assert_eq!(
+        refs, 3,
+        "uploaded UK, selected generated UK and the US default are all retained"
+    );
+    for expected in [&asset["id"], &generated["asset"]["id"]] {
+        let retained: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='publication' AND asset_id=$2)").bind(entry.id).bind(Uuid::parse_str(expected.as_str().unwrap()).unwrap()).fetch_one(&pool).await.unwrap();
+        assert!(retained);
+    }
 }
 
 #[sqlx::test]
@@ -2245,25 +2669,23 @@ async fn save_permission_audio_asset(
         return call(state, Method::PUT, &format!("{ROOT}/entries/{}/steps/meanings", entry.id), token, None,
             Some(json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":complete_meanings(entry,json!([asset.clone()]))}))).await;
     }
-    let (status, fetched) = call(
+    let (status, fetched) = call_audio_contract(
         state,
         Method::GET,
         &format!("{ROOT}/entries/{}", entry.id),
         token,
         None,
-        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{fetched}");
     let mut content = fetched["word"]["forms"].clone();
-    content["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"] =
+    content["contents"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"] =
         json!([asset.clone()]);
-    let (status, impact) = call(
+    let (status, impact) = call_audio_contract(
         state,
         Method::POST,
         &format!("{ROOT}/entries/{}/steps/forms/impact", entry.id),
         token,
-        None,
         Some(json!({"schema_version":3,"base_revision":entry.revision,"content":content.clone()})),
     )
     .await;
@@ -2278,15 +2700,52 @@ async fn save_permission_audio_asset(
     if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
         input["confirmed_surface_match_token"] = json!(token);
     }
-    call(
+    call_audio_contract(
         state,
         Method::PUT,
         &format!("{ROOT}/entries/{}/steps/forms", entry.id),
         token,
-        None,
         Some(input),
     )
     .await
+}
+
+async fn call_audio_contract(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    token: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("X-TSZ-Voice-Versions", "v3");
+    for h in [
+        "X-TSZ-Form-Contents",
+        "X-TSZ-Voice-Locales",
+        "X-TSZ-Voice-Models",
+        "X-TSZ-Spelling-Markup",
+        "X-TSZ-Spelling-Speech",
+        "X-TSZ-Phoneme-Speech",
+        "X-TSZ-Sentence-Formatting",
+    ] {
+        request = request.header(h, "v1");
+    }
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            request
+                .body(body.map_or_else(Body::empty, |v| Body::from(v.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    (status, value)
 }
 
 async fn assert_private_audio_binding(pool: PgPool, forms: bool) {
@@ -2378,6 +2837,8 @@ async fn assert_private_audio_binding(pool: PgPool, forms: bool) {
         "编辑他人词条时可保留该词条已有的合法资产：{edited}"
     );
     entry.revision = edited["word"]["revision"].as_i64().unwrap();
+    let prepared = prepare_fixture_publication_audio(&state, &writer_token, entry.id).await;
+    entry.revision = prepared["word"]["revision"].as_i64().unwrap();
     let (status, published) = call(
         &state,
         Method::POST,

@@ -59,160 +59,11 @@ pub async fn entries(
             continue;
         };
         let native = publication.content_v3()?;
-        let mut audio = Vec::new();
-        for pos in &native.forms.pos {
-            for form in &pos.forms {
-                let variants = match &form.regional_variants {
-                    WordRegionalVariantsV3::Common { common } => {
-                        vec![(
-                            common.id,
-                            Dialect::Common,
-                            &common.spelling_speech,
-                            &common.pronunciations,
-                        )]
-                    }
-                    WordRegionalVariantsV3::UkUs { uk, us } => vec![
-                        (uk.id, Dialect::Uk, &uk.spelling_speech, &uk.pronunciations),
-                        (us.id, Dialect::Us, &us.spelling_speech, &us.pronunciations),
-                    ],
-                };
-                for (variant_id, source_dialect, spelling_speech, pronunciations) in variants {
-                    if let Some(speech) = spelling_speech {
-                        generated_audio(
-                            &mut audio,
-                            variant_id,
-                            source_dialect,
-                            Some(&speech.voice_profile),
-                        );
-                        uploaded_audio(
-                            &mut audio,
-                            variant_id,
-                            source_dialect,
-                            &speech.audio_assets,
-                        );
-                    }
-                    for pronunciation in pronunciations {
-                        generated_audio(
-                            &mut audio,
-                            pronunciation.id,
-                            source_dialect,
-                            pronunciation.voice_profile.as_ref(),
-                        );
-                        if let Some(synthesis) = &pronunciation.synthesis {
-                            if synthesis.use_spelling == Some(true) {
-                                if let Some(speech) = spelling_speech {
-                                    generated_audio(
-                                        &mut audio,
-                                        pronunciation.id,
-                                        source_dialect,
-                                        Some(&speech.voice_profile),
-                                    );
-                                }
-                            } else {
-                                for (phoneme_dialect, candidate) in
-                                    [(Dialect::Uk, &synthesis.uk), (Dialect::Us, &synthesis.us)]
-                                        .into_iter()
-                                        .filter_map(|(dialect, value)| {
-                                            value.as_ref().map(|value| (dialect, value))
-                                        })
-                                {
-                                    let speech = match synthesis.alphabet {
-                                        RichTextPhonemeAlphabet::Ipa => &candidate.ipa_speech,
-                                        RichTextPhonemeAlphabet::Ups => &candidate.ups_speech,
-                                    };
-                                    if let Some(speech) = speech {
-                                        generated_audio(
-                                            &mut audio,
-                                            pronunciation.id,
-                                            phoneme_dialect,
-                                            Some(&speech.voice_profile),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for pos in &native.forms.pos {
-            for form in &pos.forms {
-                let variants = match &form.regional_variants {
-                    WordRegionalVariantsV3::Common { common } => {
-                        vec![(Dialect::Common, &common.pronunciations)]
-                    }
-                    WordRegionalVariantsV3::UkUs { uk, us } => {
-                        vec![
-                            (Dialect::Uk, &uk.pronunciations),
-                            (Dialect::Us, &us.pronunciations),
-                        ]
-                    }
-                };
-                for (source_dialect, variant) in variants {
-                    for sound in variant {
-                        audio.extend(sound.audio_assets.iter().map(|a| DictionaryAudio {
-                            target_id: sound.id,
-                            asset_id: a.id,
-                            locale: a.locale.as_str().into(),
-                            accent_group: a.locale.accent_group(),
-                            source_dialect,
-                            hd_flash: false,
-                        }));
-                    }
-                }
-            }
-        }
+        let mut audio = own_audio(&native);
         let mut examples = Vec::new();
         for pos in &native.meanings.pos {
-            for grammar in &pos.grammar_structures {
-                for variant in &grammar.variants {
-                    generated_audio(
-                        &mut audio,
-                        grammar.id,
-                        variant.dialect,
-                        variant.voice_profile.as_ref(),
-                    );
-                    audio.extend(variant.audio_assets.iter().map(|a| DictionaryAudio {
-                        target_id: grammar.id,
-                        asset_id: a.id,
-                        locale: a.locale.as_str().into(),
-                        accent_group: a.locale.accent_group(),
-                        source_dialect: variant.dialect,
-                        hd_flash: false,
-                    }));
-                }
-            }
             for sense in &pos.senses {
-                for definition in &sense.definitions {
-                    if let WordDefinitionV3::EnDefinition { id, content, .. }
-                    | WordDefinitionV3::EnSentence { id, content, .. } = definition
-                    {
-                        for (source_dialect, variant) in sourced_english_variants(content) {
-                            generated_audio(
-                                &mut audio,
-                                *id,
-                                source_dialect,
-                                variant.voice_profile.as_ref(),
-                            );
-                            uploaded_audio(&mut audio, *id, source_dialect, &variant.audio_assets);
-                        }
-                    }
-                }
                 for sentence in &sense.sentences {
-                    for (source_dialect, variant) in sourced_english_variants(&sentence.en_text) {
-                        generated_audio(
-                            &mut audio,
-                            sentence.id,
-                            source_dialect,
-                            variant.voice_profile.as_ref(),
-                        );
-                        uploaded_audio(
-                            &mut audio,
-                            sentence.id,
-                            source_dialect,
-                            &variant.audio_assets,
-                        );
-                    }
                     examples.push(DictionaryExample {
                         id: sentence.id,
                         sense_id: sense.id,
@@ -278,6 +129,15 @@ pub async fn entries(
                 translation: sentence.zh_text,
             });
         }
+        let mut seen_audio = std::collections::HashSet::new();
+        audio.retain(|item| {
+            seen_audio.insert((
+                item.target_id,
+                item.asset_id,
+                item.locale.clone(),
+                std::mem::discriminant(&item.source_dialect),
+            ))
+        });
         result.push(DictionaryEntry {
             content,
             audio,
@@ -285,6 +145,182 @@ pub async fn entries(
         });
     }
     Ok(result)
+}
+
+// The immutable publication is the authority for selectable owned audio. Sharing
+// this collector with the reader keeps signing independent of display projection.
+fn own_audio(native: &published::PublishedContentV3) -> Vec<DictionaryAudio> {
+    let mut audio = Vec::new();
+    for pos in &native.forms.pos {
+        for form in &pos.forms {
+            let variants = match &form.regional_variants {
+                WordRegionalVariantsV3::Common { common } => {
+                    vec![(
+                        common.id,
+                        Dialect::Common,
+                        &common.spelling_speech,
+                        &common.pronunciations,
+                    )]
+                }
+                WordRegionalVariantsV3::UkUs { uk, us } => vec![
+                    (uk.id, Dialect::Uk, &uk.spelling_speech, &uk.pronunciations),
+                    (us.id, Dialect::Us, &us.spelling_speech, &us.pronunciations),
+                ],
+            };
+            for (variant_id, source_dialect, spelling_speech, pronunciations) in variants {
+                if let Some(speech) = spelling_speech {
+                    generated_audio(
+                        &mut audio,
+                        variant_id,
+                        source_dialect,
+                        Some(&speech.voice_profile),
+                    );
+                    uploaded_audio(&mut audio, variant_id, source_dialect, &speech.audio_assets);
+                }
+                for pronunciation in pronunciations {
+                    if pronunciation.synthesis.is_none() {
+                        generated_audio(
+                            &mut audio,
+                            pronunciation.id,
+                            source_dialect,
+                            pronunciation.voice_profile.as_ref(),
+                        );
+                    }
+                    if let Some(synthesis) = &pronunciation.synthesis {
+                        if synthesis.use_spelling == Some(true) {
+                            if let Some(speech) = spelling_speech {
+                                generated_audio(
+                                    &mut audio,
+                                    pronunciation.id,
+                                    source_dialect,
+                                    Some(&speech.voice_profile),
+                                );
+                                uploaded_audio(
+                                    &mut audio,
+                                    pronunciation.id,
+                                    source_dialect,
+                                    &speech.audio_assets,
+                                );
+                            }
+                        } else {
+                            for (phoneme_dialect, candidate) in
+                                [(Dialect::Uk, &synthesis.uk), (Dialect::Us, &synthesis.us)]
+                                    .into_iter()
+                                    .filter_map(|(dialect, value)| {
+                                        value.as_ref().map(|value| (dialect, value))
+                                    })
+                            {
+                                let speech = match synthesis.alphabet {
+                                    RichTextPhonemeAlphabet::Ipa => &candidate.ipa_speech,
+                                    RichTextPhonemeAlphabet::Ups => &candidate.ups_speech,
+                                };
+                                if let Some(speech) = speech {
+                                    generated_audio(
+                                        &mut audio,
+                                        pronunciation.id,
+                                        phoneme_dialect,
+                                        Some(&speech.voice_profile),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    uploaded_audio(
+                        &mut audio,
+                        pronunciation.id,
+                        source_dialect,
+                        &pronunciation.audio_assets,
+                    );
+                    if pronunciation.synthesis.is_some() {
+                        generated_audio(
+                            &mut audio,
+                            pronunciation.id,
+                            source_dialect,
+                            pronunciation.voice_profile.as_ref(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for pos in &native.meanings.pos {
+        for grammar in &pos.grammar_structures {
+            for variant in &grammar.variants {
+                generated_audio(
+                    &mut audio,
+                    grammar.id,
+                    variant.dialect,
+                    variant.voice_profile.as_ref(),
+                );
+                audio.extend(variant.audio_assets.iter().map(|a| DictionaryAudio {
+                    target_id: grammar.id,
+                    asset_id: a.id,
+                    locale: a.locale.as_str().into(),
+                    accent_group: a.locale.accent_group(),
+                    source_dialect: variant.dialect,
+                    hd_flash: false,
+                }));
+            }
+        }
+        for sense in &pos.senses {
+            for definition in &sense.definitions {
+                if let WordDefinitionV3::EnDefinition { id, content, .. }
+                | WordDefinitionV3::EnSentence { id, content, .. } = definition
+                {
+                    for (source_dialect, variant) in sourced_english_variants(content) {
+                        generated_audio(
+                            &mut audio,
+                            *id,
+                            source_dialect,
+                            variant.voice_profile.as_ref(),
+                        );
+                        uploaded_audio(&mut audio, *id, source_dialect, &variant.audio_assets);
+                    }
+                }
+            }
+            for sentence in &sense.sentences {
+                for (source_dialect, variant) in sourced_english_variants(&sentence.en_text) {
+                    generated_audio(
+                        &mut audio,
+                        sentence.id,
+                        source_dialect,
+                        variant.voice_profile.as_ref(),
+                    );
+                    uploaded_audio(
+                        &mut audio,
+                        sentence.id,
+                        source_dialect,
+                        &variant.audio_assets,
+                    );
+                }
+            }
+        }
+    }
+    audio
+}
+
+pub(crate) async fn audio_available(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    asset_id: Uuid,
+    models_supported: bool,
+) -> Result<bool, AppError> {
+    let Some(publication) = published::read_current_in(tx, &[id]).await?.remove(&id) else {
+        return Ok(false);
+    };
+    let native = publication.content_v3()?;
+    let allowed = |audio: &DictionaryAudio| {
+        audio.asset_id == asset_id && (models_supported || !audio.hd_flash)
+    };
+    if own_audio(&native).iter().any(allowed) {
+        return Ok(true);
+    }
+    // Shared sentences have independent publication, hide and withdrawal state.
+    // Keep their existing visibility boundary instead of caching it by word revision.
+    Ok(entries(tx, &[id])
+        .await?
+        .into_iter()
+        .any(|entry| entry.audio.iter().any(allowed)))
 }
 
 fn sourced_english_variants(

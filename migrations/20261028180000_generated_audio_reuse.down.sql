@@ -1,0 +1,1 @@
+DROP INDEX lexicon.audio_generations_owned_effect_ready_idx;

@@ -2,6 +2,10 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashSet;
 
+use crate::speech::publication_audio::{
+    self,
+    review::{self as audio_review, Owner, Reviewer},
+};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -50,13 +54,14 @@ pub(crate) struct PublicationBatchContext {
 impl LexiconService {
     pub async fn publish_v3(
         &self,
-        actor_id: Uuid,
+        reviewer: Reviewer,
         request_id: Uuid,
         entry_id: Uuid,
         idempotency_key: Uuid,
         input: PublishAdminWordV3Input,
         allow_automatic_associations: bool,
     ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
+        let actor_id = reviewer.actor_id;
         let request_hash = sha256_json(&serde_json::json!({
             "entry_id": entry_id,
             "input": input,
@@ -112,6 +117,10 @@ impl LexiconService {
         }
         let state = v3_publication_state_for_update(&mut tx, entry_id).await?;
         ensure_v3_publication_eligibility(&mut tx, entry_id, &state).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
 
         let publication_references = self
             .validate_publication_content(&mut tx, &authorization, &mut word, None)
@@ -204,6 +213,16 @@ impl LexiconService {
         .await?;
         hydrate_audio_asset_metadata(&mut tx, &mut word.meanings).await?;
         Self::hydrate_v3_sentence_associations_in(&mut tx, entry_id, &mut word.meanings).await?;
+        let audio_receipt = audio_review::require_confirmed_in(
+            &mut tx,
+            reviewer,
+            Owner::Entry(entry_id),
+            word.revision,
+            publication_audio::entry_requirements(&word)?,
+            Some((entry_id, &word.forms)),
+            None,
+        )
+        .await?;
         word.status = AdminWordStatus::Published;
         word.published_revision = Some(word.revision);
         word.has_unpublished_changes = false;
@@ -213,6 +232,13 @@ impl LexiconService {
 
         let publication =
             insert_v3_publication(&mut tx, actor_id, &word, &publication_references).await?;
+        audio_review::attach_receipt_in(
+            &mut tx,
+            Owner::Entry(entry_id),
+            publication.id,
+            audio_receipt,
+        )
+        .await?;
         replace_current_publication_surfaces_v3(
             &mut tx,
             publication.id,
@@ -464,12 +490,13 @@ impl LexiconService {
 
     pub async fn publish_batch_v3(
         &self,
-        actor_id: Uuid,
+        reviewer: Reviewer,
         request_id: Uuid,
         idempotency_key: Uuid,
         input: crate::lexicon::dto::BatchPublicationInputV3,
         allow_automatic_associations: bool,
     ) -> Result<crate::lexicon::dto::BatchPublicationResponseV3, LexiconServiceError> {
+        let actor_id = reviewer.actor_id;
         use crate::lexicon::dto::BatchPublicationResponseV3;
         const SCOPE: &str = "lexicon.publication.batch.v3";
         use crate::lexicon::shared_sentences::publication as sentences;
@@ -635,17 +662,29 @@ impl LexiconService {
             result.map_err(|source| batch_error(item.entry_id, source))?;
         }
         let mut sentence_items = input.sentences.iter().collect::<Vec<_>>();
+        sqlx::query(
+            "SELECT id FROM lexicon.shared_sentences WHERE id=ANY($1) ORDER BY id FOR UPDATE",
+        )
+        .bind(&sentence_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
         sentence_items.sort_by_key(|item| item.sentence_id);
         let mut prepared_sentences = Vec::new();
         for item in sentence_items {
             let prepared =
-                sentences::prepare(&mut tx, actor_id, is_super_admin, item, Some(&batch))
+                sentences::prepare(&mut tx, reviewer, is_super_admin, item, Some(&batch))
                     .await
                     .map_err(|error| sentence_batch_error(item.sentence_id, error))?;
             batch.sentences.insert(item.sentence_id);
             prepared_sentences.push(prepared);
         }
         let mut prepared = Vec::new();
+        let mut audio_receipts = HashMap::new();
         for item in &sorted {
             let (record, mut word) = records
                 .remove(&item.entry_id)
@@ -680,6 +719,20 @@ impl LexiconService {
             .await;
             let (word, references, confirmation) =
                 result.map_err(|source| batch_error(item.entry_id, source))?;
+            if !reused.contains_key(&word.id) {
+                let receipt = audio_review::require_confirmed_in(
+                    &mut tx,
+                    reviewer,
+                    Owner::Entry(word.id),
+                    word.revision,
+                    publication_audio::entry_requirements(&word)?,
+                    Some((word.id, &word.forms)),
+                    Some(&batch),
+                )
+                .await
+                .map_err(|error| batch_error(word.id, error.into()))?;
+                audio_receipts.insert(word.id, receipt);
+            }
             prepared.push((record, word, references, confirmation));
         }
         let mut publications = HashMap::new();
@@ -700,6 +753,15 @@ impl LexiconService {
                 .await
                 .map_err(|source| batch_error(word.id, source))?,
             };
+            if let Some(receipt) = audio_receipts.remove(&word.id) {
+                audio_review::attach_receipt_in(
+                    &mut tx,
+                    Owner::Entry(word.id),
+                    publication.id,
+                    receipt,
+                )
+                .await?;
+            }
             publications.insert(word.id, publication);
         }
         for sentence in &prepared_sentences {

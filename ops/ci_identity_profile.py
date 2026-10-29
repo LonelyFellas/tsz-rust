@@ -180,7 +180,7 @@ def instrument_units(snapshot):
 BATCH_TEST = "lexicon_handler::batch5::batch5_list_references_and_maximum_batch_measurement"
 BATCH_COUNTS = {"forms-impact-save": 50, "initial-meanings-save": 50, "relation-save": 50, "list-read": 20, "references-read": 20}
 BATCH_FIXTURES = {"empty-fixture", "content-fixture", "relation-fixture", "publish-assertions", "list-reference-assertions"}
-BATCH_HTTP_REQUESTS = {"detection": 1, "create": 1, "forms-impact": 50, "forms-save": 50, "meanings-save": 100, "publish-batch": 1, "list": 20, "references": 20}
+BATCH_HTTP_REQUESTS = {"detection": 1, "create": 1, "forms-impact": 50, "forms-save": 50, "meanings-save": 100, "publish-batch": 1, "audio-check": 50, "audio-confirm": 50, "list": 20, "references": 20}
 
 
 def audit_router_pilot(report):
@@ -188,7 +188,7 @@ def audit_router_pilot(report):
     if len(rows) != 1:
         raise ValueError("missing or duplicate router pilot report")
     row = rows[0]
-    if row["test"] != BATCH_TEST or type(row["router_builds"]) is not int or row["router_builds"] != 1 or type(row["unique_request_ids"]) is not int or row["unique_request_ids"] != 243 or row["requests"] != BATCH_HTTP_REQUESTS or any(type(v) is not int for v in row["requests"].values()):
+    if row["test"] != BATCH_TEST or type(row["router_builds"]) is not int or row["router_builds"] != 1 or type(row["unique_request_ids"]) is not int or row["unique_request_ids"] != 343 or row["requests"] != BATCH_HTTP_REQUESTS or any(type(v) is not int for v in row["requests"].values()):
         raise ValueError("router pilot changed the request inventory or scope")
     if not any(f"{r['target']}::{r['name']}" == BATCH_TEST and r["status"] == "ok" for r in report["executed"]):
         raise ValueError("router pilot did not complete its original case")

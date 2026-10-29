@@ -14,7 +14,7 @@ fn assert_legacy_word(word: &Value) {
 #[sqlx::test]
 async fn markup_negotiation_preserves_cached_publish_history_and_lifecycle(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
@@ -51,6 +51,7 @@ async fn markup_negotiation_preserves_cached_publish_history_and_lifecycle(pool:
     .await;
     assert_eq!(loaded["word"]["forms"], expected);
 
+    confirm_audio(&state, &bearer, &loaded).await;
     let key = Uuid::now_v7();
     let input = json!({"schema_version":3,"base_revision":loaded["word"]["revision"]});
     let uri = format!("{ROOT}/entries/{id}/publications");
@@ -148,6 +149,7 @@ async fn markup_negotiation_preserves_cached_publish_history_and_lifecycle(pool:
         forms,
     )
     .await;
+    confirm_audio(&state, &bearer, &changed).await;
     let body = json!({"schema_version":3,"items":[{"entry_id":id,"base_revision":changed["word"]["revision"],"base_lifecycle_revision":changed["word"]["lifecycle_revision"]}]});
     let key = Uuid::now_v7();
     let path = format!("{ROOT}/entries/publications/batch");

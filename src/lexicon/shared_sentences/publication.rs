@@ -1,3 +1,7 @@
+use crate::speech::publication_audio::{
+    self,
+    review::{self as audio_review, Owner, Reviewer},
+};
 use axum::{Extension, Json, extract::State, http::HeaderMap};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -78,6 +82,7 @@ pub(crate) struct PreparedSentence {
     pub revision: i64,
     pub lifecycle_revision: i64,
     pub is_new: bool,
+    pub audio_review_id: Option<Uuid>,
 }
 
 pub(crate) fn digest(value: &impl Serialize) -> Result<String, AppError> {
@@ -287,11 +292,12 @@ pub(crate) fn reference_error(error: sqlx::Error) -> AppError {
 
 pub(crate) async fn prepare(
     tx: &mut Transaction<'_, Postgres>,
-    actor: Uuid,
+    reviewer: Reviewer,
     super_admin: bool,
     item: &SentenceBatchItem,
     batch: Option<&PublicationBatchContext>,
 ) -> Result<PreparedSentence, AppError> {
+    let actor = reviewer.actor_id;
     owner(
         tx,
         item.sentence_id,
@@ -303,6 +309,10 @@ pub(crate) async fn prepare(
         },
     )
     .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
+        .execute(&mut **tx)
+        .await
+        .map_err(AppError::internal)?;
     let mut content = read_on(tx, item.sentence_id).await?.content;
     let source_revision = item.base_revision;
     let existing = sqlx::query("SELECT id,snapshot FROM lexicon.shared_sentence_publications WHERE sentence_id=$1 AND source_revision=$2 AND rollback_of_publication_id IS NULL")
@@ -332,6 +342,20 @@ pub(crate) async fn prepare(
     if let Some(row) = &existing {
         content = serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?;
     }
+    let audio_review_id = if existing.is_none() {
+        audio_review::require_confirmed_in(
+            tx,
+            reviewer,
+            Owner::Sentence(item.sentence_id),
+            source_revision,
+            publication_audio::sentence_requirements(&content.sentence.en_text)?,
+            None,
+            batch,
+        )
+        .await?
+    } else {
+        None
+    };
     Ok(PreparedSentence {
         id: item.sentence_id,
         publication_id: existing
@@ -341,6 +365,7 @@ pub(crate) async fn prepare(
         revision: source_revision,
         lifecycle_revision: item.base_lifecycle_revision,
         is_new: existing.is_none(),
+        audio_review_id,
     })
 }
 
@@ -354,6 +379,13 @@ pub(crate) async fn insert_version(
             .bind(prepared.publication_id).bind(prepared.id).bind(prepared.revision)
             .bind(serde_json::to_value(&prepared.content).map_err(AppError::internal)?).bind(actor)
             .execute(&mut **tx).await.map_err(AppError::internal)?;
+        audio_review::attach_receipt_in(
+            tx,
+            Owner::Sentence(prepared.id),
+            prepared.publication_id,
+            prepared.audio_review_id,
+        )
+        .await?;
         audio::insert(
             tx,
             prepared.id,
@@ -426,13 +458,14 @@ pub(crate) async fn activate(
 
 async fn publish_command(
     state: &AppState,
-    actor: Uuid,
+    reviewer: Reviewer,
     request: Uuid,
     id: Uuid,
     key: Uuid,
     input: SentencePublicationInput,
     historical_id: Option<Uuid>,
 ) -> Result<SharedSentence, AppError> {
+    let actor = reviewer.actor_id;
     let scope = if historical_id.is_some() {
         "lexicon.shared_sentence.rollback"
     } else {
@@ -515,7 +548,7 @@ async fn publish_command(
     }
     let prepared = prepare(
         &mut tx,
-        actor,
+        reviewer,
         super_admin,
         &SentenceBatchItem {
             sentence_id: id,
@@ -546,7 +579,19 @@ pub async fn publish(
     formatting_response(
         &headers,
         StatusCode::OK,
-        publish_command(&state, admin.id, request.as_uuid(), id, key, input, None).await?,
+        publish_command(
+            &state,
+            Reviewer {
+                actor_id: admin.id,
+                security_version: auth.security_version,
+            },
+            request.as_uuid(),
+            id,
+            key,
+            input,
+            None,
+        )
+        .await?,
     )
 }
 
@@ -567,7 +612,10 @@ pub async fn rollback(
         StatusCode::OK,
         publish_command(
             &state,
-            admin.id,
+            Reviewer {
+                actor_id: admin.id,
+                security_version: auth.security_version,
+            },
             request.as_uuid(),
             id,
             key,

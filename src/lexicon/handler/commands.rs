@@ -348,7 +348,10 @@ pub async fn publish(
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
         .publish_v3(
-            admin.id,
+            crate::speech::publication_audio::review::Reviewer {
+                actor_id: admin.id,
+                security_version: auth.security_version,
+            },
             request_id.as_uuid(),
             path.id,
             idempotency_key,
@@ -569,7 +572,16 @@ pub async fn publish_batch(
     }
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
-        .publish_batch_v3(admin.id, request_id.as_uuid(), key, input, false)
+        .publish_batch_v3(
+            crate::speech::publication_audio::review::Reviewer {
+                actor_id: admin.id,
+                security_version: auth.security_version,
+            },
+            request_id.as_uuid(),
+            key,
+            input,
+            false,
+        )
         .await
         .map_err(map_error)?;
     for word in &mut response.words {

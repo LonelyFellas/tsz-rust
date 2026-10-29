@@ -555,6 +555,16 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "POST",
+        "/lexicon/entries/{id}/publication-audio/check",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/{id}/publication-audio/confirm",
+        RoutePolicy::All(&["words.access", "words.publish"]),
+    ),
+    (
+        "POST",
         "/lexicon/entries",
         RoutePolicy::All(&["words.create"]),
     ),
@@ -643,6 +653,16 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         "GET",
         "/lexicon/sentences/{id}/publications",
         RoutePolicy::All(&["sentences.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon/sentences/{id}/publication-audio/check",
+        RoutePolicy::All(&["sentences.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon/sentences/{id}/publication-audio/confirm",
+        RoutePolicy::All(&["sentences.access", "sentences.publish"]),
     ),
     (
         "GET",
