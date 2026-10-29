@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backup_alert import replica_is_current
-from backup_archive_oss import connect, digest_stream, identity, read_config, validate_config
+from backup_archive_oss import agent_manifest, connect, digest_stream, identity, read_config, validate_config
 from postgresql_backup_job import inspect_status
 
 
@@ -25,7 +25,12 @@ def replica_has_archive(config, receipt):
         if target['bucket'] == storage['bucket'] or target['region'] == storage['region']:
             return False
         key = identity(receipt['backup_id'], receipt['sha256'])
-        response = connect(target).get_object(key)
+        bucket = connect(target)
+        if config.get('verification_kind') == 'agent':
+            manifest = agent_manifest(bucket, receipt['backup_id'])
+            if manifest['sha256'] != receipt['sha256'] or manifest['bytes'] != receipt['bytes']:
+                return False
+        response = bucket.get_object(key)
         if (response.content_length != receipt['bytes']
                 or response.headers.get('x-oss-server-side-encryption') != 'AES256'):
             response.close()
@@ -58,7 +63,8 @@ def prune(config, *, now=None):
         removed = 0
         unverified = False
         for folder in root.iterdir():
-            if not re.fullmatch(r'scheduled-\d{8}T\d{6}Z-[0-9a-f]{32}', folder.name):
+            prefix = 'scheduled-agent-' if config.get('verification_kind') == 'agent' else 'scheduled-'
+            if not re.fullmatch(prefix + r'\d{8}T\d{6}Z-[0-9a-f]{32}', folder.name):
                 continue
             folder_info = folder.lstat()
             if (not stat.S_ISDIR(folder_info.st_mode) or folder_info.st_uid != os.geteuid()

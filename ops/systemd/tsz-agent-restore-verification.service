@@ -1,0 +1,12 @@
+[Unit]
+Description=Agent restore-verification
+After=network-online.target
+Wants=network-online.target
+OnFailure=tsz-backup-alert@%n.service
+
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=/opt/tsz-rust
+ExecStart=/usr/bin/python3 -I /opt/tsz-rust/ops/postgresql_restore_job.py --config /etc/tsz-rust/agent-backup.json
+TimeoutStartSec=60min

@@ -18,10 +18,78 @@ import backup_archive_ssh as archive_ssh
 import backup_archive_oss as archive_oss
 import backup_alert
 import postgresql_restore_job as restore_job
+import agent_backup_job
 from deploy_test import measured_phase
 
 
 class BackupJobTests(unittest.TestCase):
+    def test_agent_database_identity_is_restricted_and_failed_attempt_is_recorded(self):
+        uri = b'TSZ_AGENT_DATABASE_URL=postgresql+psycopg://user:secret@127.0.0.1:5433/tsz_agent\0'
+        with patch.object(agent_backup_job, 'command', return_value=b'123'), patch.object(Path, 'read_bytes', return_value=uri):
+            self.assertEqual(agent_backup_job.agent_environment()['PGDATABASE'], 'tsz_agent')
+        for bad in (uri.replace(b'tsz_agent', b'other'), uri.replace(b'5433', b'5432')):
+            with patch.object(agent_backup_job, 'command', return_value=b'123'), patch.object(Path, 'read_bytes', return_value=bad):
+                with self.assertRaisesRegex(job.BackupError, 'agent_database_identity_mismatch'):
+                    agent_backup_job.agent_environment()
+        with tempfile.TemporaryDirectory() as directory:
+            def failure():
+                raise job.BackupError('agent_database_identity_mismatch')
+            with self.assertRaises(job.BackupError):
+                job.backup(self.config(Path(directory)), environment=failure)
+            self.assertEqual(json.loads((Path(directory) / 'last-attempt.json').read_text())['status'], 'failed')
+
+    def test_restore_fetch_replica_rejects_same_region_or_bucket(self):
+        source = {'endpoint': 'https://oss-cn-heyuan-internal.aliyuncs.com', 'region': 'cn-heyuan',
+                  'bucket': 'source-bucket', 'access_key_id': 'id', 'access_key_secret': 'secret'}
+        replica = {'storage_config': '/secure/storage', 'endpoint': 'https://oss-cn-shenzhen.aliyuncs.com',
+                   'region': 'cn-shenzhen', 'bucket': 'target-bucket'}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.json'
+            path.write_text(json.dumps({'replica': replica}))
+            path.chmod(0o600)
+            with patch.object(archive_oss, 'read_config', return_value=source), \
+                 patch.object(archive_oss, 'connect', return_value='bucket') as connect, \
+                 patch.object(archive_oss, 'fetch', return_value={'retrieved': True}):
+                archive_oss.main(['fetch-replica', str(path), 'scheduled-test', 'a' * 64, '7', '/tmp/unused'])
+                self.assertEqual(connect.call_args.args[0]['bucket'], 'target-bucket')
+                for key in ('bucket', 'region'):
+                    path.write_text(json.dumps({'replica': {**replica, key: source[key]}}))
+                    with self.assertRaisesRegex(archive_oss.ArchiveError, 'independent_replica_required'):
+                        archive_oss.main(['fetch-replica', str(path), 'scheduled-test', 'a' * 64, '7', '/tmp/unused'])
+
+    def test_agent_archive_has_recoverable_offsite_identity_and_manifest(self):
+        import hashlib
+        from types import SimpleNamespace
+        objects = {}
+        class Bucket:
+            def put_object(self, key, source, headers):
+                self.assert_headers = headers
+                objects[key] = source.read() if hasattr(source, 'read') else source
+                return SimpleNamespace(status=200)
+            def get_object(self, key):
+                stream = io.BytesIO(objects[key])
+                stream.headers = {'x-oss-server-side-encryption': 'AES256'}
+                stream.content_length = len(objects[key])
+                return stream
+        with tempfile.TemporaryDirectory() as directory:
+            backup_id = 'scheduled-agent-20261029T000000Z-' + 'a' * 32
+            folder = Path(directory) / backup_id
+            folder.mkdir()
+            archive = folder / 'backup.dump'
+            archive.write_bytes(b'agent backup')
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            bucket = Bucket()
+            archive_oss.archive(bucket, 'private-bucket', archive, digest)
+            archive.unlink()
+            manifest = archive_oss.agent_manifest(bucket, backup_id)
+            self.assertEqual((manifest['database'], manifest['sha256'], manifest['bytes']), ('tsz_agent', digest, 12))
+            destination = Path(directory) / 'restored.dump'
+            archive_oss.fetch(bucket, backup_id, manifest['sha256'], manifest['bytes'], destination)
+            self.assertEqual(destination.read_bytes(), b'agent backup')
+            objects['database-backups/' + backup_id + '/manifest.json'] = b'{}'
+            with self.assertRaisesRegex(archive_oss.ArchiveError, 'agent_manifest_invalid'):
+                archive_oss.agent_manifest(bucket, backup_id)
+
     def config(self, root):
         return {"environment": "tshb-test", "directory": str(root), "postgresql_major": 18,
                 "archive_command": ["/reviewed/offsite-upload"]}
@@ -260,6 +328,14 @@ class BackupJobTests(unittest.TestCase):
             self.assertTrue(backup_alert.heartbeat({'monitor_group_id': '123'}, settings,
                                                    lambda: (client, request))['backup_healthy'])
             self.assertEqual(json.loads(request.params['MetricList.1.Values']), {'value': 1})
+            agent = {**settings, 'verification_kind': 'agent', 'health_metric': 'tsz_agent_backup_health'}
+            request = Request()
+            backup_alert.heartbeat({'monitor_group_id': '123'}, agent, lambda: (client, request))
+            self.assertEqual(request.params['MetricList.1.MetricName'], 'tsz_agent_backup_health')
+            for metric in (None, 'tsz_backup_health'):
+                invalid = {**agent, 'health_metric': metric} if metric else {k: v for k, v in agent.items() if k != 'health_metric'}
+                with self.assertRaisesRegex(backup_alert.AlertError, 'invalid_health_metric'):
+                    backup_alert.heartbeat({'monitor_group_id': '123'}, invalid, lambda: (client, Request()))
             with patch.object(backup_alert.shutil, 'disk_usage') as usage:
                 usage.return_value = type('Disk', (), {'free': 1024})()
                 self.assertFalse(backup_alert.heartbeat({'monitor_group_id': '123'}, settings,
@@ -371,6 +447,48 @@ class BackupJobTests(unittest.TestCase):
                 self.assertTrue(receipt['cleanup_complete'])
                 self.assertTrue(any(args[:2] == ['docker', 'rm'] for args in calls))
                 self.assertEqual(list(root.glob('restore-*.*')), [root / 'restore-latest.json'])
+
+    def test_agent_restore_requires_agent_tables_and_alembic_ledger(self):
+        for required, ledger in ((4, b'1|0'), (3, b'1|0'), (4, b'0|0')):
+            with self.subTest(required=required, ledger=ledger), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'volumes').mkdir()
+                archive = root / 'original.dump'
+                archive.write_bytes(b'archive')
+                backup = {'environment': 'tshb-test', 'status': 'passed', 'backup_id': 'scheduled-test',
+                          'sha256': job.sha256(archive), 'bytes': 7, 'postgresql_major': 18}
+                (root / 'latest.json').write_text(json.dumps(backup))
+                config = {**self.config(root), 'verification_kind': 'agent',
+                          'restore_image': 'sha256:' + 'a' * 64, 'fetch_command': ['/fetch']}
+                owner = [None]
+                def command(args, **kwargs):
+                    if args[:2] == ['docker', 'info']:
+                        return str(root).encode()
+                    if args[0] == '/fetch':
+                        Path(args[-1]).write_bytes(b'archive')
+                    elif args[:2] == ['docker', 'create']:
+                        owner[0] = args[args.index('--label') + 1].split('=', 1)[1]
+                        return b'owned-container'
+                    elif args[:2] == ['docker', 'inspect']:
+                        return json.dumps([{'Config': {'Labels': {'tsz.restore-job': owner[0]}}}]).encode()
+                    elif args[-1] == 'SELECT 1':
+                        return b'1'
+                    elif 'pg_restore' in args and '--version' in args:
+                        return b'pg_restore (PostgreSQL) 18.6'
+                    elif 'table_name IN' in args[-1]:
+                        return str(required).encode()
+                    elif 'information_schema.tables' in args[-1]:
+                        return b'6'
+                    elif 'alembic_version' in args[-1]:
+                        return ledger
+                    return b''
+                with patch.object(restore_job, 'command', side_effect=command):
+                    if required == 4 and ledger == b'1|0':
+                        self.assertEqual(restore_job.restore(config)['status'], 'passed')
+                    else:
+                        with self.assertRaisesRegex(job.BackupError, 'restored_schema_or_ledger_invalid'):
+                            restore_job.restore(config)
+                self.assertTrue(json.loads((root / 'restore-latest.json').read_text())['cleanup_complete'])
 
     def test_status_syncs_directory_after_replace(self):
         with tempfile.TemporaryDirectory() as directory:
