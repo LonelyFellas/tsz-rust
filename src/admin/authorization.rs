@@ -107,6 +107,17 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ("POST", "/opencode/probes", RoutePolicy::SuperAdmin),
     ("GET", "/opencode/models", RoutePolicy::SuperAdmin),
     ("GET", "/opencode/providers", RoutePolicy::SuperAdmin),
+    ("GET", "/opencode/connections", RoutePolicy::SuperAdmin),
+    (
+        "POST",
+        "/opencode/providers/{provider_id}/connections/{connection_id}/activate",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "DELETE",
+        "/opencode/providers/{provider_id}/connections/{connection_id}",
+        RoutePolicy::SuperAdmin,
+    ),
     ("POST", "/opencode/keys", RoutePolicy::SuperAdmin),
     ("GET", "/opencode/model", RoutePolicy::SuperAdmin),
     ("PUT", "/opencode/model", RoutePolicy::SuperAdmin),

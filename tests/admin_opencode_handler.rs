@@ -596,3 +596,219 @@ async fn probes_are_super_only_and_proxy_async_reports_without_private_fields(po
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     server.abort();
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn model_credentials_switch_and_logout_individually(pool: PgPool) {
+    let mut state = AppState::for_test(pool);
+    let (admin_id, token) = seed(&state, AdminRole::SuperAdmin).await;
+    let (_, normal) = seed(&state, AdminRole::Admin).await;
+    let connections = Arc::new(Mutex::new(json!([
+        {"id":"opencode","name":"OpenCode","methods":[],"connections":[
+            {"type":"credential","id":"cred_oauth","label":"TSZ","method":"oauth","secret":"must-not-leak"},
+            {"type":"credential","id":"cred_key_one","label":"TSZ","method":"key"},
+            {"type":"credential","id":"cred_key_two","label":"TSZ","method":"key"}
+        ]},
+        {"id":"env","name":"Environment","methods":[],"connections":[{"type":"env","name":"TEST_KEY"}]},
+        {"id":"tool","name":"Not a model","methods":[],"connections":[{"type":"credential","id":"cred_tool","label":"Tool","method":"key"}]}
+    ])));
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let no_effect = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let read = connections.clone();
+    let deleted = connections.clone();
+    let activated = connections.clone();
+    let delete_calls = calls.clone();
+    let activate_calls = calls.clone();
+    let delete_no_effect = no_effect.clone();
+    let activate_no_effect = no_effect.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/api/model", get(|| async { Json(json!({"data":[
+            {"providerID":"opencode","id":"free","name":"Free","enabled":true,"capabilities":{"output":["text"]}},
+            {"providerID":"env","id":"model","name":"Model","enabled":true,"capabilities":{"output":["text"]}}
+        ]})) }))
+        .route("/api/integration", get(move || { let read=read.clone(); async move { Json(json!({"data":*read.lock().await})) } }))
+        .route("/api/credential/{credential_id}", axum::routing::delete(move |axum::extract::Path(credential_id): axum::extract::Path<String>| {
+            let calls=delete_calls.clone(); let deleted=deleted.clone(); let no_effect=delete_no_effect.clone(); async move {
+                calls.lock().await.push(format!("delete:{credential_id}"));
+                if !no_effect.load(Ordering::SeqCst) {
+                    for provider in deleted.lock().await.as_array_mut().unwrap() {
+                        provider["connections"].as_array_mut().unwrap().retain(|c| c["id"] != credential_id);
+                    }
+                }
+                StatusCode::NO_CONTENT
+            }
+        }))
+        .route("/api/credential/{credential_id}/activate", post(move |axum::extract::Path(credential_id): axum::extract::Path<String>| {
+            let calls=activate_calls.clone(); let activated=activated.clone(); let no_effect=activate_no_effect.clone(); async move {
+                calls.lock().await.push(format!("activate:{credential_id}"));
+                if !no_effect.load(Ordering::SeqCst) {
+                    for provider in activated.lock().await.as_array_mut().unwrap() {
+                        let items=provider["connections"].as_array_mut().unwrap();
+                        if let Some(index)=items.iter().position(|c| c["id"]==credential_id) {
+                            let connection=items.remove(index); items.insert(0,connection);
+                        }
+                    }
+                }
+                StatusCode::NO_CONTENT
+            }
+        }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    state.opencode = Some(Arc::new(
+        OpenCodeConfig::new(&format!("http://{address}"), PASSWORD.into()).unwrap(),
+    ));
+    let key_path = "/providers/opencode/connections/cred_key_one";
+    let activate_path = format!("{key_path}/activate");
+    for (method, path) in [
+        (Method::GET, "/connections"),
+        (Method::DELETE, key_path),
+        (Method::POST, activate_path.as_str()),
+    ] {
+        assert_eq!(
+            request(&state, None, method.clone(), path).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&state, Some(&normal), method, path).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let (status, headers, body) = request(&state, Some(&token), Method::GET, "/connections").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(
+        body,
+        json!({"providers":[
+            {"id":"opencode","name":"OpenCode","connections":[
+                {"id":"cred_oauth","method":"oauth","label":"TSZ","active":true},
+                {"id":"cred_key_one","method":"key","label":"TSZ","active":false},
+                {"id":"cred_key_two","method":"key","label":"TSZ","active":false}
+            ]},
+            {"id":"env","name":"Environment","connections":[{"id":null,"method":"env","label":"TEST_KEY","active":true}]}
+        ]})
+    );
+    for path in [
+        "/providers/opencode/connections/cred_tool",
+        "/providers/tool/connections/cred_tool",
+        "/providers/env/connections/TEST_KEY",
+        "/providers/opencode/connections/missing",
+    ] {
+        assert_eq!(
+            request(&state, Some(&token), Method::DELETE, path).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            request(
+                &state,
+                Some(&token),
+                Method::POST,
+                &format!("{path}/activate")
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert!(calls.lock().await.is_empty());
+    let result = request(&state, Some(&token), Method::POST, &activate_path).await;
+    assert_eq!(result.0, StatusCode::NO_CONTENT);
+    assert_eq!(result.1["cache-control"], "no-store");
+    let body = request(&state, Some(&token), Method::GET, "/connections")
+        .await
+        .2;
+    assert_eq!(body["providers"][0]["connections"][0]["id"], "cred_key_one");
+    assert_eq!(body["providers"][0]["connections"][0]["active"], true);
+    assert_eq!(body["providers"][0]["connections"][1]["active"], false);
+    no_effect.store(true, Ordering::SeqCst);
+    assert_eq!(
+        request(
+            &state,
+            Some(&token),
+            Method::POST,
+            "/providers/opencode/connections/cred_key_two/activate"
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        request(&state, Some(&token), Method::DELETE, key_path)
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    no_effect.store(false, Ordering::SeqCst);
+    // Removing the inactive OAuth grant must preserve both keys and the selected key.
+    assert_eq!(
+        request(
+            &state,
+            Some(&token),
+            Method::DELETE,
+            "/providers/opencode/connections/cred_oauth"
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let body = request(&state, Some(&token), Method::GET, "/connections")
+        .await
+        .2;
+    assert_eq!(
+        body["providers"][0]["connections"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(body["providers"][0]["connections"][0]["id"], "cred_key_one");
+    // Removing the selected key leaves the other key, and the next read exposes native fallback.
+    assert_eq!(
+        request(&state, Some(&token), Method::DELETE, key_path)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let body = request(&state, Some(&token), Method::GET, "/connections")
+        .await
+        .2;
+    assert_eq!(
+        body["providers"][0]["connections"],
+        json!([{"id":"cred_key_two","method":"key","label":"TSZ","active":true}])
+    );
+    assert_eq!(
+        connections.lock().await[2]["connections"][0]["id"],
+        "cred_tool"
+    );
+    let count = calls.lock().await.len();
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(admin_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &state,
+            Some(&token),
+            Method::DELETE,
+            "/providers/opencode/connections/cred_key_two"
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(
+            &state,
+            Some(&token),
+            Method::POST,
+            "/providers/opencode/connections/cred_key_two/activate"
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(calls.lock().await.len(), count);
+    server.abort();
+}
