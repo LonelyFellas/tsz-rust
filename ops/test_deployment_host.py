@@ -17,6 +17,7 @@ from test_deploy_test import plan_fixture
 class HostOperationTests(unittest.TestCase):
     def environment(self, root):
         return patch.multiple(host, ROOT=root / "server", LOCK=root / "server/deploy.lock",
+                              CROSS_DEPLOY_LOCK=root / "server/cross.lock",
                               BINARY=root / "server/target/release/tsz-rust", MANIFEST=root / "api.json",
                               TRANSACTIONS=root / "server/transactions")
 

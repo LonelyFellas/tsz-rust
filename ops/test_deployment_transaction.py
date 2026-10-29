@@ -1,6 +1,7 @@
 """Connect the controller to real host state/files/locks with only service IO replaced."""
 
 import contextlib
+import fcntl
 import io
 import json
 from pathlib import Path
@@ -57,7 +58,7 @@ class DeploymentTransactionTests(unittest.TestCase):
         service = {'running': True}
         server = root/'server'
         with contextlib.ExitStack() as stack:
-            stack.enter_context(patch.multiple(host, ROOT=server, LOCK=server/'deploy.lock',
+            stack.enter_context(patch.multiple(host, ROOT=server, LOCK=server/'deploy.lock', CROSS_DEPLOY_LOCK=server/'cross.lock',
                 BINARY=server/'target/release/tsz-rust', MANIFEST=server/'api.json',
                 TRANSACTIONS=server/'transactions'))
             host.BINARY.parent.mkdir(parents=True)
@@ -130,6 +131,18 @@ class DeploymentTransactionTests(unittest.TestCase):
             self.assertFalse(host.LOCK.exists())
             self.assertTrue((host.transaction(plan)/'released-lock/owner').is_file())
             self.assertFalse((controller.directory/'active').exists())
+
+    def test_frontend_lock_blocks_backend_before_remote_transaction_and_releases_local_state(self):
+        with tempfile.TemporaryDirectory() as directory, self.transaction(Path(directory)) as (plan,controller,adapter,service):
+            with host.CROSS_DEPLOY_LOCK.open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                result = controller.apply(plan)
+            self.assertEqual(result['status'], 'blocked')
+            self.assertEqual(result['failed_stage'], 'frontend_deployment_busy')
+            self.assertFalse(host.LOCK.exists())
+            self.assertFalse(host.transaction(plan).exists())
+            self.assertFalse((controller.directory/'active').exists())
+            self.assertEqual(host.BINARY.read_bytes(), b'previous-binary')
 
     def test_formal_verification_failure_restores_exact_v1_backup_and_unlocks(self):
         with tempfile.TemporaryDirectory() as directory, self.transaction(Path(directory),fail='formal_verify') as (plan,controller,adapter,service):
