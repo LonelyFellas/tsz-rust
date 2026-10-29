@@ -60,6 +60,31 @@ def report(config, unit, client_factory=None):
     return {"status": "reported", "unit": unit}
 
 
+def replica_is_current(backup_config):
+    """Check that the latest verified archive has reached the independent replica."""
+    replica = backup_config.get("replica")
+    if replica is None:
+        return True
+    if not isinstance(replica, dict):
+        return False
+    try:
+        from backup_archive_oss import connect, identity, read_config
+        storage = read_config(Path(replica["storage_config"]))
+        destination = {**storage, "endpoint": replica["endpoint"],
+                       "region": replica["region"], "bucket": replica["bucket"]}
+        latest = json.loads((Path(backup_config["directory"]) / "latest.json").read_text())
+        key = identity(latest["backup_id"], latest["sha256"])
+        source = connect(storage).head_object(key)
+        target = connect(destination).head_object(key)
+        source_crc = source.headers.get("x-oss-hash-crc64ecma")
+        target_crc = target.headers.get("x-oss-hash-crc64ecma")
+        return (source.content_length == target.content_length == latest["bytes"]
+                and bool(source_crc) and source_crc == target_crc
+                and target.headers.get("x-oss-server-side-encryption") == "AES256")
+    except Exception:
+        return False
+
+
 def heartbeat(config, backup_config, client_factory=None):
     group_id = str(config.get("monitor_group_id", ""))
     if not re.fullmatch(r"[1-9][0-9]*", group_id):
@@ -69,7 +94,8 @@ def heartbeat(config, backup_config, client_factory=None):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from postgresql_backup_job import inspect_status
     healthy = (inspect_status(backup_config["directory"])["status"] == "passed"
-               and shutil.disk_usage(backup_config["directory"]).free >= 5 * 1024 ** 3)
+               and shutil.disk_usage(backup_config["directory"]).free >= 5 * 1024 ** 3
+               and replica_is_current(backup_config))
     if client_factory is None:
         from aliyunsdkcore.client import AcsClient
         from aliyunsdkcore.request import CommonRequest
