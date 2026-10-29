@@ -2,7 +2,7 @@
 Description=Daily local tsz-test archive retention
 
 [Timer]
-OnCalendar=*-*-* 06:17:00
+OnCalendar=*-*-* 07:17:00
 RandomizedDelaySec=10min
 Persistent=true
 Unit=tsz-backup-prune.service

@@ -50,7 +50,7 @@ pg_dump_version=18.6
 
 若使用云监控通知，使用独立 RAM 用户与独立的 root 所有、权限 `0600` 的 `/etc/tsz-rust/backup-alert.json`，填写 `access_key_id`、`access_key_secret` 和 `monitor_group_id`；该用户只授予 `cms:PutCustomEvent` 和 `cms:PutCustomMetric`。安装 `tsz-backup-alert@.service` 与两个 `*.service.d/10-cloud-alert.conf`，并创建匹配事件名 `tsz_backup_failure` 的邮件报警规则，备份或恢复验证失败时上报不含数据库内容的固定事件。安装 `tsz-backup-heartbeat.timer`，每五分钟上报 `tsz_backup_health`：备份新鲜且成功、备份目录所在文件系统剩余至少 5 GiB 时为 1，缺失、失败、陈旧或空间不足时为 0。须配置独立云端指标报警，包含持续为 0 和无数据两种条件；由于备份过程中状态可能暂时为 0，阈值和持续时间须覆盖 45 分钟任务超时。启用前实际测试事件、指标异常和无数据到邮箱的完整投递；服务器、凭据或网络失效时依靠云端无数据报警，未经验证不得声称失联监控有效。
 
-经授权后，可在 `backup.json` 设置 `local_retention_days`（至少 14），安装 `tsz-backup-prune.service/.timer` 清理本机定时归档。清理必须持有备份和恢复锁，且最新备份新鲜、深圳副本校验通过；仅删除匹配本任务格式、受保护的目录下有成功回执且到期的 `backup.dump`，始终保留最新归档、回执、失败归档、发布备份与其他文件。清理失败发送备份告警，失败归档仍需人工核对，不能仅依赖该规则保证磁盘有空间。
+经授权后，可在 `backup.json` 设置 `local_retention_days`（至少 14），安装 `tsz-backup-prune.service/.timer` 清理本机定时归档。清理必须持有备份和恢复锁，锁忙则跳过并等待下次运行；最新备份须新鲜、深圳副本校验通过。仅删除匹配本任务格式、受保护的目录下有成功回执且到期的 `backup.dump`，并在每个删除前从深圳读回对应归档，核对完整 SHA256、字节数和加密状态；验证失败则保留并报警。始终保留最新归档、回执、失败归档、发布备份与其他文件。失败归档仍需人工核对，不能仅依赖该规则保证磁盘有空间。
 
 跨地域复制采用异步方式，源桶上传成功不代表目标桶已到达。使用该方案时在 `backup.json` 中配置 `replica`：`storage_config` 指向受保护的 OSS 备份凭据文件，`endpoint`、`region`、`bucket` 指向独立目标桶；该凭据需要对两个专用桶的安全配置和备份对象有相应只读权限。心跳检查最近归档在两个桶上的长度、OSS CRC64 和目标端 AES256 加密状态；不存在、权限失效、校验不符或请求失败都会上报 0。刚完成上传时复制仍可能进行中，云端报警持续时间应覆盖正常复制延迟；CRC64 适合持续检查，不替代首次及定期的完整 SHA256 下载和恢复演练。
 

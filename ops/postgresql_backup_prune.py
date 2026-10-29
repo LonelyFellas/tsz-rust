@@ -12,7 +12,27 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backup_alert import replica_is_current
+from backup_archive_oss import connect, digest_stream, identity, read_config, validate_config
 from postgresql_backup_job import inspect_status
+
+
+def replica_has_archive(config, receipt):
+    try:
+        replica = config['replica']
+        storage = read_config(Path(replica['storage_config']))
+        target = validate_config({**storage, 'endpoint': replica['endpoint'],
+                                  'region': replica['region'], 'bucket': replica['bucket']})
+        if target['bucket'] == storage['bucket'] or target['region'] == storage['region']:
+            return False
+        key = identity(receipt['backup_id'], receipt['sha256'])
+        response = connect(target).get_object(key)
+        if (response.content_length != receipt['bytes']
+                or response.headers.get('x-oss-server-side-encryption') != 'AES256'):
+            response.close()
+            return False
+        return digest_stream(response, maximum=receipt['bytes']) == (receipt['sha256'], receipt['bytes'])
+    except Exception:
+        return False
 
 
 def prune(config, *, now=None):
@@ -28,7 +48,10 @@ def prune(config, *, now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     with (root / 'job.lock').open('a') as backup_lock, (root / 'restore.lock').open('a') as restore_lock:
         for lock in (backup_lock, restore_lock):
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return None
         status = inspect_status(root, now=now)
         if status['status'] != 'passed' or not replica_is_current(config):
             raise ValueError('current_verified_replica_required')
@@ -53,6 +76,8 @@ def prune(config, *, now=None):
                     continue
             except (OSError, ValueError, KeyError, TypeError):
                 continue
+            if not replica_has_archive(config, receipt):
+                raise ValueError('expired_replica_unverified')
             archive.unlink()
             fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -67,7 +92,8 @@ if __name__ == '__main__':
     try:
         with open(sys.argv[1]) as source:
             count = prune(json.load(source))
-        print(json.dumps({'status': 'passed', 'removed_local_archives': count}))
+        print(json.dumps({'status': 'skipped' if count is None else 'passed',
+                          'removed_local_archives': count}))
     except (OSError, ValueError, KeyError, IndexError):
         print(json.dumps({'status': 'failed', 'stage': 'local_backup_retention'}), file=sys.stderr)
         raise SystemExit(1)
