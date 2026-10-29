@@ -1,0 +1,18 @@
+{
+  "environment": "tshb-test",
+  "directory": "/opt/tsz-rust/backups/agent-scheduled",
+  "postgresql_major": 18,
+  "verification_kind": "agent",
+  "health_metric": "tsz_agent_backup_health",
+  "archive_command": ["/opt/tsz-rust/backup-venv/bin/python", "-I", "/opt/tsz-rust/ops/backup_archive_oss.py", "/etc/tsz-rust/backup-oss.json"],
+  "fetch_command": ["/opt/tsz-rust/backup-venv/bin/python", "-I", "/opt/tsz-rust/ops/backup_archive_oss.py", "fetch-replica", "/etc/tsz-rust/agent-backup.json"],
+  "fetch_expected_bytes": true,
+  "restore_image": "postgres@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
+  "replica": {
+    "storage_config": "/etc/tsz-rust/backup-oss.json",
+    "endpoint": "https://oss-cn-shenzhen.aliyuncs.com",
+    "region": "cn-shenzhen",
+    "bucket": "tshb-test-db-backup-5395"
+  },
+  "local_retention_days": 14
+}

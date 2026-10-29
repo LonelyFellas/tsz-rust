@@ -52,6 +52,9 @@ def cleanup_containers(owner, identifier):
 def restore(config):
     if config.get("environment") != "tshb-test":
         raise BackupError("invalid_restore_environment")
+    kind = config.get("verification_kind", "rust")
+    if kind not in {"rust", "agent"}:
+        raise BackupError("invalid_verification_kind")
     root = Path(config["directory"])
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     with (root / "restore.lock").open("a") as lock:
@@ -122,9 +125,18 @@ def restore(config):
             query = "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';"
             tables = int(command(["docker", "exec", identifier, "psql", "-X", "-At", "-v", "ON_ERROR_STOP=1",
                                   "-U", "postgres", "-d", "restore_verify", "-c", query]).decode().strip())
+            if kind == "agent":
+                ledger_query = ("SELECT count(*), 0 FROM alembic_version WHERE version_num <> ''; ")
+                required_query = ("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' "
+                                  "AND table_name IN ('agent_runs','agent_review_events','agent_review_current','agent_model_calls');")
+                required = int(command(["docker", "exec", identifier, "psql", "-X", "-At", "-v", "ON_ERROR_STOP=1",
+                                        "-U", "postgres", "-d", "restore_verify", "-c", required_query]).decode().strip())
+                if required != 4:
+                    raise BackupError("restored_schema_or_ledger_invalid")
+            else:
+                ledger_query = "SELECT count(*),count(*) FILTER (WHERE NOT success) FROM _sqlx_migrations;"
             ledger = command(["docker", "exec", identifier, "psql", "-X", "-At", "-v", "ON_ERROR_STOP=1",
-                              "-U", "postgres", "-d", "restore_verify", "-c",
-                              "SELECT count(*),count(*) FILTER (WHERE NOT success) FROM _sqlx_migrations;"]).decode().strip()
+                              "-U", "postgres", "-d", "restore_verify", "-c", ledger_query]).decode().strip()
             count, failures = map(int, ledger.split("|"))
             if tables == 0 or count == 0 or failures != 0:
                 raise BackupError("restored_schema_or_ledger_invalid")

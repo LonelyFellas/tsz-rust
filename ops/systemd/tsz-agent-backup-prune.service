@@ -1,0 +1,12 @@
+[Unit]
+Description=Agent backup-prune
+After=network-online.target
+Wants=network-online.target
+OnFailure=tsz-backup-alert@%n.service
+
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=/opt/tsz-rust
+ExecStart=/opt/tsz-rust/backup-venv/bin/python -I /opt/tsz-rust/ops/postgresql_backup_prune.py /etc/tsz-rust/agent-backup.json
+TimeoutStartSec=5min

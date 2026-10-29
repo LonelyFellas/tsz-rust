@@ -29,6 +29,9 @@ UNITS = {
     "tsz-backup.service",
     "tsz-restore-verification.service",
     "tsz-backup-prune.service",
+    "tsz-agent-backup.service",
+    "tsz-agent-restore-verification.service",
+    "tsz-agent-backup-prune.service",
 }
 
 
@@ -114,7 +117,10 @@ def heartbeat(config, backup_config, client_factory=None):
     request.set_method("POST")
     request.set_protocol_type("https")
     request.set_accept_format("json")
-    request.add_query_param("MetricList.1.MetricName", "tsz_backup_health")
+    metric = backup_config.get("health_metric", "tsz_backup_health")
+    if metric not in {"tsz_backup_health", "tsz_agent_backup_health"}:
+        raise AlertError("invalid_health_metric")
+    request.add_query_param("MetricList.1.MetricName", metric)
     request.add_query_param("MetricList.1.Type", "0")
     request.add_query_param("MetricList.1.GroupId", group_id)
     request.add_query_param("MetricList.1.Values", json.dumps({"value": int(healthy)}))

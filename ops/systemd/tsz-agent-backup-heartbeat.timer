@@ -1,0 +1,10 @@
+[Unit]
+Description=Scheduled Agent backup-heartbeat
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=tsz-agent-backup-heartbeat.service
+
+[Install]
+WantedBy=timers.target

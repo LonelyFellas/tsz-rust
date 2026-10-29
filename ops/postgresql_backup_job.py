@@ -126,6 +126,8 @@ def backup(config, *, environment=None):
                   "snapshot_started_at": now.isoformat(), "status": "running"}
         write_status(root / "last-attempt.json", status)
         try:
+            if callable(environment):
+                environment = environment()
             if environment is None:
                 pid = command(["systemctl", "show", "tsz-rust", "-p", "MainPID", "--value"]).decode().strip()
                 if not pid.isdigit() or int(pid) <= 0:

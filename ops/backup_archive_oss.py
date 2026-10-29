@@ -163,6 +163,18 @@ def main(args):
     if len(args) == 6 and args[0] == "fetch":
         _, config_path, backup_id, expected, expected_size, destination = args
         return fetch(connect(read_config(config_path)), backup_id, expected, expected_size, destination)
+    if len(args) == 6 and args[0] == "fetch-replica":
+        _, job_path, backup_id, expected, expected_size, destination = args
+        info = Path(job_path).lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ArchiveError("insecure_job_config")
+        replica = json.loads(Path(job_path).read_text())["replica"]
+        source = read_config(replica["storage_config"])
+        target = validate_config({**source, "endpoint": replica["endpoint"],
+                                  "region": replica["region"], "bucket": replica["bucket"]})
+        if target["bucket"] == source["bucket"] or target["region"] == source["region"]:
+            raise ArchiveError("independent_replica_required")
+        return fetch(connect(target), backup_id, expected, expected_size, destination)
     raise ArchiveError("invalid_arguments")
 
 

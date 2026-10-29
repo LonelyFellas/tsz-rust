@@ -1,0 +1,11 @@
+[Unit]
+Description=Scheduled Agent restore-verification
+
+[Timer]
+OnCalendar=Sun *-*-* 08:00:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=tsz-agent-restore-verification.service
+
+[Install]
+WantedBy=timers.target
