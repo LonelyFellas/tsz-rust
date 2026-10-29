@@ -29,6 +29,9 @@ UNITS = {
     "tsz-backup.service",
     "tsz-restore-verification.service",
     "tsz-backup-prune.service",
+    "tsz-agent-backup.service",
+    "tsz-agent-restore-verification.service",
+    "tsz-agent-backup-prune.service",
 }
 
 
@@ -69,7 +72,7 @@ def replica_is_current(backup_config):
     if not isinstance(replica, dict):
         return False
     try:
-        from backup_archive_oss import connect, identity, read_config, validate_config
+        from backup_archive_oss import agent_manifest, connect, identity, read_config, validate_config
         storage = read_config(Path(replica["storage_config"]))
         destination = validate_config({**storage, "endpoint": replica["endpoint"],
                                        "region": replica["region"], "bucket": replica["bucket"]})
@@ -79,7 +82,12 @@ def replica_is_current(backup_config):
         latest = json.loads((Path(backup_config["directory"]) / "latest.json").read_text())
         key = identity(latest["backup_id"], latest["sha256"])
         source = connect(storage).head_object(key)
-        target = connect(destination).head_object(key)
+        target_bucket = connect(destination)
+        target = target_bucket.head_object(key)
+        if backup_config.get("verification_kind") == "agent":
+            manifest = agent_manifest(target_bucket, latest["backup_id"])
+            if manifest["sha256"] != latest["sha256"] or manifest["bytes"] != latest["bytes"]:
+                return False
         source_crc = source.headers.get("x-oss-hash-crc64ecma")
         target_crc = target.headers.get("x-oss-hash-crc64ecma")
         return (source.content_length == target.content_length == latest["bytes"]
@@ -114,7 +122,11 @@ def heartbeat(config, backup_config, client_factory=None):
     request.set_method("POST")
     request.set_protocol_type("https")
     request.set_accept_format("json")
-    request.add_query_param("MetricList.1.MetricName", "tsz_backup_health")
+    kind = backup_config.get("verification_kind", "rust")
+    metric = backup_config.get("health_metric", "tsz_backup_health")
+    if (kind, metric) not in {("rust", "tsz_backup_health"), ("agent", "tsz_agent_backup_health")}:
+        raise AlertError("invalid_health_metric")
+    request.add_query_param("MetricList.1.MetricName", metric)
     request.add_query_param("MetricList.1.Type", "0")
     request.add_query_param("MetricList.1.GroupId", group_id)
     request.add_query_param("MetricList.1.Values", json.dumps({"value": int(healthy)}))

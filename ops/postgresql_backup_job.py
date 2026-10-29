@@ -119,13 +119,16 @@ def backup(config, *, environment=None):
         except BlockingIOError:
             raise BackupError("backup_job_busy") from None
         now = datetime.datetime.now(datetime.timezone.utc)
-        name = "scheduled-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex
+        prefix = "scheduled-agent-" if config.get("verification_kind") == "agent" else "scheduled-"
+        name = prefix + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex
         folder = root / name
         folder.mkdir(mode=0o700)
         status = {"schema_version": 1, "environment": "tshb-test", "backup_id": name,
                   "snapshot_started_at": now.isoformat(), "status": "running"}
         write_status(root / "last-attempt.json", status)
         try:
+            if callable(environment):
+                environment = environment()
             if environment is None:
                 pid = command(["systemctl", "show", "tsz-rust", "-p", "MainPID", "--value"]).decode().strip()
                 if not pid.isdigit() or int(pid) <= 0:

@@ -1,0 +1,12 @@
+[Unit]
+Description=Agent backup
+After=network-online.target
+Wants=network-online.target
+OnFailure=tsz-backup-alert@%n.service
+
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=/opt/tsz-rust
+ExecStart=/usr/bin/python3 -I /opt/tsz-rust/ops/agent_backup_job.py /etc/tsz-rust/agent-backup.json
+TimeoutStartSec=45min

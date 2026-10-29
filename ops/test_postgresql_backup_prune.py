@@ -109,6 +109,17 @@ class PruneTests(unittest.TestCase):
                  patch.object(pruning, 'connect', return_value=SimpleNamespace(get_object=lambda _: response(value))):
                 self.assertEqual(pruning.replica_has_archive(config, receipt), expected)
 
+    def test_agent_archive_is_preserved_when_replica_manifest_is_missing(self):
+        receipt = {'backup_id': 'scheduled-agent-test', 'sha256': 'a' * 64, 'bytes': 7}
+        config = {'verification_kind': 'agent', 'replica': {'storage_config': '/root/oss.json',
+                  'endpoint': 'https://oss-cn-shenzhen.aliyuncs.com', 'region': 'cn-shenzhen', 'bucket': 'replica-bucket'}}
+        storage = {'endpoint': 'https://oss-cn-heyuan-internal.aliyuncs.com', 'region': 'cn-heyuan',
+                   'bucket': 'source-bucket', 'access_key_id': 'id', 'access_key_secret': 'secret'}
+        with patch.object(pruning, 'read_config', return_value=storage), \
+             patch.object(pruning, 'connect', return_value=object()), \
+             patch.object(pruning, 'agent_manifest', side_effect=ValueError('missing')):
+            self.assertFalse(pruning.replica_has_archive(config, receipt))
+
     def test_busy_backup_lock_prevents_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             config = {'environment': 'tshb-test', 'directory': directory, 'replica': {}, 'local_retention_days': 14}
