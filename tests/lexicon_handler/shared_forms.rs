@@ -92,7 +92,7 @@ async fn save_shared_with_capabilities(
 #[sqlx::test]
 async fn shared_forms_omitted_components_preserve_but_explicit_empty_clears(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let (id, mut forms) = create_v3_phrase_draft(&state, &bearer, "shared component").await;
@@ -179,7 +179,7 @@ async fn shared_forms_omitted_components_preserve_but_explicit_empty_clears(pool
 #[sqlx::test]
 async fn shared_forms_partial_capabilities_preserve_settings_across_binding_changes(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -352,7 +352,7 @@ async fn shared_forms_preserve_binding_identity_reject_old_writes_and_stale_revi
     pool: PgPool,
 ) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -582,7 +582,7 @@ fn reassign_form_content(forms: &mut Value, pos: usize, form: usize, target: usi
 #[sqlx::test]
 async fn shared_forms_reassignment_preserves_form_identity_and_round_trips(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -696,7 +696,7 @@ async fn shared_forms_reassignment_preserves_form_identity_and_round_trips(pool:
 #[sqlx::test]
 async fn shared_forms_reassignment_rejects_stolen_nodes_and_new_content(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -843,7 +843,7 @@ async fn shared_forms_deleted_form_cannot_use_new_sides_to_bind_new_content(pool
 
 async fn deleted_form_content_identity(pool: PgPool, restore_original: bool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -1089,7 +1089,7 @@ async fn deleted_form_content_identity(pool: PgPool, restore_original: bool) {
 #[sqlx::test]
 async fn shared_forms_reassignment_restores_retired_sides_across_modes(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -1207,7 +1207,7 @@ async fn shared_forms_reassignment_restores_retired_sides_across_modes(pool: PgP
 #[sqlx::test]
 async fn shared_forms_reassignment_review_mode_change_restores_old_sides(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -1316,7 +1316,7 @@ async fn shared_forms_reassignment_review_mode_change_restores_old_sides(pool: P
 #[sqlx::test]
 async fn shared_forms_reassignment_keeps_self_reference_impact_and_save_guards(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let source = self_linked_definition_draft(&state, &pool, &bearer).await;
@@ -1417,7 +1417,7 @@ async fn shared_forms_reassignment_without_removed_nodes_requires_reference_conf
     pool: PgPool,
 ) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let initial = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -1581,7 +1581,7 @@ async fn shared_forms_reassignment_without_removed_nodes_requires_reference_conf
 #[sqlx::test]
 async fn shared_forms_concurrent_saves_accept_one_graph_without_loser_slots(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -1681,7 +1681,7 @@ async fn shared_forms_concurrent_saves_accept_one_graph_without_loser_slots(pool
 #[sqlx::test]
 async fn shared_forms_slot_retirement_restore_and_reassignment_are_persistent(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -1777,7 +1777,7 @@ async fn shared_forms_slot_retirement_restore_and_reassignment_are_persistent(po
 #[sqlx::test]
 async fn shared_forms_pronunciation_correspondence_persists_and_cannot_be_reassigned(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -1932,7 +1932,7 @@ async fn reassignment_restore_history(
     rollback: bool,
 ) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -1974,6 +1974,9 @@ async fn reassignment_restore_history(
     let meanings = complete_v3_meanings_fixture(saved["word"]["forms"]["pos"][0]["pos_id"].clone());
     let ready = save_v3_meanings(&state, &bearer, &saved, meanings).await;
     let other = batch3_word(&state, &bearer, "beta").await;
+    for word in [&ready, &other] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let (status, published) = call_with_form_capability(
         &state,
         Method::POST,
@@ -2136,7 +2139,7 @@ async fn reassignment_restore_history(
 #[sqlx::test]
 async fn shared_forms_publication_freezes_graph_and_restore_recovers_sharing(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -2183,6 +2186,9 @@ async fn shared_forms_publication_freezes_graph_and_restore_recovers_sharing(poo
         complete_v3_meanings_fixture(shared["word"]["forms"]["pos"][0]["pos_id"].clone());
     let ready = save_v3_meanings(&state, &bearer, &shared, meanings).await;
     let other = batch3_word(&state, &bearer, "beta").await;
+    for word in [&ready, &other] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let batch_key = Uuid::now_v7();
     let batch_input = batch3_input(&[&ready, &other]);
     let batch_path = format!("{ROOT}/entries/publications/batch");

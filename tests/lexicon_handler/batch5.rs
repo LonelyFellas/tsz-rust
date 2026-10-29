@@ -72,7 +72,7 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
                         &id.to_string(),
                         1,
                         "complete",
-                        v3_forms_fixture_for(surface),
+                        audio_forms(state, &id.to_string(), v3_forms_fixture_for(surface)).await,
                     )
                     .await;
                     let meanings = complete_v3_meanings_fixture(
@@ -98,6 +98,9 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
             words[index] = save_v3_meanings(&state, &bearer, &words[index], meanings).await;
         }
         record_test_phase("maximum-batch", "relation-fixture", relations_started);
+        for word in &words {
+            confirm_audio(&state, &bearer, word).await;
+        }
         let start = Instant::now();
         let (status, published) = call(
             &state,
@@ -177,12 +180,14 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
         ("forms-save", 50),
         ("meanings-save", 100),
         ("publish-batch", 1),
+        ("audio-check", 50),
+        ("audio-confirm", 50),
         ("list", 20),
         ("references", 20),
     ]);
     assert_eq!(router_stats.router_builds, 1);
     assert_eq!(router_stats.requests, expected_requests);
-    assert_eq!(router_stats.request_ids.len(), 243);
+    assert_eq!(router_stats.request_ids.len(), 343);
     eprintln!(
         "SQLX_CI_ROUTER_PILOT {}",
         json!({

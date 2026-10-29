@@ -116,14 +116,14 @@ pub async fn audio(
     ApiPath((id, asset_id)): ApiPath<(Uuid, Uuid)>,
 ) -> Result<(HeaderMap, Json<AudioAssetUrlResponse>), AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    let mut item = service::entries(&mut tx, &[id])
-        .await?
-        .pop()
-        .ok_or_else(|| AppError::not_found("词条暂不可用"))?;
-    if !crate::lexicon::voice_versions::models_supported(&headers) {
-        item.audio.retain(|audio| !audio.hd_flash);
-    }
-    if !item.audio.iter().any(|a| a.asset_id == asset_id) {
+    if !service::audio_available(
+        &mut tx,
+        id,
+        asset_id,
+        crate::lexicon::voice_versions::models_supported(&headers),
+    )
+    .await?
+    {
         return Err(AppError::not_found("音频暂不可用"));
     }
     let object_key: String = sqlx::query_scalar("SELECT object_key FROM lexicon.audio_assets WHERE id=$1 AND reclamation_started_at IS NULL").bind(asset_id).fetch_optional(&mut *tx).await.map_err(AppError::internal)?.ok_or_else(|| AppError::not_found("音频暂不可用"))?;

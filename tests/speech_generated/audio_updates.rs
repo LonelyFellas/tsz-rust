@@ -725,6 +725,7 @@ async fn delayed_updates_global_fallback_move_and_delete_reparse_current_source(
         .await
         .unwrap();
     let before = provider.calls.load(Ordering::SeqCst);
+    assert_eq!(before, 2, "returning to -27 reuses its earlier audio bytes");
     assert_eq!(
         current(&pool, sentence).await["voices"][0]["rate_percent"],
         -27
@@ -741,7 +742,11 @@ async fn delayed_updates_global_fallback_move_and_delete_reparse_current_source(
         current(&pool, sentence).await["voices"][0]["rate_percent"],
         -10
     );
-    assert_eq!(provider.calls.load(Ordering::SeqCst), before + 1);
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        before,
+        "returning to the global -10 effect reuses its earlier audio bytes"
+    );
 }
 
 #[sqlx::test]

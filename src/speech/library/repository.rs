@@ -382,6 +382,10 @@ impl VoiceLibraryRepository {
         if groups[index].revision != request.base_revision {
             return Err(conflict());
         }
+        sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
         super::super::audio_updates::enqueue(
             &mut tx,
             actor,
