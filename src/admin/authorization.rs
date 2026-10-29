@@ -70,6 +70,21 @@ pub enum RoutePolicy {
 }
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
+    (
+        "GET",
+        "/question-bank/questions/workbench",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/question-bank/questions/{id}/inspection",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/question-bank/candidate-search",
+        RoutePolicy::All(&["words.access"]),
+    ),
     ("GET", "/opencode/probes", RoutePolicy::SuperAdmin),
     ("POST", "/opencode/probes", RoutePolicy::SuperAdmin),
     ("GET", "/opencode/models", RoutePolicy::SuperAdmin),

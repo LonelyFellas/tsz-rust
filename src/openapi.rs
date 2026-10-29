@@ -33,6 +33,9 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::question_bank::handler::workbench_questions,
+        crate::question_bank::handler::inspect_question,
+        crate::question_bank::handler::search_candidates,
         crate::question_bank::handler::candidate_page,
         crate::question_bank::handler::batch_preview,
         crate::question_bank::handler::batches,

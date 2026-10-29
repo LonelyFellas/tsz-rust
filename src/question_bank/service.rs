@@ -56,6 +56,7 @@ pub(super) struct QuestionRow {
     pub state: String,
     pub content: Json<BankQuestionContent>,
     pub original_content: Json<BankQuestionContent>,
+    pub semantic_review: Option<Json<QuestionSemanticReview>>,
     pub created_by: Uuid,
     pub reviewed_by: Option<Uuid>,
     pub review_comment: String,
@@ -65,6 +66,20 @@ pub(super) struct QuestionRow {
     pub updated_at: DateTime<Utc>,
 }
 impl QuestionRow {
+    pub fn semantic_review_current(&self) -> bool {
+        let current = &self.content.0;
+        let original = &self.original_content.0;
+        self.semantic_review.is_some()
+            && current.prompt == original.prompt
+            && current.target == original.target
+            && current.options.len() == original.options.len()
+            && current.options.iter().all(|option| {
+                original
+                    .options
+                    .iter()
+                    .any(|old| old.candidate == option.candidate)
+            })
+    }
     pub fn view(self) -> BankQuestion {
         BankQuestion {
             id: self.id,
@@ -303,41 +318,12 @@ async fn ranked_candidate_entries(
     // Lexical similarity is only a recall signal, never evidence of a wrong answer.
     // Rank IDs once, then read authoritative snapshots in small batches until full.
     sqlx::query_scalar(
-        r#"
-        SELECT e.id FROM lexicon.entries e
-        JOIN lexicon.entry_publications p ON p.id=e.current_publication_id
-        CROSS JOIN LATERAL (
-            SELECT max(greatest(
-                similarity(lower(trim(COALESCE(
-                    form.value#>>'{regional_variants,common,spelling}',
-                    form.value#>>ARRAY['regional_variants',$4,'spelling']
-                ))), lower($2)),
-                similarity(d.value#>>'{content,text}', $3)
-            )) AS relevance
-            FROM jsonb_array_elements(p.snapshot#>'{forms,pos}') f(value)
-            CROSS JOIN LATERAL jsonb_array_elements(f.value->'forms') form(value)
-            CROSS JOIN LATERAL jsonb_array_elements(p.snapshot#>'{meanings,pos}') m(value)
-            CROSS JOIN LATERAL jsonb_array_elements(m.value->'senses') s(value)
-            CROSS JOIN LATERAL jsonb_array_elements(s.value->'definitions') d(value)
-            WHERE f.value->>'pos_id'=m.value->>'pos_id'
-              AND f.value->>'pos'=$1 AND form.value->>'form_type'='base'
-              AND COALESCE((s.value->>'depends_on_context')::boolean,false)=false
-              AND d.value->>'definition_mode'='zh_definition'
-              AND d.value->>'level'=ANY($5)
-        ) ranked
-        WHERE e.archived_at IS NULL AND e.teaching_eligible AND p.content_schema_version=3
-          AND ranked.relevance IS NOT NULL
-        ORDER BY ranked.relevance DESC, e.id
-        "#,
+        "SELECT e.id FROM lexicon.question_candidate_index c JOIN lexicon.entries e ON e.id=c.entry_id AND e.current_publication_id=c.publication_id WHERE e.archived_at IS NULL AND e.teaching_eligible AND c.part_of_speech=$1 AND c.answer_profile=$4 AND c.level=ANY($5) GROUP BY e.id ORDER BY max(greatest(similarity(lower(c.spelling),lower($2)),similarity(c.definition,$3))) DESC,e.id",
     )
     .bind(&target.part_of_speech)
     .bind(&target.spelling)
     .bind(&target.definition)
-    .bind(if input.answer_profile == "BrE" {
-        "uk"
-    } else {
-        "us"
-    })
+    .bind(&input.answer_profile)
     .bind(&levels[..=rank])
     .fetch_all(&mut **tx)
     .await
@@ -560,6 +546,16 @@ pub async fn review(
         _ => return Err(conflict("当前状态不允许此审核操作")),
     };
     if state == "approved" {
+        if row.semantic_review_current()
+            && row
+                .semantic_review
+                .as_ref()
+                .is_some_and(|review| review.verdict == QuestionSemanticVerdict::NeedsRevision)
+        {
+            return Err(conflict(
+                "当前题面仍存在未解决的歧义，请更换干扰项或重新命题",
+            ));
+        }
         source::validate_question(&mut tx, &row.content).await?;
     }
     let run: Uuid = sqlx::query_scalar("SELECT agent_run_id FROM question_generations WHERE id=$1")
