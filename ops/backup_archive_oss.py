@@ -28,7 +28,10 @@ def read_config(path):
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
             or info.st_mode & 0o077):
         raise ArchiveError("insecure_storage_config")
-    config = json.loads(path.read_text())
+    return validate_config(json.loads(path.read_text()))
+
+
+def validate_config(config):
     endpoint, region, bucket = (config.get(k, "") for k in ("endpoint", "region", "bucket"))
     if (not re.fullmatch(r"https://oss-[a-z0-9-]+(?:-internal)?\.aliyuncs\.com", endpoint)
             or not re.fullmatch(r"[a-z0-9-]+", region)

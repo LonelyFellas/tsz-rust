@@ -276,6 +276,51 @@ class BackupJobTests(unittest.TestCase):
             path.chmod(0o600)
             self.assertEqual(backup_alert.read_config(path)['monitor_group_id'], '123')
 
+    def test_heartbeat_replica_check_fails_closed_on_missing_or_corrupt_copy(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'latest.json').write_text(json.dumps({
+                'backup_id': 'scheduled-test', 'sha256': 'a' * 64, 'bytes': 42,
+            }))
+            config = {'directory': directory, 'replica': {
+                'storage_config': '/root/backup-oss.json', 'endpoint': 'https://oss-cn-shenzhen.aliyuncs.com',
+                'region': 'cn-shenzhen', 'bucket': 'replica-bucket',
+            }}
+            source = SimpleNamespace(content_length=42, headers={'x-oss-hash-crc64ecma': '123'})
+            target = SimpleNamespace(content_length=42, headers={
+                'x-oss-hash-crc64ecma': '123', 'x-oss-server-side-encryption': 'AES256',
+            })
+            def bucket(value):
+                return SimpleNamespace(head_object=lambda key: value)
+            source_config = {'bucket': 'source-bucket', 'region': 'cn-heyuan',
+                             'access_key_id': 'id', 'access_key_secret': 'secret'}
+            with patch.object(archive_oss, 'read_config', return_value=source_config), \
+                 patch.object(archive_oss, 'connect', side_effect=[bucket(source), bucket(target)]):
+                self.assertTrue(backup_alert.replica_is_current(config))
+            target.headers['x-oss-hash-crc64ecma'] = '999'
+            with patch.object(archive_oss, 'read_config', return_value=source_config), \
+                 patch.object(archive_oss, 'connect', side_effect=[bucket(source), bucket(target)]):
+                self.assertFalse(backup_alert.replica_is_current(config))
+            for override in ({'bucket': 'source-bucket'}, {'region': 'cn-heyuan'}):
+                with self.subTest(override=override), patch.object(archive_oss, 'read_config', return_value=source_config), \
+                     patch.object(archive_oss, 'connect') as connect:
+                    original = config['replica'].copy()
+                    config['replica'].update(override)
+                    self.assertFalse(backup_alert.replica_is_current(config))
+                    connect.assert_not_called()
+                    config['replica'] = original
+            for endpoint in ('http://oss-cn-shenzhen.aliyuncs.com', 'https://example.com'):
+                with self.subTest(endpoint=endpoint), patch.object(archive_oss, 'read_config', return_value=source_config), \
+                     patch.object(archive_oss, 'connect') as connect:
+                    config['replica']['endpoint'] = endpoint
+                    self.assertFalse(backup_alert.replica_is_current(config))
+                    connect.assert_not_called()
+            with patch.object(archive_oss, 'read_config', side_effect=OSError('unavailable')):
+                self.assertFalse(backup_alert.replica_is_current(config))
+            config['replica'] = 'invalid'
+            self.assertFalse(backup_alert.replica_is_current(config))
+
     def test_restore_fetches_exact_bytes_and_cleans_after_restore_failure(self):
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
