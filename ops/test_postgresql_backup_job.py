@@ -293,13 +293,27 @@ class BackupJobTests(unittest.TestCase):
             })
             def bucket(value):
                 return SimpleNamespace(head_object=lambda key: value)
-            with patch.object(archive_oss, 'read_config', return_value={'bucket': 'source-bucket'}), \
+            source_config = {'bucket': 'source-bucket', 'region': 'cn-heyuan',
+                             'access_key_id': 'id', 'access_key_secret': 'secret'}
+            with patch.object(archive_oss, 'read_config', return_value=source_config), \
                  patch.object(archive_oss, 'connect', side_effect=[bucket(source), bucket(target)]):
                 self.assertTrue(backup_alert.replica_is_current(config))
             target.headers['x-oss-hash-crc64ecma'] = '999'
-            with patch.object(archive_oss, 'read_config', return_value={'bucket': 'source-bucket'}), \
+            with patch.object(archive_oss, 'read_config', return_value=source_config), \
                  patch.object(archive_oss, 'connect', side_effect=[bucket(source), bucket(target)]):
                 self.assertFalse(backup_alert.replica_is_current(config))
+            for override in ({'bucket': 'source-bucket'}, {'region': 'cn-heyuan'}):
+                with self.subTest(override=override), patch.object(archive_oss, 'read_config', return_value=source_config):
+                    original = config['replica'].copy()
+                    config['replica'].update(override)
+                    self.assertFalse(backup_alert.replica_is_current(config))
+                    config['replica'] = original
+            for endpoint in ('http://oss-cn-shenzhen.aliyuncs.com', 'https://example.com'):
+                with self.subTest(endpoint=endpoint), patch.object(archive_oss, 'read_config', return_value=source_config), \
+                     patch.object(archive_oss, 'connect') as connect:
+                    config['replica']['endpoint'] = endpoint
+                    self.assertFalse(backup_alert.replica_is_current(config))
+                    connect.assert_not_called()
             with patch.object(archive_oss, 'read_config', side_effect=OSError('unavailable')):
                 self.assertFalse(backup_alert.replica_is_current(config))
             config['replica'] = 'invalid'

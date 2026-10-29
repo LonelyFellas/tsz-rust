@@ -68,10 +68,13 @@ def replica_is_current(backup_config):
     if not isinstance(replica, dict):
         return False
     try:
-        from backup_archive_oss import connect, identity, read_config
+        from backup_archive_oss import connect, identity, read_config, validate_config
         storage = read_config(Path(replica["storage_config"]))
-        destination = {**storage, "endpoint": replica["endpoint"],
-                       "region": replica["region"], "bucket": replica["bucket"]}
+        destination = validate_config({**storage, "endpoint": replica["endpoint"],
+                                       "region": replica["region"], "bucket": replica["bucket"]})
+        if (destination["bucket"] == storage["bucket"]
+                or destination["region"] == storage["region"]):
+            return False
         latest = json.loads((Path(backup_config["directory"]) / "latest.json").read_text())
         key = identity(latest["backup_id"], latest["sha256"])
         source = connect(storage).head_object(key)
