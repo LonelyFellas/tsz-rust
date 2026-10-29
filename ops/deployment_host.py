@@ -30,6 +30,7 @@ from postgresql_backup_job import inspect_status as inspect_backup_status
 
 ROOT = Path("/opt/tsz-rust")
 LOCK = ROOT / "deploy.lock"
+CROSS_DEPLOY_LOCK = Path("/opt/tsz-cross-deploy.lock")
 BINARY = ROOT / "target/release/tsz-rust"
 MANIFEST = Path("/opt/tsz-deploy-manifests/api.json")
 TRANSACTIONS = ROOT / "deployment-transactions"
@@ -623,21 +624,26 @@ def dispatch(name, plan, credentials):
         require(observed.get("acceptance_matches") or observed.get("recovery_matches"), "terminal_state_mismatch")
         return {"unlocked": True}
     if name == "acquire":
-        require(not LOCK.exists(), "remote_deployment_busy")
-        baseline_matches(plan)
-        configuration_sha256 = check_running_configuration()
-        transaction(plan).mkdir(mode=0o700, parents=True, exist_ok=False)
-        (transaction(plan) / "operation.lock").touch(mode=0o600)
-        atomic(state_path(plan), {"owner": plan["deployment_id"], "sha": plan["source"]["git_sha"],
-                                 "configuration_sha256": configuration_sha256,
-                                 "plan_sha256": hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
-                                 "mutation_started": False, "accepted": False, "completed": [], "pending": None})
-        LOCK.mkdir(mode=0o700)
-        (LOCK / "owner").write_text(plan["deployment_id"])
-        (LOCK / "git_sha").write_text(plan["source"]["git_sha"])
-        with operation(plan):
+        with CROSS_DEPLOY_LOCK.open("a") as cross_lock:
+            try:
+                fcntl.flock(cross_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise HostError("frontend_deployment_busy") from None
+            require(not LOCK.exists(), "remote_deployment_busy")
             baseline_matches(plan)
-        return {"acquired": True}
+            configuration_sha256 = check_running_configuration()
+            transaction(plan).mkdir(mode=0o700, parents=True, exist_ok=False)
+            (transaction(plan) / "operation.lock").touch(mode=0o600)
+            atomic(state_path(plan), {"owner": plan["deployment_id"], "sha": plan["source"]["git_sha"],
+                                     "configuration_sha256": configuration_sha256,
+                                     "plan_sha256": hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                                     "mutation_started": False, "accepted": False, "completed": [], "pending": None})
+            LOCK.mkdir(mode=0o700)
+            (LOCK / "owner").write_text(plan["deployment_id"])
+            (LOCK / "git_sha").write_text(plan["source"]["git_sha"])
+            with operation(plan):
+                baseline_matches(plan)
+            return {"acquired": True}
     with operation(plan):
         if name == "recheck_baseline":
             baseline_matches(plan)
