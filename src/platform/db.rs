@@ -36,7 +36,7 @@ pub async fn connect_runtime(database_url: &str) -> anyhow::Result<PgPool> {
         .disable_statement_logging()
         .options([("statement_timeout", "10s"), ("lock_timeout", "3s")]);
     Ok(PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(20)
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(options)
         .await?)
