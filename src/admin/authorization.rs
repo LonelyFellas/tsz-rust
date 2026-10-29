@@ -70,6 +70,24 @@ pub enum RoutePolicy {
 }
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
+    ("GET", "/chatgpt", RoutePolicy::SuperAdmin),
+    ("POST", "/chatgpt/login", RoutePolicy::SuperAdmin),
+    (
+        "GET",
+        "/chatgpt/login/{attempt_id}",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "DELETE",
+        "/chatgpt/login/{attempt_id}",
+        RoutePolicy::SuperAdmin,
+    ),
+    ("PUT", "/chatgpt/account", RoutePolicy::SuperAdmin),
+    (
+        "DELETE",
+        "/chatgpt/accounts/{client_id}",
+        RoutePolicy::SuperAdmin,
+    ),
     (
         "GET",
         "/question-bank/questions/workbench",

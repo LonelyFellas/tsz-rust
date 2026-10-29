@@ -50,6 +50,7 @@ pub struct OpenCodeProviderList {
 pub enum OpenCodeModelSource {
     Direct,
     Opencode,
+    Chatgpt,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
