@@ -56,6 +56,7 @@ def prune(config, *, now=None):
         if status['status'] != 'passed' or not replica_is_current(config):
             raise ValueError('current_verified_replica_required')
         removed = 0
+        unverified = False
         for folder in root.iterdir():
             if not re.fullmatch(r'scheduled-\d{8}T\d{6}Z-[0-9a-f]{32}', folder.name):
                 continue
@@ -77,7 +78,8 @@ def prune(config, *, now=None):
             except (OSError, ValueError, KeyError, TypeError):
                 continue
             if not replica_has_archive(config, receipt):
-                raise ValueError('expired_replica_unverified')
+                unverified = True
+                continue
             archive.unlink()
             fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -85,6 +87,8 @@ def prune(config, *, now=None):
             finally:
                 os.close(fd)
             removed += 1
+        if unverified:
+            raise ValueError('expired_replica_unverified')
         return removed
 
 

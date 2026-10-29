@@ -67,13 +67,23 @@ class PruneTests(unittest.TestCase):
                 'snapshot_started_at': (now - datetime.timedelta(days=20)).isoformat(),
                 'offsite_reference': 'oss:bucket:key',
             }))
+            good_name = 'scheduled-20261001T000000Z-' + 'b' * 32
+            good_folder = root / good_name
+            good_folder.mkdir(mode=0o700)
+            (good_folder / 'backup.dump').write_bytes(b'archive')
+            (good_folder / 'receipt.json').write_text(json.dumps({
+                'backup_id': good_name, 'environment': 'tshb-test', 'status': 'passed', 'bytes': 7,
+                'snapshot_started_at': (now - datetime.timedelta(days=20)).isoformat(),
+                'offsite_reference': 'oss:bucket:key',
+            }))
             config = {'environment': 'tshb-test', 'directory': directory, 'replica': {}, 'local_retention_days': 14}
             with patch.object(pruning, 'inspect_status', return_value={'status': 'passed', 'backup_id': 'current'}), \
                  patch.object(pruning, 'replica_is_current', return_value=True), \
-                 patch.object(pruning, 'replica_has_archive', return_value=False):
+                 patch.object(pruning, 'replica_has_archive', side_effect=lambda _, r: r['backup_id'] == good_name):
                 with self.assertRaisesRegex(ValueError, 'expired_replica_unverified'):
                     pruning.prune(config, now=now)
             self.assertTrue(archive.exists())
+            self.assertFalse((good_folder / 'backup.dump').exists())
 
     def test_unsafe_configuration_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
