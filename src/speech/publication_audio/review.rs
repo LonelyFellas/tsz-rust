@@ -268,6 +268,7 @@ async fn inspect_impl(
             profile,
             source,
             &item.source_path,
+            item.source_dialect,
             current_forms,
             options.batch,
         )
@@ -560,20 +561,37 @@ async fn validate_inherited_profile(
     profile: &crate::lexicon::dto::VoiceProfileV3,
     source: &crate::speech::generated_source::GeneratedSpeechSource,
     path: &str,
+    source_dialect: Option<crate::lexicon::dto::Dialect>,
     current: Option<(Uuid, &DraftFormsStepContentV3)>,
     batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
 ) -> Result<bool, AppError> {
+    use crate::lexicon::dto::{Dialect, PhonemeLocaleV3};
     use crate::speech::{dubbing::resolve_in, generated_source::voice_input, locale::AccentGroup};
-    for accent in [AccentGroup::Uk, AccentGroup::Us] {
-        let side = if accent == AccentGroup::Uk {
-            "uk"
+    let side = match source {
+        crate::speech::generated_source::GeneratedSpeechSource::Phoneme {
+            phoneme_locale: Some(locale),
+            ..
+        } => Some(if *locale == PhonemeLocaleV3::EnGb {
+            Dialect::Uk
         } else {
-            "us"
-        };
-        if path
-            .split('/')
-            .any(|part| matches!(part, "uk" | "us") && part != side)
-        {
+            Dialect::Us
+        }),
+        _ => source_dialect
+            .filter(|dialect| *dialect != Dialect::Common)
+            .or_else(|| {
+                path.split('/').find_map(|part| match part {
+                    "uk" => Some(Dialect::Uk),
+                    "us" => Some(Dialect::Us),
+                    _ => None,
+                })
+            }),
+    };
+    for accent in [AccentGroup::Uk, AccentGroup::Us] {
+        if side.is_some_and(|side| match side {
+            Dialect::Uk => accent != AccentGroup::Uk,
+            Dialect::Us => accent != AccentGroup::Us,
+            Dialect::Common => false,
+        }) {
             continue;
         }
         let stored = profile

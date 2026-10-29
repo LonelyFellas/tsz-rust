@@ -23,6 +23,7 @@ async fn setup(pool: &PgPool) -> (Reviewer, Uuid, AudioRequirement, Arc<dyn Obje
         target_id: Uuid::now_v7(),
         content_id: None,
         source_path: "/content".into(),
+        source_dialect: None,
         default_for: vec![],
         setting: Some(request.setting.clone()),
         source: Some(request.source.clone()),
@@ -523,6 +524,92 @@ async fn inherited_selection_reorder_and_addition_invalidate_review_but_rename_d
                     .is_none()
             );
         }
+        tx.rollback().await.unwrap();
+    }
+}
+
+#[sqlx::test]
+async fn inherited_grammar_profiles_use_the_owner_dialect_instead_of_array_paths(pool: PgPool) {
+    use tsz_rust::lexicon::dto::Dialect;
+    let (reviewer, entry, uk, storage) = setup(&pool).await;
+    sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,'jenny','azure','en-US-JennyNeural','en-US','female','[]','v1')")
+        .bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+    let service = GeneratedAudioService::new(
+        pool.clone(),
+        Some(Arc::new(Provider {
+            calls: AtomicUsize::new(0),
+            fail_first: false,
+        })),
+        Some(storage.clone()),
+    );
+    let mut request = input(Uuid::now_v7(), Uuid::now_v7(), "Hello");
+    request.setting.voice_id = "jenny".into();
+    request.setting.locale = Some(tsz_rust::speech::locale::EnglishLocale::Us);
+    let mut us = uk.clone();
+    us.target_id = Uuid::now_v7();
+    us.setting = Some(request.setting.clone());
+    us.asset_id = Some(
+        service
+            .generate(reviewer.actor_id, 0, request)
+            .await
+            .unwrap()
+            .asset
+            .id,
+    );
+    us.setting.as_mut().unwrap().audio_asset_id = us.asset_id;
+    sqlx::query("INSERT INTO lexicon.v3_audio_asset_references(asset_id,entry_id,scope,variant_id) VALUES($1,$2,'draft',$3)")
+        .bind(us.asset_id).bind(entry).bind(us.target_id).execute(&pool).await.unwrap();
+    let rec = |item: &AudioRequirement| json!({"id":item.setting.as_ref().unwrap().version_id,"name":"chosen","voice_alias":item.setting.as_ref().unwrap().voice_id,"selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
+    sqlx::query("UPDATE speech.dubbing_groups SET groups=$1 WHERE singleton")
+        .bind(json!([{"id":Uuid::now_v7(),"name":"grammar","areas":["grammar"],"uk":[rec(&uk)],"us":[rec(&us)],"revision":1,"is_global":false}])).execute(&pool).await.unwrap();
+    for (mut item, dialect) in [(uk, Dialect::Uk), (us, Dialect::Us)] {
+        item.source_path = "/meanings/pos/0/grammar_structures/0/variants/0".into();
+        item.source_dialect = Some(dialect);
+        item.profile = Some(Arc::new(
+            serde_json::from_value(
+                json!({"voices":[item.setting],"dubbing":{"mode":"inherit","area":"grammar"}}),
+            )
+            .unwrap(),
+        ));
+        let probes = probe_assets(
+            &pool,
+            Owner::Entry(entry),
+            std::slice::from_ref(&item),
+            storage.as_ref(),
+        )
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let manifest = inspect_in(
+            &mut tx,
+            reviewer,
+            Owner::Entry(entry),
+            1,
+            vec![item.clone()],
+            None,
+            &probes,
+        )
+        .await
+        .unwrap();
+        assert!(manifest.ready(), "{dialect:?}: {:?}", manifest.items());
+        tx.rollback().await.unwrap();
+        item.source_dialect = Some(Dialect::Common);
+        let mut tx = pool.begin().await.unwrap();
+        let common = inspect_in(
+            &mut tx,
+            reviewer,
+            Owner::Entry(entry),
+            1,
+            vec![item],
+            None,
+            &probes,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !common.ready(),
+            "common still requires both effective accent selections"
+        );
         tx.rollback().await.unwrap();
     }
 }

@@ -35,6 +35,9 @@ pub struct AudioRequirement {
     pub content_id: Option<Uuid>,
     /// JSON pointer to the source owner; never a client-provided storage key.
     pub source_path: String,
+    /// Some owners encode their dialect as a field rather than a path segment.
+    #[serde(skip)]
+    pub source_dialect: Option<crate::lexicon::dto::Dialect>,
     pub default_for: Vec<AccentGroup>,
     #[schema(required = true)]
     pub setting: Option<VoiceSettingV3>,
@@ -132,6 +135,12 @@ fn add_selected(
     content: Option<Uuid>,
     out: &mut Vec<AudioRequirement>,
 ) -> Result<(), AppError> {
+    let source_dialect = match owner["dialect"].as_str() {
+        Some("uk") => Some(crate::lexicon::dto::Dialect::Uk),
+        Some("us") => Some(crate::lexicon::dto::Dialect::Us),
+        Some("common") => Some(crate::lexicon::dto::Dialect::Common),
+        _ => None,
+    };
     if let Some(voices) = owner
         .pointer("/voice_profile/voices")
         .and_then(Value::as_array)
@@ -146,6 +155,7 @@ fn add_selected(
                 target_id: target,
                 content_id: content,
                 source_path: path.into(),
+                source_dialect,
                 default_for: vec![],
                 setting: None,
                 profile: Some(profile.clone()),
@@ -169,6 +179,7 @@ fn add_selected(
                 target_id: target,
                 content_id: content,
                 source_path: path.into(),
+                source_dialect,
                 default_for: vec![],
                 asset_id: setting.audio_asset_id,
                 setting: Some(setting),
@@ -186,6 +197,7 @@ fn add_selected(
                     target_id: target,
                     content_id: content,
                     source_path: path.into(),
+                    source_dialect,
                     default_for: vec![],
                     setting: None,
                     profile: None,
@@ -285,6 +297,7 @@ fn variant(
                     target_id: target,
                     content_id: content,
                     source_path: pron_path.clone(),
+                    source_dialect: None,
                     default_for: vec![*accent],
                     setting: None,
                     profile: None,
@@ -319,6 +332,23 @@ mod tests {
             }]}
         }}]}})
     }
+    #[test]
+    fn grammar_owner_dialect_is_retained_internally_not_in_the_wire_manifest() {
+        let value = json!({"meanings":{"id":Uuid::now_v7(),"dialect":"uk","content":{"version":2,"text":"grammar","annotations":[]},
+            "voice_profile":{"voices":[voice("en-GB",true,Some(Uuid::now_v7()))]}}});
+        let items = collect(&value).unwrap();
+        assert_eq!(
+            items[0].source_dialect,
+            Some(crate::lexicon::dto::Dialect::Uk)
+        );
+        assert!(
+            serde_json::to_value(&items[0])
+                .unwrap()
+                .get("source_dialect")
+                .is_none()
+        );
+    }
+
     #[test]
     fn explicitly_inherited_empty_optional_profile_is_not_silently_ready() {
         let value = json!({"meanings":{"id":Uuid::now_v7(),"content":{"version":2,"text":"meaning","annotations":[]},
