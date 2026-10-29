@@ -50,6 +50,7 @@ pub struct OpenCodeProviderList {
 pub enum OpenCodeModelSource {
     Direct,
     Opencode,
+    Chatgpt,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -274,6 +275,7 @@ async fn probe_request(state: &AppState, start: bool) -> Result<Response, AppErr
             if start { Method::POST } else { Method::GET },
             format!("{}/v1/model-probes", config.base_url),
         )
+        .timeout(std::time::Duration::from_secs(20))
         .bearer_auth(&config.outbound_token)
         .send()
         .await
@@ -339,6 +341,7 @@ async fn selection(
             },
             url,
         )
+        .timeout(std::time::Duration::from_secs(20))
         .bearer_auth(&config.outbound_token);
     if let Some(body) = body {
         request = request

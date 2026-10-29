@@ -17,6 +17,20 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
+        .route("/chatgpt", get(admin::chatgpt::accounts))
+        .route("/chatgpt/login", post(admin::chatgpt::login))
+        .route(
+            "/chatgpt/login/{attempt_id}",
+            get(admin::chatgpt::login_status).delete(admin::chatgpt::cancel_login),
+        )
+        .route(
+            "/chatgpt/account",
+            axum::routing::put(admin::chatgpt::use_account),
+        )
+        .route(
+            "/chatgpt/accounts/{client_id}",
+            axum::routing::delete(admin::chatgpt::logout),
+        )
         .route(
             "/opencode/probes",
             get(admin::opencode_models::probe_report).post(admin::opencode_models::start_probes),

@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod ai_ledger;
 pub mod auth;
 pub(crate) mod authorization;
+pub mod chatgpt;
 mod extract;
 mod model;
 pub mod opencode;
