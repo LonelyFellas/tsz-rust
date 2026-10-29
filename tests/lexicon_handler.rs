@@ -30,6 +30,12 @@ mod batch4;
 mod batch5;
 #[path = "lexicon_handler/dubbing_updates.rs"]
 mod dubbing_updates;
+#[path = "lexicon_handler/publication_audio.rs"]
+mod publication_audio;
+use publication_audio::{
+    audio_forms, confirm_audio, fixture_state, generated_profile, publish_reviewed_v3,
+    save_publishable_forms,
+};
 #[path = "lexicon_handler/fixtures.rs"]
 mod fixtures;
 #[path = "lexicon_handler/shared_forms.rs"]
@@ -39,19 +45,6 @@ mod spelling_markup;
 
 const ROOT: &str = "/api/v1/admin/lexicon";
 
-// Keep historical rollback setup in SQLx's measured automatic migration phase.
-static ROLLBACK_BASELINE_MIGRATOR: std::sync::LazyLock<sqlx::migrate::Migrator> =
-    std::sync::LazyLock::new(|| {
-        let mut migrator = sqlx::migrate!("./migrations");
-        migrator.migrations = migrator
-            .migrations
-            .into_owned()
-            .into_iter()
-            .filter(|migration| migration.version <= 20261027100000)
-            .collect::<Vec<_>>()
-            .into();
-        migrator
-    });
 #[derive(Clone, Default)]
 struct TestRouterStats {
     router_builds: usize,
@@ -97,6 +90,8 @@ fn test_request_kind(method: &Method, uri: &str) -> &'static str {
         ("POST", "/entries") => "create",
         ("GET", "/entries") => "list",
         ("POST", "/entries/publications/batch") => "publish-batch",
+        ("POST", path) if path.ends_with("/publication-audio/check") => "audio-check",
+        ("POST", path) if path.ends_with("/publication-audio/confirm") => "audio-confirm",
         ("POST", path) if path.ends_with("/steps/forms/impact") => "forms-impact",
         ("PUT", path) if path.ends_with("/steps/forms") => "forms-save",
         ("PUT", path) if path.ends_with("/steps/meanings") => "meanings-save",
@@ -337,7 +332,14 @@ async fn call_with_form_capability(
         .method(method)
         .uri(uri)
         .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
-        .header("X-TSZ-Voice-Versions", "v1");
+        .header(
+            "X-TSZ-Voice-Versions",
+            if publication_audio::generated_contract() {
+                "v3"
+            } else {
+                "v1"
+            },
+        );
     if markup {
         builder = builder.header("X-TSZ-Spelling-Markup", "v1");
     }
@@ -704,7 +706,7 @@ fn complete_v3_meanings_fixture(pos_id: Value) -> Value {
 }
 
 async fn create_v3_with_complete_forms(state: &AppState, pool: &PgPool, bearer: &str) -> Value {
-    create_v3_forms_fixture(state, pool, bearer, false).await
+    create_v3_forms_fixture(state, pool, bearer, false, true).await
 }
 
 // Explicit opt-in for pre-existing tests whose fixture intentionally creates homonyms.
@@ -713,7 +715,7 @@ async fn create_v3_with_annotated_complete_forms(
     pool: &PgPool,
     bearer: &str,
 ) -> Value {
-    create_v3_forms_fixture(state, pool, bearer, true).await
+    create_v3_forms_fixture(state, pool, bearer, true, true).await
 }
 
 async fn create_v3_forms_fixture(
@@ -721,6 +723,7 @@ async fn create_v3_forms_fixture(
     pool: &PgPool,
     bearer: &str,
     annotate: bool,
+    audio: bool,
 ) -> Value {
     let dictionary_term_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM dictionary.active_terms WHERE normalized_term = 'harbour')",
@@ -770,6 +773,11 @@ async fn create_v3_forms_fixture(
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let entry_id = created["word"]["id"].as_str().unwrap();
     let forms_content = complete_v3_forms_fixture();
+    let forms_content = if audio {
+        audio_forms(state, entry_id, forms_content).await
+    } else {
+        forms_content
+    };
     let (status, impact) = call(
         state,
         Method::POST,
@@ -981,7 +989,7 @@ async fn v3_detection_recovers_an_asymmetric_region_index_in_both_directions(poo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -1186,7 +1194,7 @@ async fn v3_detection_uses_generic_content_alternative_spelling_evidence(pool: P
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -1361,7 +1369,7 @@ async fn step_content_body_limit_is_raised_bounded_and_scoped_per_route(pool: Pg
     }
 
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let state = fixture_state(pool.clone(), redis);
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
     let entry_id = Uuid::now_v7();
@@ -1447,7 +1455,7 @@ async fn step_content_body_limit_is_raised_bounded_and_scoped_per_route(pool: Pg
 #[sqlx::test]
 async fn v3_reading_styles_persist_and_round_trip_independently(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -1562,7 +1570,7 @@ async fn v3_persists_all_three_group_dialect_rule_combinations(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -1804,7 +1812,7 @@ async fn v3_pronoun_saves_a_fixed_non_base_form_and_round_trips_it(pool: PgPool)
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -1941,7 +1949,7 @@ async fn v3_meanings_draft_saves_before_forms_complete_but_complete_is_blocked(p
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -2064,7 +2072,7 @@ async fn v3_meanings_draft_saves_before_forms_complete_but_complete_is_blocked(p
 #[sqlx::test]
 async fn v3_grammar_form_links_save_first_pronunciation_and_clear(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -2279,7 +2287,7 @@ async fn v3_grammar_form_links_save_first_pronunciation_and_clear(pool: PgPool) 
         .unwrap();
     assert!(annotations.iter().all(|item| item["type"] != "phoneme"));
     assert!(annotations.iter().any(|item| item["type"] == "pause"));
-    let (status, publication) = publish_ready_v3(&state, &bearer, &cleared).await;
+    let (status, publication) = publish_reviewed_v3(&state, &bearer, &cleared).await;
     assert_eq!(status, StatusCode::CREATED, "{publication}");
     let (status, current) = call(
         &state,
@@ -2344,7 +2352,7 @@ async fn v3_grammar_form_links_save_first_pronunciation_and_clear(pool: PgPool) 
 #[sqlx::test]
 async fn sentence_formats_persist_in_definitions_and_shared_sentences(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -2415,7 +2423,7 @@ async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -2485,62 +2493,73 @@ async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
 /// V3 → V2 → V3 往返会吞掉它，所以这条一路走到 GET 才算数。
 #[sqlx::test]
 async fn v3_sense_group_voice_editor(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-    let word =
-        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["A harbour sentence."])
-            .await;
-    assert!(
-        word["word"]["meanings"]["sense_groups"][0]
-            .get("name_en_rich")
-            .is_none()
-    );
-    let mut meanings = word["word"]["meanings"].clone();
-    let text = meanings["sense_groups"][0]["name_en"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let rich = json!({"version":2,"text":text,"annotations":[]});
-    let profile = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]});
-    meanings["sense_groups"][0]["name_en_rich"] = rich.clone();
-    meanings["sense_groups"][0]["voice_profile"] = profile.clone();
-    let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
-    let assert_fields = |body: &Value| {
-        assert_eq!(
-            body["word"]["meanings"]["sense_groups"][0]["name_en_rich"],
-            rich
+    publication_audio::with_generated_contract(async {
+        let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+        let state = fixture_state(pool.clone(), redis)
+            .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+        let admin_id = seed_admin(&pool).await;
+        let bearer = token(&state, admin_id);
+        let word =
+            create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["A harbour sentence."])
+                .await;
+        assert!(
+            word["word"]["meanings"]["sense_groups"][0]
+                .get("name_en_rich")
+                .is_none()
         );
-        assert_eq!(
-            body["word"]["meanings"]["sense_groups"][0]["voice_profile"],
-            profile
-        );
-    };
-    assert_fields(&saved);
-    let (status, fetched) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{}", word["word"]["id"].as_str().unwrap()),
-        &bearer,
-        None,
-        None,
-    )
+        let mut meanings = word["word"]["meanings"].clone();
+        let text = meanings["sense_groups"][0]["name_en"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let rich = json!({"version":2,"text":text,"annotations":[]});
+        let profile = generated_profile(
+            &state,
+            admin_id,
+            json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]}),
+            rich.clone(),
+        )
+        .await;
+        meanings["sense_groups"][0]["name_en_rich"] = rich.clone();
+        meanings["sense_groups"][0]["voice_profile"] = profile.clone();
+        let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
+        let assert_fields = |body: &Value| {
+            assert_eq!(
+                body["word"]["meanings"]["sense_groups"][0]["name_en_rich"],
+                rich
+            );
+            assert_eq!(
+                body["word"]["meanings"]["sense_groups"][0]["voice_profile"],
+                profile
+            );
+        };
+        assert_fields(&saved);
+        let (status, fetched) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/{}", word["word"]["id"].as_str().unwrap()),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{fetched}");
+        assert_fields(&fetched);
+        let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
+        assert_eq!(status, StatusCode::CREATED, "{published}");
+        assert_fields(&published);
+    })
     .await;
-    assert_eq!(status, StatusCode::OK, "{fetched}");
-    assert_fields(&fetched);
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
-    assert_eq!(status, StatusCode::CREATED, "{published}");
-    assert_fields(&published);
 }
 
 #[sqlx::test]
 async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool) {
+    publication_audio::with_generated_contract(async {
+
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -2557,13 +2576,27 @@ async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool)
     );
 
     // A complete catalog exceeds the former 20-item limit; also cover the new boundary.
-    let grammar_profile = json!({"voices": (0..2000).map(|index| json!({"voice_id": format!("voice-{index}"), "enabled": index % 2 == 0, "rate_percent": if index % 2 == 0 { -25 } else { 10 }, "pitch_semitones":2, "style":"cheerful"})).collect::<Vec<_>>()});
+    let mut grammar_profile = json!({"voices": (0..2000).map(|index| json!({"voice_id": format!("voice-{index}"), "enabled": index % 2 == 0, "rate_percent": if index % 2 == 0 { -25 } else { 10 }, "pitch_semitones":2, "style":"cheerful"})).collect::<Vec<_>>()});
     let sentence_profile = json!({"voices": [
         {"voice_id":"jenny", "enabled":false, "rate_percent":-20, "pitch_semitones":2, "style":"cheerful", "version_id":Uuid::now_v7(), "version_name":"慢读", "locale":"en-US"},
         {"voice_id":"jenny", "enabled":true, "rate_percent":20, "pitch_semitones":2, "style":"cheerful", "version_id":Uuid::now_v7(), "version_name":"自然", "locale":"en-US"},
         {"voice_id":"sonia", "enabled":true, "rate_percent":0, "version_id":Uuid::now_v7(), "version_name":"英式", "locale":"en-GB"}
     ]});
+    // Keep the full candidate boundary; only catalog-backed selections publish.
+    for voice in grammar_profile["voices"].as_array_mut().unwrap() {
+        voice["enabled"] = json!(false);
+    }
+    grammar_profile["voices"][0] = json!({"voice_id":"sonia","enabled":true,"rate_percent":-25});
+    let grammar_content = json!({"version":2,"text":"countable noun","annotations":[]});
+    let sentence_content = json!({"version":2,"text":"A harbour sentence.","annotations":[]});
+    let grammar_profile =
+        generated_profile(&state, admin_id, grammar_profile, grammar_content.clone()).await;
+    let sentence_profile =
+        generated_profile(&state, admin_id, sentence_profile, sentence_content.clone()).await;
     let mut meanings = word["word"]["meanings"].clone();
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"] = grammar_content;
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["value"] =
+        sentence_content;
     meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
         grammar_profile.clone();
     meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["voice_profile"] =
@@ -2630,7 +2663,7 @@ async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool)
     assert_eq!(legacy_save.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     // 发布路径上还有两处 V2 往返，配置同样不能在这里蒸发。
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     assert_profiles(&published, "发布响应");
     let snapshot_before: Value = sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE entry_id=$1 ORDER BY publication_number DESC LIMIT 1")
@@ -2645,6 +2678,8 @@ async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool)
         snapshot_after, snapshot_before,
         "草稿改名不能改写已发布配音版本"
     );
+
+    }).await;
 }
 
 #[sqlx::test]
@@ -2652,7 +2687,7 @@ async fn v3_voice_profile_rejects_out_of_range_rate_and_oversized_voice_list(poo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -2722,7 +2757,7 @@ async fn v3_definition_grammar_is_optional_for_draft_but_required_for_complete_a
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -2808,7 +2843,7 @@ async fn v3_complete_forms_require_pos_and_recompute_meanings_completion(pool: P
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -3017,7 +3052,7 @@ async fn v3_draft_without_any_form_stays_listed(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -3105,7 +3140,7 @@ async fn related_search_matches_whole_words_only(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -3157,7 +3192,7 @@ async fn v3_empty_variant_shells_save_without_surfaces_but_cannot_complete(pool:
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -3342,7 +3377,7 @@ async fn v3_form_storage_uses_the_authoritative_surface_normalization(pool: PgPo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -3471,7 +3506,7 @@ async fn v3_text_relation_round_trips_through_publication(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -3524,7 +3559,7 @@ async fn v3_text_relation_round_trips_through_publication(pool: PgPool) {
     );
 
     // 纯文本关联允许发布，且不得自动创建或绑定目标词条。
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -3583,7 +3618,7 @@ async fn v3_freetext_relation_saves_and_publishes(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -3622,7 +3657,7 @@ async fn v3_freetext_relation_saves_and_publishes(pool: PgPool) {
     );
     assert!(saved_relation["target_word_id"].is_null());
 
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -3638,15 +3673,15 @@ async fn v3_freetext_relation_saves_and_publishes(pool: PgPool) {
 #[sqlx::test]
 async fn related_search_cursor_survives_writes_and_uses_current_remaining_count(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
     let first = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
-    let (status, first) = publish_ready_v3(&state, &bearer, &first).await;
+    let (status, first) = publish_reviewed_v3(&state, &bearer, &first).await;
     assert_eq!(status, StatusCode::CREATED, "{first}");
     let second = create_ready_v3_annotated_draft_with_sentences(&state, &pool, &bearer, &[]).await;
-    let (status, second) = publish_ready_v3(&state, &bearer, &second).await;
+    let (status, second) = publish_reviewed_v3(&state, &bearer, &second).await;
     assert_eq!(status, StatusCode::CREATED, "{second}");
     let path =
         format!("{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=1");
@@ -3658,7 +3693,7 @@ async fn related_search_cursor_survives_writes_and_uses_current_remaining_count(
 
     // 新建同排序词面的后续目标，同时产生 lexicon.entry/surface_projection outbox 事件。
     let third = create_ready_v3_annotated_draft_with_sentences(&state, &pool, &bearer, &[]).await;
-    let (status, third) = publish_ready_v3(&state, &bearer, &third).await;
+    let (status, third) = publish_reviewed_v3(&state, &bearer, &third).await;
     assert_eq!(status, StatusCode::CREATED, "{third}");
     let (status, page2) = call(
         &state,
@@ -3763,11 +3798,11 @@ async fn related_search_cursor_survives_writes_and_uses_current_remaining_count(
 #[sqlx::test]
 async fn candidate_searches_keep_published_senses_and_reject_removed_draft_parameter(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let draft = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
-    let (status, published) = publish_ready_v3(&state, &bearer, &draft).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &draft).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let path =
         format!("{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20");
@@ -3893,7 +3928,7 @@ async fn candidate_searches_keep_published_senses_and_reject_removed_draft_param
         relation.remove(field);
     }
     let repaired = save_v3_meanings(&state, &bearer, &source, source_meanings).await;
-    let (status, repaired_publication) = publish_ready_v3(&state, &bearer, &repaired).await;
+    let (status, repaired_publication) = publish_reviewed_v3(&state, &bearer, &repaired).await;
     assert_eq!(status, StatusCode::CREATED, "{repaired_publication}");
 }
 
@@ -3903,7 +3938,7 @@ async fn relation_and_discovery_hide_drafts_without_granting_edit_rights(pool: P
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner_id = seed_admin(&pool).await;
     let owner = token(&state, owner_id);
@@ -4002,7 +4037,7 @@ async fn an_outsider_saves_draft_relation_but_publishes_only_after_target_public
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner = token(&state, seed_admin(&pool).await);
     let outsider = token(&state, seed_admin(&pool).await);
@@ -4022,7 +4057,7 @@ async fn an_outsider_saves_draft_relation_but_publishes_only_after_target_public
     // outsider 另起一个词面建词条：同形词要走标注确认，而标注只有创建者能改，
     // 会把这条用例卡在与本次改动无关的那道门上。
     let source_id = create_legacy_v3_empty_skeleton(&state, &outsider, "wharf").await;
-    let (_, source) = save_v3_forms_after_impact(
+    let (_, source) = save_publishable_forms(
         &state,
         &outsider,
         &source_id.to_string(),
@@ -4093,10 +4128,10 @@ async fn an_outsider_saves_draft_relation_but_publishes_only_after_target_public
             .await
             .unwrap();
     assert_eq!(count, 0);
-    let (status, target_published) = publish_ready_v3(&state, &owner, &target).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &owner, &target).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     // 沿用原 revision 发布成功，也证明失败未偷偷修改引用方草稿。
-    let (status, published) = publish_ready_v3(&state, &outsider, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &outsider, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let (scope, publication_id) = sqlx::query_as::<_, (String, Option<Uuid>)>(
         "SELECT target_content_scope::text, target_publication_id
@@ -4124,7 +4159,7 @@ async fn surface_machinery_shows_other_admins_drafts(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner_id = seed_admin(&pool).await;
     let owner = token(&state, owner_id);
@@ -4212,7 +4247,7 @@ async fn surface_machinery_shows_other_admins_drafts(pool: PgPool) {
     let outsider_entry_id = outsider_created["word"]["id"].as_str().unwrap().to_string();
 
     // 词形步：impact 预览会亮出别人的草稿词形，保存需带确认。
-    let forms_content = complete_v3_forms_fixture();
+    let forms_content = audio_forms(&state, &outsider_entry_id, complete_v3_forms_fixture()).await;
     let (status, impact) = call(
         &state,
         Method::POST,
@@ -4284,7 +4319,7 @@ async fn other_admins_drafts_require_acknowledgement_and_then_coexist(pool: PgPo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner_id = seed_admin(&pool).await;
     let owner = token(&state, owner_id);
@@ -4343,7 +4378,7 @@ async fn other_admins_drafts_require_acknowledgement_and_then_coexist(pool: PgPo
     .await;
     assert_eq!(status, StatusCode::CREATED, "{outsider_created}");
     let outsider_entry_id = outsider_created["word"]["id"].as_str().unwrap();
-    let forms_content = complete_v3_forms_fixture();
+    let forms_content = audio_forms(&state, outsider_entry_id, complete_v3_forms_fixture()).await;
     let (status, impact) = call(
         &state,
         Method::POST,
@@ -4457,6 +4492,7 @@ async fn other_admins_drafts_require_acknowledgement_and_then_coexist(pool: PgPo
     assert_eq!(status, StatusCode::OK, "{outsider_saved}");
 
     // 词形步已确认过这批命中，发布期不再重复要求——同名词条就此共存。
+    confirm_audio(&state, &outsider, &outsider_saved).await;
     let (status, outsider_published) = call(
         &state,
         Method::POST,
@@ -4493,6 +4529,7 @@ async fn other_admins_drafts_require_acknowledgement_and_then_coexist(pool: PgPo
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{owner_saved}");
+    confirm_audio(&state, &owner, &owner_saved).await;
     let owner_publish_body = json!({
         "schema_version": 3,
         "base_revision": owner_saved["word"]["revision"]
@@ -4559,7 +4596,7 @@ async fn inbound_relation_previews_show_other_admins_draft_sources(pool: PgPool)
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let publisher_id = seed_admin(&pool).await;
     let publisher = token(&state, publisher_id);
@@ -4588,6 +4625,7 @@ async fn inbound_relation_previews_show_other_admins_draft_sources(pool: PgPool)
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{target_saved}");
+    confirm_audio(&state, &publisher, &target_saved).await;
     let (status, target_published) = call(
         &state,
         Method::POST,
@@ -4634,7 +4672,7 @@ async fn inbound_relation_previews_show_other_admins_draft_sources(pool: PgPool)
     .await;
     assert_eq!(status, StatusCode::CREATED, "{referrer_created}");
     let referrer_entry_id = referrer_created["word"]["id"].as_str().unwrap();
-    let (_, referrer_forms) = save_v3_forms_after_impact(
+    let (_, referrer_forms) = save_publishable_forms(
         &state,
         &referrer,
         referrer_entry_id,
@@ -4730,6 +4768,7 @@ async fn inbound_relation_previews_show_other_admins_draft_sources(pool: PgPool)
 
     // referrer 发布引用词条后：外人经发布分支看到引用（钉死去重条件不双失明），
     // 创建者经草稿分支看到，两边各恰一条。
+    confirm_audio(&state, &referrer, &referrer_saved).await;
     let (status, referrer_published) = call(
         &state,
         Method::POST,
@@ -4770,7 +4809,7 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -4848,7 +4887,7 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
     assert_eq!(conflict["code"], "idempotency_conflict");
 
-    let forms = complete_v3_forms_fixture();
+    let forms = audio_forms(&state, entry_id, complete_v3_forms_fixture()).await;
     let (impact, saved) =
         save_v3_forms_after_impact(&state, &bearer, entry_id, 1, "complete", forms).await;
     assert_eq!(impact["schema_version"], 3);
@@ -5008,6 +5047,7 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
         "create-time dictionary suggestion surfaces must remain auditable tombstones after replacement"
     );
 
+    confirm_audio(&state, &bearer, &meanings_saved).await;
     let publish_key = Uuid::now_v7();
     let publish_body = json!({"schema_version": 3, "base_revision": 3});
     let (status, published) = call(
@@ -5108,6 +5148,7 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
         StatusCode::OK,
         "创建第二版 native 草稿失败：{edited_again}"
     );
+    confirm_audio(&state, &bearer, &edited_again).await;
     let second_publish_body = json!({
         "schema_version": 3,
         "base_revision": edited_again["word"]["revision"]
@@ -5288,7 +5329,7 @@ async fn v3_projection_flag_blocks_every_projection_dependent_write_without_muta
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let enabled = AppState::for_test_with_redis(pool.clone(), redis)
+    let enabled = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&enabled, admin_id);
@@ -5405,7 +5446,7 @@ async fn v3_forms_projection_retains_tombstones_and_emits_one_replay_event(pool:
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -5523,7 +5564,7 @@ async fn v3_forms_impact_canonicalizes_unlinked_changes_without_confirmation(poo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -5588,7 +5629,7 @@ async fn v3_forms_impact_matches_every_meaning_node_actually_removed_by_save(poo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -5799,7 +5840,7 @@ async fn v3_meanings_reject_read_only_and_invalid_complete_without_writing(pool:
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -5988,7 +6029,7 @@ async fn v3_aggregate_node_limit_is_enforced_across_forms_and_meanings(pool: PgP
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -6069,7 +6110,7 @@ async fn v3_detection_and_create_use_kaikki_forms_and_ipa_evidence(pool: PgPool)
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -6201,7 +6242,7 @@ async fn v3_create_materializes_builtin_and_existing_pos_suggestions(pool: PgPoo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -6415,7 +6456,7 @@ async fn v3_create_materializes_builtin_and_existing_pos_suggestions(pool: PgPoo
 #[sqlx::test]
 async fn list_keeps_creator_and_reports_last_updater_after_save_publish_and_archive(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let creator = seed_admin(&pool).await;
     let updater = seed_admin(&pool).await;
@@ -6441,7 +6482,7 @@ async fn list_keeps_creator_and_reports_last_updater_after_save_publish_and_arch
                 word = save_v3_meanings(&state, &updater_token, &word, meanings).await;
             }
             "published" => {
-                let (status, published) = publish_ready_v3(&state, &creator_token, &word).await;
+                let (status, published) = publish_reviewed_v3(&state, &creator_token, &word).await;
                 assert_eq!(status, StatusCode::CREATED, "{published}");
                 word = published;
             }
@@ -6480,7 +6521,7 @@ async fn list_keeps_creator_and_reports_last_updater_after_save_publish_and_arch
 #[sqlx::test]
 async fn list_filters_separate_headwords_and_creators_and_keep_totals(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let first = seed_admin(&pool).await;
     let second = seed_admin(&pool).await;
@@ -6587,7 +6628,7 @@ async fn list_filters_separate_headwords_and_creators_and_keep_totals(pool: PgPo
 #[sqlx::test]
 async fn v3_empty_draft_list_keeps_initial_name_and_matches_detection(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner = token(&state, seed_admin(&pool).await);
     let outsider = token(&state, seed_admin(&pool).await);
@@ -6678,7 +6719,7 @@ async fn v3_create_not_found_without_existing_pos_stays_blank(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -6779,7 +6820,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -6787,7 +6828,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     let target_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &bearer, &target_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     let target_entry_id = target_published["word"]["id"].as_str().unwrap();
     let target_entry_uuid = Uuid::parse_str(target_entry_id).unwrap();
@@ -6897,7 +6938,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         "target_gloss": target_gloss
     }]);
     let (_, forms_saved) =
-        save_v3_forms_after_impact(&state, &bearer, entry_id, 1, "complete", forms).await;
+        save_publishable_forms(&state, &bearer, entry_id, 1, "complete", forms).await;
     assert_eq!(forms_saved["word"]["kind"], "phrase");
     assert_eq!(
         forms_saved["word"]["presentation"]["matched_surfaces"],
@@ -6927,7 +6968,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
                 .remove("component_usages");
         }
     }
-    let (_, compatibility_saved) = save_v3_forms_after_impact(
+    let (_, compatibility_saved) = save_publishable_forms(
         &state,
         &bearer,
         entry_id,
@@ -6953,7 +6994,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         explicit_clear["pos"][0]["forms"][0]["regional_variants"][dialect]["component_usages"] =
             json!([]);
     }
-    let (_, explicitly_cleared) = save_v3_forms_after_impact(
+    let (_, explicitly_cleared) = save_publishable_forms(
         &state,
         &bearer,
         entry_id,
@@ -6971,7 +7012,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         );
     }
 
-    let (_, forms_saved) = save_v3_forms_after_impact(
+    let (_, forms_saved) = save_publishable_forms(
         &state,
         &bearer,
         entry_id,
@@ -7067,7 +7108,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     let mut target_meanings = target_published["word"]["meanings"].clone();
     target_meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("新港口");
     let target_saved = save_v3_meanings(&state, &bearer, &target_published, target_meanings).await;
-    let (status, target_republished) = publish_ready_v3(&state, &bearer, &target_saved).await;
+    let (status, target_republished) = publish_reviewed_v3(&state, &bearer, &target_saved).await;
     assert_eq!(status, StatusCode::CREATED, "{target_republished}");
     let current_target_publication: Uuid =
         sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
@@ -7077,7 +7118,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
             .unwrap();
     assert_ne!(current_target_publication, target_publication_id);
 
-    let (_, phrase_resaved) = save_v3_forms_after_impact(
+    let (_, phrase_resaved) = save_publishable_forms(
         &state,
         &bearer,
         entry_id,
@@ -7124,6 +7165,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     .await
     .unwrap();
 
+    confirm_audio(&state, &bearer, &phrase_resaved).await;
     let (status, published) = call(
         &state,
         Method::POST,
@@ -7246,7 +7288,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     let mut phrase_meanings = published["word"]["meanings"].clone();
     phrase_meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("短语新义");
     let phrase_saved = save_v3_meanings(&state, &bearer, &published, phrase_meanings).await;
-    let (status, phrase_republished) = publish_ready_v3(&state, &bearer, &phrase_saved).await;
+    let (status, phrase_republished) = publish_reviewed_v3(&state, &bearer, &phrase_saved).await;
     assert_eq!(status, StatusCode::CREATED, "{phrase_republished}");
     let current_phrase_publication: Uuid =
         sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
@@ -7391,7 +7433,7 @@ async fn create_published_v3_phrase(
 ) -> (Value, Uuid) {
     let meanings_saved = create_ready_v3_phrase(state, bearer, surface, uk_component_usages).await;
     let entry_id = meanings_saved["word"]["id"].as_str().unwrap();
-    let (status, published) = publish_ready_v3(state, bearer, &meanings_saved).await;
+    let (status, published) = publish_reviewed_v3(state, bearer, &meanings_saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let publication_id: Uuid =
         sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
@@ -7420,8 +7462,9 @@ async fn complete_v3_phrase_draft(
     entry_id: &str,
     forms: Value,
 ) -> Value {
+    let forms = audio_forms(state, entry_id, forms).await;
     let (_, forms_saved) =
-        save_v3_forms_after_impact(state, bearer, entry_id, 1, "complete", forms).await;
+        save_publishable_forms(state, bearer, entry_id, 1, "complete", forms).await;
     let (status, meanings_saved) = call(
         state,
         Method::PUT,
@@ -7446,14 +7489,14 @@ async fn v3_form_phrase_components_reject_invalid_form_type_before_storage(pool:
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
     let target_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &bearer, &target_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     let target_id = Uuid::parse_str(target_published["word"]["id"].as_str().unwrap()).unwrap();
     let publication_id = current_publication_id(&pool, target_id).await;
@@ -7498,14 +7541,14 @@ async fn v3_sense_phrase_components_reject_invalid_form_type_before_storage(pool
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
     let target_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &bearer, &target_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     let target_id = Uuid::parse_str(target_published["word"]["id"].as_str().unwrap()).unwrap();
     let publication_id = current_publication_id(&pool, target_id).await;
@@ -7569,7 +7612,7 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -7577,7 +7620,7 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
     let word_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_draft).await;
+    let (status, word_published) = publish_reviewed_v3(&state, &bearer, &word_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{word_published}");
     let word_entry_id = word_published["word"]["id"].as_str().unwrap();
     let word_publication_id: Uuid =
@@ -7754,8 +7797,7 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
             "guard phrase"
         )]);
     let (_, outer_forms_saved) =
-        save_v3_forms_after_impact(&state, &bearer, outer_entry_id, 1, "complete", outer_forms)
-            .await;
+        save_publishable_forms(&state, &bearer, outer_entry_id, 1, "complete", outer_forms).await;
     assert_eq!(
         outer_forms_saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"]
             [0]["target_word_id"],
@@ -7779,7 +7821,7 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{outer_meanings}");
-    let (status, outer_published) = publish_ready_v3(&state, &bearer, &outer_meanings).await;
+    let (status, outer_published) = publish_reviewed_v3(&state, &bearer, &outer_meanings).await;
     assert_eq!(status, StatusCode::CREATED, "{outer_published}");
     let outer_publication_id: Uuid =
         sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
@@ -7856,7 +7898,7 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -7927,7 +7969,7 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
             {"id": Uuid::now_v7(), "form_id": second_plural_id}
         ]
     }]);
-    let (_, forms_saved) = save_v3_forms_after_impact(
+    let (_, forms_saved) = save_publishable_forms(
         &state,
         &bearer,
         &word_entry_id,
@@ -7943,7 +7985,7 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
         complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone()),
     )
     .await;
-    let (status, word_published) = publish_ready_v3(&state, &bearer, &meanings_saved).await;
+    let (status, word_published) = publish_reviewed_v3(&state, &bearer, &meanings_saved).await;
     assert_eq!(status, StatusCode::CREATED, "{word_published}");
 
     let (status, resolved) = call(
@@ -8029,7 +8071,7 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
     // 确认跨组成分原样落库。
     phrase_forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
         component(&cross_group_form["base_form_ids"][0]);
-    let (_, phrase_saved) = save_v3_forms_after_impact(
+    let (_, phrase_saved) = save_publishable_forms(
         &state,
         &bearer,
         &phrase_entry_id,
@@ -8054,8 +8096,9 @@ async fn create_v3_phrase_with_sense_components(
     component_usages: Value,
 ) -> Value {
     let (entry_id, forms) = create_v3_phrase_draft(state, bearer, surface).await;
+    let forms = audio_forms(state, &entry_id, forms).await;
     let (_, forms_saved) =
-        save_v3_forms_after_impact(state, bearer, &entry_id, 1, "complete", forms).await;
+        save_publishable_forms(state, bearer, &entry_id, 1, "complete", forms).await;
     let mut meanings =
         phrase_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
     meanings["pos"][0]["senses"][0]["component_usages"] = component_usages;
@@ -8090,7 +8133,7 @@ async fn v3_sense_phrase_components_persist_publish_and_survive_forms_resave(poo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -8098,7 +8141,7 @@ async fn v3_sense_phrase_components_persist_publish_and_survive_forms_resave(poo
     let target_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &bearer, &target_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     let target_entry_uuid =
         Uuid::parse_str(target_published["word"]["id"].as_str().unwrap()).unwrap();
@@ -8240,7 +8283,7 @@ async fn v3_sense_phrase_components_persist_publish_and_survive_forms_resave(poo
         "词形步重存后成分行必须原样重建"
     );
 
-    let (status, published) = publish_ready_v3(&state, &bearer, &forms_resaved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &forms_resaved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     assert_eq!(
         published["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["id"],
@@ -8319,7 +8362,7 @@ async fn v3_publish_with_bound_relations_keeps_sense_phrase_components(pool: PgP
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -8327,7 +8370,7 @@ async fn v3_publish_with_bound_relations_keeps_sense_phrase_components(pool: PgP
     let target_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &bearer, &target_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     let target_entry_uuid =
         Uuid::parse_str(target_published["word"]["id"].as_str().unwrap()).unwrap();
@@ -8356,7 +8399,7 @@ async fn v3_publish_with_bound_relations_keeps_sense_phrase_components(pool: PgP
     }]);
     let with_pending = save_v3_meanings(&state, &bearer, &saved, meanings).await;
 
-    let (status, published) = publish_ready_v3(&state, &bearer, &with_pending).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &with_pending).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -8436,7 +8479,7 @@ async fn v3_sense_phrase_component_issues_cover_the_closed_code_catalog(pool: Pg
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -8444,7 +8487,7 @@ async fn v3_sense_phrase_component_issues_cover_the_closed_code_catalog(pool: Pg
     let word_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_draft).await;
+    let (status, word_published) = publish_reviewed_v3(&state, &bearer, &word_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{word_published}");
     let word_entry_id = word_published["word"]["id"].as_str().unwrap().to_owned();
     let word_publication_id =
@@ -8520,7 +8563,7 @@ async fn v3_sense_phrase_component_issues_cover_the_closed_code_catalog(pool: Pg
     )
     .await;
     let (status, sense_nested_phrase) =
-        publish_ready_v3(&state, &bearer, &sense_nested_draft).await;
+        publish_reviewed_v3(&state, &bearer, &sense_nested_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{sense_nested_phrase}");
     let sense_nested_publication_id = current_publication_id(
         &pool,
@@ -8668,7 +8711,7 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -8701,7 +8744,7 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
         .unwrap()
         .push(spare_sense);
     let word_saved = save_v3_meanings(&state, &bearer, &word_draft, two_senses).await;
-    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_saved).await;
+    let (status, word_published) = publish_reviewed_v3(&state, &bearer, &word_saved).await;
     assert_eq!(status, StatusCode::CREATED, "{word_published}");
     let word_entry_id = word_published["word"]["id"].as_str().unwrap().to_owned();
     let word_entry_uuid = Uuid::parse_str(&word_entry_id).unwrap();
@@ -8726,7 +8769,7 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
         json!([component]),
     )
     .await;
-    let (status, phrase_published) = publish_ready_v3(&state, &bearer, &phrase_draft).await;
+    let (status, phrase_published) = publish_reviewed_v3(&state, &bearer, &phrase_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{phrase_published}");
     let phrase_entry_id = phrase_published["word"]["id"].as_str().unwrap().to_owned();
     let phrase_publication_id =
@@ -8813,7 +8856,7 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{phrase_archived}");
-    let (status, word_republished) = publish_ready_v3(&state, &bearer, &word_resaved).await;
+    let (status, word_republished) = publish_reviewed_v3(&state, &bearer, &word_resaved).await;
     assert_eq!(status, StatusCode::CREATED, "{word_republished}");
 
     // 垃圾桶只恢复草稿；旧发布中的失效成分不得自动公开，重新发布仍须校验。
@@ -8855,7 +8898,7 @@ async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool)
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -8863,7 +8906,7 @@ async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool)
     let target_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &bearer, &target_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     let target_publication_id = current_publication_id(
         &pool,
@@ -8873,7 +8916,7 @@ async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool)
 
     let (entry_id, forms) = create_v3_phrase_draft(&state, &bearer, "split phrase").await;
     let (_, forms_saved) =
-        save_v3_forms_after_impact(&state, &bearer, &entry_id, 1, "complete", forms).await;
+        save_publishable_forms(&state, &bearer, &entry_id, 1, "complete", forms).await;
     let entry_uuid = Uuid::parse_str(&entry_id).unwrap();
     let mut meanings =
         phrase_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
@@ -8950,7 +8993,7 @@ async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool)
         "两条成分行必须各挂各的 sense"
     );
 
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
 
     let (status, discovered) = call(
@@ -8988,7 +9031,7 @@ async fn v3_sense_component_capability_is_always_on(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -9048,7 +9091,7 @@ async fn v3_phrase_with_sense_components_can_still_be_hard_deleted(pool: PgPool)
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -9056,7 +9099,7 @@ async fn v3_phrase_with_sense_components_can_still_be_hard_deleted(pool: PgPool)
     let word_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_draft).await;
+    let (status, word_published) = publish_reviewed_v3(&state, &bearer, &word_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{word_published}");
     let word_publication_id = current_publication_id(
         &pool,
@@ -9113,7 +9156,7 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     // 「换个人用同一个 token」这一断言要走超管：普通管理员会先撞上草稿归属守卫
@@ -10167,7 +10210,7 @@ async fn create_ready_v3_sentences_fixture(
     texts: &[&str],
     annotate: bool,
 ) -> Value {
-    let forms_saved = create_v3_forms_fixture(state, pool, bearer, annotate).await;
+    let forms_saved = create_v3_forms_fixture(state, pool, bearer, annotate, true).await;
     let entry_id = forms_saved["word"]["id"].as_str().unwrap();
     let mut meanings =
         complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
@@ -10303,7 +10346,7 @@ async fn v3_forms_resave_preserves_sentence_translation_node_roles(pool: PgPool)
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -10384,7 +10427,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -10418,7 +10461,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         "前置：保存后应有三档"
     );
 
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
 
     // 1) 发布响应保留三档，顺序与别名不变
@@ -10487,7 +10530,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         "score": "88.00"
     }]);
     let src_saved = save_v3_meanings(&state, &bearer, &source, src_meanings).await;
-    let (status, src_published) = publish_ready_v3(&state, &bearer, &src_saved).await;
+    let (status, src_published) = publish_reviewed_v3(&state, &bearer, &src_saved).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -10534,7 +10577,7 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -10668,7 +10711,7 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
 #[sqlx::test]
 async fn v3_sentence_translations_allow_repeated_bands_and_independent_edits(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -10705,7 +10748,7 @@ async fn v3_sentence_translations_allow_repeated_bands_and_independent_edits(poo
             .collect::<Vec<_>>(),
         "六条译文的语言列都要跟 wire 上的 language 一致"
     );
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     assert_eq!(first_sentence(&published)["zh_translations"], expected);
     let publication_id = current_publication_id(&pool, Uuid::parse_str(entry_id).unwrap()).await;
@@ -10791,7 +10834,7 @@ async fn v3_create_and_read_expose_the_original_detection_basis_dialect(pool: Pg
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -10855,7 +10898,7 @@ async fn concurrent_empty_drafts_require_annotation_before_independent_creation(
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -10945,7 +10988,7 @@ async fn clearing_v3_forms_allows_same_initial_headwords(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -11077,7 +11120,7 @@ async fn v3_create_rebinds_dictionary_base_forms_to_explicit_regional_headwords(
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -11151,7 +11194,7 @@ async fn v3_create_rejects_invalid_explicit_headwords_without_consuming_detectio
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -11330,7 +11373,7 @@ async fn create_unpublished_harbour_draft_with_plural(
         .as_array_mut()
         .unwrap()
         .push(json!({"id": Uuid::now_v7(), "form_id": plural_id}));
-    let (_, forms_saved) = save_v3_forms_after_impact(
+    let (_, forms_saved) = save_publishable_forms(
         state,
         bearer,
         &entry_id,
@@ -11352,12 +11395,12 @@ async fn create_unpublished_harbour_draft_with_plural(
 #[sqlx::test]
 async fn referenced_form_deletion_saves_draft_but_requires_published_source_repair(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let (target, plural_id) =
         create_unpublished_harbour_draft_with_plural(&state, &pool, &bearer).await;
-    let (status, target) = publish_ready_v3(&state, &bearer, &target).await;
+    let (status, target) = publish_reviewed_v3(&state, &bearer, &target).await;
     assert_eq!(status, StatusCode::CREATED, "{target}");
     let target_id = target["word"]["id"].as_str().unwrap();
     let target_uuid = Uuid::parse_str(target_id).unwrap();
@@ -11390,7 +11433,7 @@ async fn referenced_form_deletion_saves_draft_but_requires_published_source_repa
         json!([link])
     )]);
     let source = save_v3_meanings(&state, &bearer, &source, meanings).await;
-    let (status, source) = publish_ready_v3(&state, &bearer, &source).await;
+    let (status, source) = publish_reviewed_v3(&state, &bearer, &source).await;
     assert_eq!(status, StatusCode::CREATED, "{source}");
     let source_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
     let old_source_publication = current_publication_id(&pool, source_id).await;
@@ -11404,7 +11447,7 @@ async fn referenced_form_deletion_saves_draft_but_requires_published_source_repa
         .as_array_mut()
         .unwrap()
         .retain(|member| member["form_id"] != json!(plural_id));
-    let (_, saved) = save_v3_forms_after_impact(
+    let (_, saved) = save_publishable_forms(
         &state,
         &bearer,
         target_id,
@@ -11457,9 +11500,9 @@ async fn referenced_form_deletion_saves_draft_but_requires_published_source_repa
     let (status, still_blocked) = publish_ready_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CONFLICT, "{still_blocked}");
     assert_eq!(inbound_reference_conflict_items(&still_blocked).len(), 2);
-    let (status, repaired) = publish_ready_v3(&state, &bearer, &repaired).await;
+    let (status, repaired) = publish_reviewed_v3(&state, &bearer, &repaired).await;
     assert_eq!(status, StatusCode::CREATED, "{repaired}");
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let (_, live_candidates) = search_component_targets(
         &state,
@@ -11585,7 +11628,7 @@ async fn current_publication_snapshot(pool: &PgPool, entry_id: Uuid) -> Value {
 #[sqlx::test]
 async fn definition_links_discover_draft_words_and_phrases(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let word =
@@ -11618,7 +11661,7 @@ async fn definition_links_discover_draft_words_and_phrases(pool: PgPool) {
             "{found}"
         );
     }
-    let (status, published) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let query = json!({"schema_version":3,"q":"harbour","include_drafts":true});
     let (status, all) = search_component_targets(&state, &bearer, query.clone()).await;
@@ -11663,7 +11706,7 @@ async fn definition_links_discover_draft_words_and_phrases(pool: PgPool) {
 #[sqlx::test]
 async fn definition_links_allow_self_word_and_phrase_through_publication(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let word =
@@ -11686,7 +11729,7 @@ async fn definition_links_allow_self_word_and_phrase_through_publication(pool: P
             "content":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":rich_text(text),"text_links":[link]}}
         }));
         let saved = save_v3_meanings(&state, &bearer, &source, meanings).await;
-        let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+        let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
         assert_eq!(status, StatusCode::CREATED, "{published}");
         let saved_link = &published["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][1]["content"]
             ["common"]["text_links"][0];
@@ -11735,7 +11778,7 @@ async fn self_linked_definition_draft(state: &AppState, pool: &PgPool, bearer: &
 #[sqlx::test]
 async fn definition_links_self_references_block_destructive_form_edits(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let source = self_linked_definition_draft(&state, &pool, &bearer).await;
@@ -11782,7 +11825,7 @@ async fn definition_links_self_references_block_destructive_form_edits(pool: PgP
 #[sqlx::test]
 async fn definition_links_self_preflight_rejects_stale_variants(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let source = self_linked_definition_draft(&state, &pool, &bearer).await;
@@ -11820,7 +11863,7 @@ async fn definition_links_self_preflight_rejects_stale_variants(pool: PgPool) {
 #[sqlx::test]
 async fn definition_links_keep_changed_draft_spelling_until_matching_publication(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let (target, _) =
@@ -11865,7 +11908,7 @@ async fn definition_links_keep_changed_draft_spelling_until_matching_publication
     assert!(link.get("target_publication_id").is_none(), "{link}");
     let (status, rejected) = publish_ready_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
-    let (status, published) = publish_ready_v3(&state, &bearer, &target).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &target).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let resaved = save_v3_meanings(
         &state,
@@ -11892,7 +11935,7 @@ async fn component_target_search_excludes_drafts_by_default_and_binds_search_sco
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     // 草稿由一位管理员创建，另一位来搜：缺省只返回已发布节点。
     let author_bearer = token(&state, seed_admin(&pool).await);
@@ -11954,7 +11997,7 @@ async fn component_target_search_excludes_drafts_by_default_and_binds_search_sco
         );
     }
 
-    let (status, published) = publish_ready_v3(&state, &author_bearer, &draft).await;
+    let (status, published) = publish_reviewed_v3(&state, &author_bearer, &draft).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     // 发布后恢复原有等值归一化与具体词形/词义身份断言。
     let (status, exact) = search_component_targets(
@@ -12123,7 +12166,7 @@ async fn text_links_may_target_never_published_drafts_and_upgrade_after_the_targ
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let author_bearer = token(&state, seed_admin(&pool).await);
     let bearer = token(&state, seed_admin(&pool).await);
@@ -12188,7 +12231,7 @@ async fn text_links_may_target_never_published_drafts_and_upgrade_after_the_targ
     let published = saved;
 
     // 目标发布后，宿主下一次保存由服务端补上目标当前发布版本，再发布即为 publication 范围。
-    let (status, target_published) = publish_ready_v3(&state, &author_bearer, &target).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &author_bearer, &target).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     let target_publication = current_publication_id(&pool, target_entry_id).await;
     let resaved = save_v3_meanings(
@@ -12205,7 +12248,7 @@ async fn text_links_may_target_never_published_drafts_and_upgrade_after_the_targ
         json!(target_publication),
         "{upgraded}"
     );
-    let (status, republished) = publish_ready_v3(&state, &bearer, &resaved).await;
+    let (status, republished) = publish_reviewed_v3(&state, &bearer, &resaved).await;
     assert_eq!(status, StatusCode::CREATED, "{republished}");
     assert_eq!(
         current_sense_ref_anchors(&pool, host_entry_id, "text_link").await,
@@ -12222,7 +12265,7 @@ async fn text_links_to_draft_targets_reject_saving_after_the_target_sense_disapp
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let author_bearer = token(&state, seed_admin(&pool).await);
     let bearer = token(&state, seed_admin(&pool).await);
@@ -12277,7 +12320,7 @@ async fn phrase_components_may_target_never_published_drafts_and_upgrade_after_t
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let author_bearer = token(&state, seed_admin(&pool).await);
     let bearer = token(&state, seed_admin(&pool).await);
@@ -12330,7 +12373,7 @@ async fn phrase_components_may_target_never_published_drafts_and_upgrade_after_t
     );
     let published = refreshed;
 
-    let (status, target_published) = publish_ready_v3(&state, &author_bearer, &target).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &author_bearer, &target).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     let target_publication = current_publication_id(&pool, target_entry_id).await;
     let resaved = save_v3_meanings(
@@ -12345,7 +12388,7 @@ async fn phrase_components_may_target_never_published_drafts_and_upgrade_after_t
         json!(target_publication),
         "{resaved}"
     );
-    let (status, republished) = publish_ready_v3(&state, &bearer, &resaved).await;
+    let (status, republished) = publish_reviewed_v3(&state, &bearer, &resaved).await;
     assert_eq!(status, StatusCode::CREATED, "{republished}");
     assert_eq!(
         current_sense_ref_anchors(&pool, host_entry_id, "phrase_component").await,
@@ -12461,7 +12504,7 @@ async fn create_v3_word_with_relation(
     relation: Value,
 ) -> Value {
     let entry_id = create_legacy_v3_empty_skeleton(state, bearer, surface).await;
-    let (_, forms_saved) = save_v3_forms_after_impact(
+    let (_, forms_saved) = save_publishable_forms(
         state,
         bearer,
         &entry_id.to_string(),
@@ -12504,7 +12547,7 @@ async fn inbound_references_list_draft_relations_and_draft_components_with_node_
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let target =
@@ -12637,13 +12680,13 @@ async fn inbound_references_include_complete_published_and_draft_component_targe
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let target =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, target_published) = publish_ready_v3(&state, &bearer, &target).await;
+    let (status, target_published) = publish_reviewed_v3(&state, &bearer, &target).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
     let target_id = target_published["word"]["id"].as_str().unwrap().to_owned();
     let target_publication_id =
@@ -12657,7 +12700,7 @@ async fn inbound_references_include_complete_published_and_draft_component_targe
     let phrase =
         create_v3_phrase_with_sense_components(&state, &bearer, "harbour side", json!([component]))
             .await;
-    let (status, phrase_published) = publish_ready_v3(&state, &bearer, &phrase).await;
+    let (status, phrase_published) = publish_reviewed_v3(&state, &bearer, &phrase).await;
     assert_eq!(status, StatusCode::CREATED, "{phrase_published}");
     let phrase_publication_id = current_publication_id(
         &pool,
@@ -12723,7 +12766,7 @@ async fn v3_draft_target_edits_retain_stale_components_until_source_repair(pool:
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let target =
@@ -12797,7 +12840,7 @@ async fn v3_draft_deletion_defers_busy_source_and_reference_checks_until_publish
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let word_draft =
@@ -12815,7 +12858,7 @@ async fn v3_draft_deletion_defers_busy_source_and_reference_checks_until_publish
         .unwrap()
         .push(spare);
     let word_saved = save_v3_meanings(&state, &bearer, &word_draft, two_senses).await;
-    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_saved).await;
+    let (status, word_published) = publish_reviewed_v3(&state, &bearer, &word_saved).await;
     assert_eq!(status, StatusCode::CREATED, "{word_published}");
     let word_id = word_published["word"]["id"].as_str().unwrap().to_owned();
     let word_uuid = Uuid::parse_str(&word_id).unwrap();
@@ -12825,7 +12868,7 @@ async fn v3_draft_deletion_defers_busy_source_and_reference_checks_until_publish
     let phrase =
         create_v3_phrase_with_sense_components(&state, &bearer, "busy phrase", json!([component]))
             .await;
-    let (status, phrase_published) = publish_ready_v3(&state, &bearer, &phrase).await;
+    let (status, phrase_published) = publish_reviewed_v3(&state, &bearer, &phrase).await;
     assert_eq!(status, StatusCode::CREATED, "{phrase_published}");
     let phrase_uuid = Uuid::parse_str(phrase_published["word"]["id"].as_str().unwrap()).unwrap();
 
@@ -12883,9 +12926,10 @@ async fn v3_draft_deletion_defers_busy_source_and_reference_checks_until_publish
     let (status, still_blocked) = publish_ready_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CONFLICT, "{still_blocked}");
     assert_eq!(inbound_reference_conflict_items(&still_blocked).len(), 1);
-    let (status, repaired_publication) = publish_ready_v3(&state, &bearer, &repaired_source).await;
+    let (status, repaired_publication) =
+        publish_reviewed_v3(&state, &bearer, &repaired_source).await;
     assert_eq!(status, StatusCode::CREATED, "{repaired_publication}");
-    let (status, target_publication) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, target_publication) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{target_publication}");
     assert_ne!(
         current_publication_id(&pool, word_uuid).await,
@@ -12898,7 +12942,7 @@ async fn component_target_search_is_independent_of_generation_and_repair_preserv
     pool: PgPool,
 ) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -12969,7 +13013,7 @@ async fn component_target_search_is_independent_of_generation_and_repair_preserv
 #[sqlx::test]
 async fn surface_writes_rebuild_missing_discovery_generation(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -12989,7 +13033,7 @@ async fn surface_writes_rebuild_missing_discovery_generation(pool: PgPool) {
         .unwrap();
     // 保存草稿写 draft 词面即补回；水位取新时间戳，不回到 1 复用旧游标版本。
     let (_, forms_saved) =
-        save_v3_forms_after_impact(&state, &bearer, &draft_id, 1, "complete", forms).await;
+        save_publishable_forms(&state, &bearer, &draft_id, 1, "complete", forms).await;
     let saved: Option<(i64, Option<i64>)> = sqlx::query_as(generation_query)
         .fetch_optional(&pool)
         .await
@@ -13027,7 +13071,7 @@ async fn surface_writes_rebuild_missing_discovery_generation(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let (status, republished) = publish_ready_v3(&state, &bearer, &meanings_saved).await;
+    let (status, republished) = publish_reviewed_v3(&state, &bearer, &meanings_saved).await;
     assert_eq!(status, StatusCode::CREATED, "{republished}");
     let published_generation: Option<(i64, Option<i64>)> = sqlx::query_as(generation_query)
         .fetch_optional(&pool)
@@ -13055,7 +13099,7 @@ async fn component_target_search_matches_published_surfaces_and_hides_drafts_and
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -13105,7 +13149,7 @@ async fn component_target_search_matches_published_surfaces_and_hides_drafts_and
         .as_array_mut()
         .unwrap()
         .push(json!({"id": Uuid::now_v7(), "form_id": plural_id}));
-    let (_, forms_saved) = save_v3_forms_after_impact(
+    let (_, forms_saved) = save_publishable_forms(
         &state,
         &bearer,
         &word_entry_id,
@@ -13121,7 +13165,7 @@ async fn component_target_search_matches_published_surfaces_and_hides_drafts_and
         complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone()),
     )
     .await;
-    let (status, word_published) = publish_ready_v3(&state, &bearer, &meanings_saved).await;
+    let (status, word_published) = publish_reviewed_v3(&state, &bearer, &meanings_saved).await;
     assert_eq!(status, StatusCode::CREATED, "{word_published}");
 
     let (phrase_published, _) =
@@ -13131,7 +13175,7 @@ async fn component_target_search_matches_published_surfaces_and_hides_drafts_and
     // 草稿：只保存词形步，不发布。成分关联要存 target_publication_id，草稿没有发布快照。
     let (draft_entry_id, draft_forms) =
         create_v3_phrase_draft(&state, &bearer, "harbour sketch").await;
-    save_v3_forms_after_impact(&state, &bearer, &draft_entry_id, 1, "complete", draft_forms).await;
+    save_publishable_forms(&state, &bearer, &draft_entry_id, 1, "complete", draft_forms).await;
 
     // 已发布后归档：surface 行还在，但 entry.archived_at 已非空。
     let (archived_published, _) =
@@ -13305,11 +13349,12 @@ async fn component_target_search_keeps_its_gate_and_discovery_route_is_removed(p
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags {
+    let state = fixture_state(pool.clone(), redis).with_smart_lexicon_v3_flags_for_test(
+        SmartLexiconV3Flags {
             sentence_target_discovery: false,
             ..SmartLexiconV3Flags::all_enabled()
-        });
+        },
+    );
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
 
@@ -13346,7 +13391,7 @@ async fn component_target_search_deduplicates_more_than_2000_surfaces_without_tr
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -13417,7 +13462,7 @@ async fn component_target_search_ranks_exact_before_prefix_before_contains_and_p
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -13427,7 +13472,7 @@ async fn component_target_search_ranks_exact_before_prefix_before_contains_and_p
     let word_draft =
         create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
             .await;
-    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_draft).await;
+    let (status, word_published) = publish_reviewed_v3(&state, &bearer, &word_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{word_published}");
     let exact_id = word_published["word"]["id"].as_str().unwrap().to_owned();
     let (prefix_published, _) =
@@ -13571,7 +13616,7 @@ async fn component_target_search_ranks_exact_before_prefix_before_contains_and_p
 #[sqlx::test]
 async fn v3_phrase_detection_drops_dictionary_word_pos_and_creates(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -13639,7 +13684,7 @@ async fn v3_phrase_detection_drops_dictionary_word_pos_and_creates(pool: PgPool)
 #[sqlx::test]
 async fn v3_phrase_detection_drops_existing_word_pos_but_keeps_matches(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -13674,7 +13719,7 @@ async fn v3_detection_drops_suggested_pos_missing_from_catalog(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -13716,7 +13761,7 @@ async fn v3_detection_drops_suggested_pos_missing_from_catalog(pool: PgPool) {
 #[sqlx::test]
 async fn v3_derivative_multiple_senses_publish_and_remove_independently(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -13733,7 +13778,7 @@ async fn v3_derivative_multiple_senses_publish_and_remove_independently(pool: Pg
         .unwrap()
         .push(second);
     let target = save_v3_meanings(&state, &bearer, &target, target_content).await;
-    let (status, target) = publish_ready_v3(&state, &bearer, &target).await;
+    let (status, target) = publish_reviewed_v3(&state, &bearer, &target).await;
     assert_eq!(status, StatusCode::CREATED, "{target}");
     let source = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
     let mut source_content =
@@ -13752,7 +13797,7 @@ async fn v3_derivative_multiple_senses_publish_and_remove_independently(pool: Pg
     assert_eq!(relations.len(), 2);
     source_content["pos"][0]["senses"][0]["relations"] = json!(relations);
     let saved = save_v3_meanings(&state, &bearer, &source, source_content).await;
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
     let (status, reloaded) = call(
@@ -13782,7 +13827,7 @@ async fn v3_derivative_multiple_senses_publish_and_remove_independently(pool: Pg
     let mut content = writable_v3_meanings(&reloaded);
     content["pos"][0]["senses"][0]["relations"] = json!([relations[1]]);
     let saved = save_v3_meanings(&state, &bearer, &reloaded, content).await;
-    let (status, republished) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, republished) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{republished}");
     let remaining = &republished["word"]["meanings"]["pos"][0]["senses"][0]["relations"];
     assert_eq!(remaining.as_array().unwrap().len(), 1);
@@ -13812,7 +13857,7 @@ fn shape_issue_field(body: &Value) -> Option<&str> {
 #[sqlx::test]
 async fn v3_relations_reject_half_bound_target_shapes(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let target = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
@@ -13891,7 +13936,7 @@ async fn v3_relations_reject_half_bound_target_shapes(pool: PgPool) {
 #[sqlx::test]
 async fn v3_relations_require_explicit_sense_binding_and_keep_same_name_text(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -14010,7 +14055,7 @@ async fn v3_draft_saves_ignore_references_already_stale_in_saved_content(pool: P
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let target = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -14118,7 +14163,7 @@ async fn v3_forms_save_retires_referenced_pos_and_preserves_source_for_repair(po
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let target = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -14266,7 +14311,7 @@ fn entry_annotations_updates(conflict: &Value, labels: &[&str]) -> Value {
 #[sqlx::test]
 async fn entry_annotations_atomic_third_entry_edit_and_idempotency(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -14516,7 +14561,7 @@ async fn create_annotated_fixture(
 #[sqlx::test]
 async fn entry_annotations_variant_only_and_distinct_create_edit_race(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let first = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -14609,7 +14654,7 @@ async fn entry_annotations_variant_only_and_distinct_create_edit_race(pool: PgPo
 #[sqlx::test]
 async fn surface_confirm_bugfix_first_explicit_confirmation_http(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -14678,7 +14723,7 @@ async fn surface_confirm_bugfix_first_explicit_confirmation_http(pool: PgPool) {
 #[sqlx::test]
 async fn surface_confirm_bugfix_rejects_changed_evidence(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let first = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -14769,7 +14814,7 @@ async fn surface_confirm_bugfix_rejects_changed_evidence(pool: PgPool) {
 #[sqlx::test]
 async fn surface_confirm_bugfix_confirms_all_suggested_dictionary_forms(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -14845,7 +14890,7 @@ async fn surface_confirm_bugfix_confirms_all_suggested_dictionary_forms(pool: Pg
 #[sqlx::test]
 async fn same_headword_empty_drafts_create_independent_entries(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -14910,7 +14955,7 @@ async fn same_headword_empty_drafts_create_independent_entries(pool: PgPool) {
 #[sqlx::test]
 async fn empty_draft_bugfix_visibility_race_archive_and_resume(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let other = token(&state, seed_admin(&pool).await);
@@ -15092,7 +15137,7 @@ async fn empty_draft_bugfix_visibility_race_archive_and_resume(pool: PgPool) {
 #[sqlx::test]
 async fn entry_annotation_edit_requires_action_and_ownership_scope(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner = token(&state, seed_admin_with_role(&pool, AdminRole::Admin).await);
     let outsider_id = seed_admin_with_role(&pool, AdminRole::Admin).await;
@@ -15170,7 +15215,7 @@ async fn entry_annotation_edit_requires_action_and_ownership_scope(pool: PgPool)
 #[sqlx::test]
 async fn entry_annotations_super_admin_must_fill_whole_group(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner_id = seed_admin(&pool).await;
     let owner = token(&state, owner_id);
@@ -15246,7 +15291,7 @@ async fn entry_annotations_super_admin_must_fill_whole_group(pool: PgPool) {
 #[sqlx::test]
 async fn entry_annotations_other_admins_drafts_are_read_only_and_unique(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner = token(&state, seed_admin(&pool).await);
     let outsider_id = seed_admin(&pool).await;
@@ -15330,7 +15375,7 @@ async fn entry_annotations_other_admins_drafts_are_read_only_and_unique(pool: Pg
 #[sqlx::test]
 async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin = seed_admin(&pool).await;
     let bearer = token(&state, admin);
@@ -15344,7 +15389,7 @@ async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) 
         json!([component.clone()]),
     )
     .await;
-    let (status, phrase) = publish_ready_v3(&state, &bearer, &phrase_draft).await;
+    let (status, phrase) = publish_reviewed_v3(&state, &bearer, &phrase_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{phrase}");
     let phrase_publication = current_publication_id(
         &pool,
@@ -15442,7 +15487,7 @@ async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) 
     .await;
     assert_eq!(status, StatusCode::OK, "{reread}");
     check(&reread);
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     check(&published);
     let original_publication =
@@ -15486,7 +15531,7 @@ async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) 
             .any(|a| a["origin"] == "manual")
     );
     // 发布清除后的版本，再切回旧版本，人工关联与快照一并恢复。
-    let (status, cleared_publication) = publish_ready_v3(&state, &bearer, &cleared).await;
+    let (status, cleared_publication) = publish_reviewed_v3(&state, &bearer, &cleared).await;
     assert_eq!(status, StatusCode::CREATED, "{cleared_publication}");
     let (status, restored) = rollback_v3_history(
         &state,
@@ -15616,7 +15661,7 @@ async fn v3_entry_pos_must_match_entry_kind(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -15791,7 +15836,7 @@ async fn component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_
 ) {
     let fixture_started = std::time::Instant::now();
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -15843,9 +15888,12 @@ async fn component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_
     record_test_phase("component-pagination", "content-fixture", content_started);
     let publish_started = std::time::Instant::now();
     // 保留单条发布样本，其他独立词条用现有的 50 条批量发布能力准备。
-    let (status, first) = publish_ready_v3(&state, &bearer, &words[0]).await;
+    let (status, first) = publish_reviewed_v3(&state, &bearer, &words[0]).await;
     assert_eq!(status, StatusCode::CREATED, "{first}");
     for batch in words[1..].chunks(50) {
+        for word in batch {
+            confirm_audio(&state, &bearer, word).await;
+        }
         let (status, published) = call(
             &state,
             Method::POST,
@@ -15948,7 +15996,7 @@ async fn v3_dedicated_form_group_binds_senses_publishes_and_clears_through_impac
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -16149,6 +16197,7 @@ async fn v3_dedicated_form_group_binds_senses_publishes_and_clears_through_impac
     assert_eq!(status, StatusCode::OK, "{validation}");
     assert_eq!(validation["valid"], true, "{validation}");
 
+    confirm_audio(&state, &bearer, &meanings_saved).await;
     let (status, published) = call(
         &state,
         Method::POST,
@@ -16341,7 +16390,7 @@ async fn v3_dedicated_form_group_binds_senses_publishes_and_clears_through_impac
         sqlx::query("UPDATE lexicon.entry_editor_projection SET meanings = jsonb_set(meanings, $2::text[], $3::jsonb) WHERE entry_id = $1")
             .bind(host_uuid).bind(&path).bind(&special_sense_id).execute(&pool).await.unwrap();
     }
-    let (status, host_published) = publish_ready_v3(&state, &bearer, &host_saved).await;
+    let (status, host_published) = publish_reviewed_v3(&state, &bearer, &host_saved).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -16460,7 +16509,7 @@ async fn v3_form_group_changes_invalidate_meanings_completion(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -16592,7 +16641,7 @@ async fn v3_form_group_changes_invalidate_meanings_completion(pool: PgPool) {
 #[sqlx::test]
 async fn v3_synthesis_survives_forms_meanings_publication_and_history(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -16605,7 +16654,7 @@ async fn v3_synthesis_survives_forms_meanings_publication_and_history(pool: PgPo
     .await;
     let entry_id = draft["word"]["id"].as_str().unwrap().to_owned();
     let entry_uuid: Uuid = entry_id.parse().unwrap();
-    let (status, mut word) = publish_ready_v3(&state, &bearer, &draft).await;
+    let (status, mut word) = publish_reviewed_v3(&state, &bearer, &draft).await;
     assert_eq!(status, StatusCode::CREATED, "{word}");
     let old_snapshot = current_publication_snapshot(&pool, entry_uuid).await;
     let old_publication: Uuid =
@@ -16671,7 +16720,7 @@ async fn v3_synthesis_survives_forms_meanings_publication_and_history(pool: PgPo
             saved["word"]["forms"].pointer(path).unwrap()["synthesis"],
             synthesis
         );
-        let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+        let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
         assert_eq!(status, StatusCode::CREATED, "{published}");
         let snapshot = current_publication_snapshot(&pool, entry_uuid).await;
         let snapshot_forms = expanded_publication_forms(&snapshot);
@@ -16723,7 +16772,7 @@ async fn v3_forms_atomically_bind_senses_without_breaking_existing_component_ref
     pool: PgPool,
 ) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let target =
@@ -16830,7 +16879,7 @@ async fn v3_forms_atomically_bind_senses_without_breaking_existing_component_ref
 #[sqlx::test]
 async fn v3_spelling_regularity_round_trips_without_group_or_dialect_leakage(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
@@ -16907,7 +16956,7 @@ async fn v3_spelling_regularity_round_trips_without_group_or_dialect_leakage(poo
     )
     .await;
     assert_eq!(resaved["word"]["forms"], expected);
-    let (status, published) = publish_ready_v3(&state, &bearer, &resaved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &resaved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let snapshot = current_publication_snapshot(&pool, Uuid::parse_str(id).unwrap()).await;
     assert_eq!(expanded_publication_forms(&snapshot), expected);
@@ -16928,11 +16977,11 @@ async fn v3_spelling_regularity_round_trips_without_group_or_dialect_leakage(poo
 #[sqlx::test]
 async fn history_activation_preserves_unpublished_internal_sense_bindings(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let initial = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
-    let (status, first) = publish_ready_v3(&state, &bearer, &initial).await;
+    let (status, first) = publish_reviewed_v3(&state, &bearer, &initial).await;
     assert_eq!(status, StatusCode::CREATED, "{first}");
     let id = first["word"]["id"].as_str().unwrap();
     let entry_id = Uuid::parse_str(id).unwrap();
@@ -16940,7 +16989,7 @@ async fn history_activation_preserves_unpublished_internal_sense_bindings(pool: 
     let mut meanings = writable_v3_meanings(&first);
     meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("第二次发布文案");
     let second = save_v3_meanings(&state, &bearer, &first, meanings).await;
-    let (status, second) = publish_ready_v3(&state, &bearer, &second).await;
+    let (status, second) = publish_reviewed_v3(&state, &bearer, &second).await;
     assert_eq!(status, StatusCode::CREATED, "{second}");
     assert_ne!(
         current_publication_id(&pool, entry_id).await,
@@ -17024,7 +17073,7 @@ async fn history_activation_preserves_unpublished_internal_sense_bindings(pool: 
 #[sqlx::test]
 async fn draft_sense_deletion_clears_its_own_group_bindings_and_retains_tombstone(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let word = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
@@ -17078,7 +17127,7 @@ async fn draft_sense_deletion_clears_its_own_group_bindings_and_retains_tombston
 #[sqlx::test]
 async fn v3_multi_group_bindings_count_each_source_across_binding_changes(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let target = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
@@ -17184,7 +17233,7 @@ async fn batch3_word(state: &AppState, bearer: &str, surface: &str) -> Value {
         &id.to_string(),
         1,
         "complete",
-        v3_forms_fixture_for(surface),
+        audio_forms(state, &id.to_string(), v3_forms_fixture_for(surface)).await,
     )
     .await;
     let meanings = complete_v3_meanings_fixture(forms["word"]["forms"]["pos"][0]["pos_id"].clone());
@@ -17196,7 +17245,7 @@ fn batch3_input(words: &[&Value]) -> Value {
 }
 
 async fn batch3_state(pool: &PgPool) -> AppState {
-    AppState::for_test_with_redis(
+    fixture_state(
         pool.clone(),
         platform::connect_redis(&test_redis_url()).await.unwrap(),
     )
@@ -17219,6 +17268,9 @@ async fn batch3_cycle_is_atomic_and_idempotent(pool: PgPool) {
     let (status, _) = publish_ready_v3(&state, &bearer, &a).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let key = Uuid::now_v7();
+    for word in [&a, &b] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let input = batch3_input(&[&b, &a]);
     let (status, response) = call(
         &state,
@@ -17268,6 +17320,9 @@ async fn batch3_failure_leaves_no_publication_side_effects(pool: PgPool) {
     let bearer = token(&state, actor);
     let a = batch3_word(&state, &bearer, "alpha").await;
     let b = batch3_word(&state, &bearer, "beta").await;
+    for word in [&a, &b] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     // Fail late, after earlier publication headers/nodes have been staged.
     sqlx::query("CREATE FUNCTION lexicon.reject_batch_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS(SELECT 1 FROM lexicon.entry_publications) THEN RAISE EXCEPTION 'injected batch failure'; END IF; RETURN NEW; END $$").execute(&pool).await.unwrap();
     sqlx::query("CREATE TRIGGER reject_batch_test BEFORE INSERT ON lexicon.entry_publications FOR EACH ROW EXECUTE FUNCTION lexicon.reject_batch_test()").execute(&pool).await.unwrap();
@@ -17382,7 +17437,7 @@ async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
             );
         }
     }
-    let (status, published) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let (status, revoked) = call(
         &state,
@@ -17404,13 +17459,13 @@ async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
-#[sqlx::test(migrator = "ROLLBACK_BASELINE_MIGRATOR")]
+#[sqlx::test]
 async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
     let state = batch3_state(&pool).await;
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
     let word = batch3_word(&state, &bearer, "alpha").await;
-    let (status, published) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let id = Uuid::parse_str(word["word"]["id"].as_str().unwrap()).unwrap();
     let original = current_publication_id(&pool, id).await;
@@ -17465,7 +17520,7 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
         .await
         .unwrap_err();
     assert!(
-        format!("{down_error:#}").contains("shared form content is present"),
+        format!("{down_error:#}").contains("publication audio review receipts must be retained"),
         "{down_error:#}"
     );
     let mut tx = pool.begin().await.unwrap();
@@ -17514,6 +17569,9 @@ async fn batch3_text_and_via_phrase_use_new_publications(pool: PgPool) {
         sentence_with_text_links_json(&source, "alpha is via.", json!([via]))
     ]);
     source = save_v3_meanings(&state, &bearer, &source, meanings).await;
+    for word in [&source, &phrase, &target] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     // Missing an explicitly selected dependency must fail, with no partial publication.
     let (status, failed) = call(
         &state,
@@ -17572,6 +17630,9 @@ async fn batch3_opposite_order_concurrency_preserves_versions(pool: PgPool) {
     let a = batch3_word(&state, &bearer, "alpha").await;
     let b = batch3_word(&state, &bearer, "beta").await;
     let path = format!("{ROOT}/entries/publications/batch");
+    for word in [&a, &b] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let pair = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         tokio::join!(
             call(
@@ -17633,7 +17694,7 @@ async fn batch3_replaces_only_selected_published_inbound_sources(pool: PgPool) {
         .unwrap()
         .push(retained);
     target = save_v3_meanings(&state, &bearer, &target, meanings).await;
-    let (status, published) = publish_ready_v3(&state, &bearer, &target).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &target).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     target = published;
     let mut source = batch3_word(&state, &bearer, "beta").await;
@@ -17641,7 +17702,7 @@ async fn batch3_replaces_only_selected_published_inbound_sources(pool: PgPool) {
     let mut meanings = writable_v3_meanings(&source);
     meanings["pos"][0]["senses"][0]["relations"] = json!([relation.clone()]);
     source = save_v3_meanings(&state, &bearer, &source, meanings).await;
-    let (status, published) = publish_ready_v3(&state, &bearer, &source).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &source).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     source = published;
     let mut target_meanings = writable_v3_meanings(&target);
@@ -17653,6 +17714,9 @@ async fn batch3_replaces_only_selected_published_inbound_sources(pool: PgPool) {
     let mut source_meanings = writable_v3_meanings(&source);
     source_meanings["pos"][0]["senses"][0]["relations"] = json!([]);
     source = save_v3_meanings(&state, &bearer, &source, source_meanings).await;
+    for word in [&target, &source] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let (status, blocked) = publish_ready_v3(&state, &bearer, &target).await;
     assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
     // A batch-external saved draft still protects the old published target.
@@ -17696,7 +17760,7 @@ async fn batch3_replaces_only_selected_published_inbound_sources(pool: PgPool) {
 #[sqlx::test]
 async fn initial_headword_backfill_preserves_duplicate_empty_drafts(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let mut ids = Vec::new();
@@ -17757,7 +17821,7 @@ async fn retired_detection_cache_requires_redetection_instead_of_returning_unava
     pool: PgPool,
 ) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis.clone())
+    let state = fixture_state(pool.clone(), redis.clone())
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
@@ -17816,7 +17880,7 @@ async fn retired_detection_cache_requires_redetection_instead_of_returning_unava
 #[sqlx::test]
 async fn empty_draft_creation_requires_annotations_before_creating_independent_entry(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     for legacy in [false, true] {
@@ -17924,7 +17988,7 @@ async fn empty_draft_creation_requires_annotations_before_creating_independent_e
 #[sqlx::test]
 async fn empty_draft_annotations_respect_dialect_kind_and_ownership(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner = token(&state, seed_admin(&pool).await);
     let outsider = token(&state, seed_admin(&pool).await);
@@ -18042,7 +18106,7 @@ async fn empty_draft_annotations_respect_dialect_kind_and_ownership(pool: PgPool
 #[sqlx::test]
 async fn first_forms_save_locks_the_initial_annotation_group_before_leaving_it(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let surface = "annotationlockprobe";
@@ -18097,7 +18161,7 @@ async fn first_forms_save_locks_the_initial_annotation_group_before_leaving_it(p
 #[sqlx::test]
 async fn v3_spelling_rich_roundtrips_and_preserves_legacy_writes(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
@@ -18264,8 +18328,10 @@ async fn v3_spelling_rich_roundtrips_and_preserves_legacy_writes(pool: PgPool) {
 
 #[sqlx::test]
 async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(pool: PgPool) {
+    publication_audio::with_generated_contract(async {
+
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
@@ -18276,6 +18342,13 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
     let variant = forms.pointer_mut(path).unwrap();
     variant["spelling_rich"] = json!({"version":2,"text":variant["spelling"],"annotations":[{"type":"italic","start":0,"end":2},{"type":"liaison","start":1,"end":4}]});
     variant["spelling_speech"] = json!({"content":{"version":2,"text":variant["spelling"],"annotations":[]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]}});
+    variant["spelling_speech"]["voice_profile"] = generated_profile(
+        &state,
+        actor,
+        variant["spelling_speech"]["voice_profile"].clone(),
+        variant["spelling_speech"]["content"].clone(),
+    )
+    .await;
     let pronunciation = &mut variant["pronunciations"][0];
     pronunciation["actual_pron_rich"] = json!({"version":2,"text":pronunciation["actual_pron"],"annotations":[{"type":"liaison","start":0,"end":2}]});
     let (_, saved) = save_v3_forms_after_impact(
@@ -18287,7 +18360,7 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
         forms,
     )
     .await;
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let original = current_publication_id(&pool, id).await;
     let snapshot = current_publication_snapshot(&pool, id).await;
@@ -18313,7 +18386,7 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
         empty,
     )
     .await;
-    let (status, newer) = publish_ready_v3(&state, &bearer, &changed).await;
+    let (status, newer) = publish_reviewed_v3(&state, &bearer, &changed).await;
     assert_eq!(status, StatusCode::CREATED, "{newer}");
     let (status, history) = call(
         &state,
@@ -18365,6 +18438,8 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
     )
     .await;
     assert_eq!(draft["word"]["forms"], newer["word"]["forms"]);
+
+    }).await;
 }
 
 #[path = "lexicon_handler/sentence_formatting.rs"]
@@ -18376,7 +18451,7 @@ async fn v3_independent_association_permission_preserves_text_and_owner_scope(po
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let bearer = token(&state, owner);
-    let initial = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let initial = create_v3_forms_fixture(&state, &pool, &bearer, false, false).await;
     let mut forms = initial["word"]["forms"].clone();
     forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["synthesis"] =
         json!({"alphabet":"ipa","ipa":"hɑːbə","ups":"","ipa_locale":"en-GB"});
@@ -18469,7 +18544,7 @@ async fn v3_independent_association_permission_preserves_text_and_owner_scope(po
 #[sqlx::test]
 async fn independent_edit_permissions_ignore_persisted_response_only_fields(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let bearer = token(&state, owner);
@@ -18564,7 +18639,7 @@ mod related_suggestions;
 #[sqlx::test]
 async fn v3_spelling_speech_roundtrips_independently_and_survives_legacy_saves(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
@@ -18667,7 +18742,7 @@ async fn v3_spelling_speech_roundtrips_independently_and_survives_legacy_saves(p
 #[sqlx::test]
 async fn v3_phoneme_speech_roundtrips_and_survives_legacy_saves(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);

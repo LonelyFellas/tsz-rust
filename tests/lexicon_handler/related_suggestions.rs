@@ -3,12 +3,12 @@ use super::*;
 #[sqlx::test]
 async fn related_suggestions_lazy_senses_bind_and_persist_current_publication(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
     let ready = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
-    let (status, published) = publish_ready_v3(&state, &bearer, &ready).await;
+    let (status, published) = publish_reviewed_v3(&state, &bearer, &ready).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let target = published["word"]["id"].as_str().unwrap();
     let route = format!("{ROOT}/entries/related-suggestions?q=harb");
@@ -74,7 +74,7 @@ async fn related_suggestions_lazy_senses_bind_and_persist_current_publication(po
     let mut meanings = writable_v3_meanings(&current);
     meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("新的港口释义");
     let updated = save_v3_meanings(&state, &bearer, &current, meanings).await;
-    let (status, _) = publish_ready_v3(&state, &bearer, &updated).await;
+    let (status, _) = publish_reviewed_v3(&state, &bearer, &updated).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
         call(&state, Method::GET, &path, &bearer, None, None)
@@ -108,7 +108,7 @@ async fn related_suggestions_lazy_senses_bind_and_persist_current_publication(po
 #[sqlx::test]
 async fn related_suggestions_use_words_permission_and_respect_v3_gate(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let bearer = token(&state, actor);

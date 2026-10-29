@@ -39,6 +39,7 @@ use crate::{
     state::AppState,
 };
 
+pub(crate) mod audio_publication;
 pub(crate) mod commands;
 pub(crate) mod lifecycle;
 pub(crate) mod query;

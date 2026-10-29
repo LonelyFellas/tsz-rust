@@ -14,6 +14,7 @@ pub(crate) mod model;
 pub mod preview;
 mod product_catalog;
 mod provider;
+pub mod publication_audio;
 mod ssml;
 
 pub use azure::AzureSpeechProvider;

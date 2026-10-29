@@ -92,12 +92,14 @@ pub async fn entries(
                         );
                     }
                     for pronunciation in pronunciations {
-                        generated_audio(
-                            &mut audio,
-                            pronunciation.id,
-                            source_dialect,
-                            pronunciation.voice_profile.as_ref(),
-                        );
+                        if pronunciation.synthesis.is_none() {
+                            generated_audio(
+                                &mut audio,
+                                pronunciation.id,
+                                source_dialect,
+                                pronunciation.voice_profile.as_ref(),
+                            );
+                        }
                         if let Some(synthesis) = &pronunciation.synthesis {
                             if synthesis.use_spelling == Some(true) {
                                 if let Some(speech) = spelling_speech {
@@ -106,6 +108,12 @@ pub async fn entries(
                                         pronunciation.id,
                                         source_dialect,
                                         Some(&speech.voice_profile),
+                                    );
+                                    uploaded_audio(
+                                        &mut audio,
+                                        pronunciation.id,
+                                        source_dialect,
+                                        &speech.audio_assets,
                                     );
                                 }
                             } else {
@@ -131,33 +139,20 @@ pub async fn entries(
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
-        for pos in &native.forms.pos {
-            for form in &pos.forms {
-                let variants = match &form.regional_variants {
-                    WordRegionalVariantsV3::Common { common } => {
-                        vec![(Dialect::Common, &common.pronunciations)]
-                    }
-                    WordRegionalVariantsV3::UkUs { uk, us } => {
-                        vec![
-                            (Dialect::Uk, &uk.pronunciations),
-                            (Dialect::Us, &us.pronunciations),
-                        ]
-                    }
-                };
-                for (source_dialect, variant) in variants {
-                    for sound in variant {
-                        audio.extend(sound.audio_assets.iter().map(|a| DictionaryAudio {
-                            target_id: sound.id,
-                            asset_id: a.id,
-                            locale: a.locale.as_str().into(),
-                            accent_group: a.locale.accent_group(),
+                        uploaded_audio(
+                            &mut audio,
+                            pronunciation.id,
                             source_dialect,
-                            hd_flash: false,
-                        }));
+                            &pronunciation.audio_assets,
+                        );
+                        if pronunciation.synthesis.is_some() {
+                            generated_audio(
+                                &mut audio,
+                                pronunciation.id,
+                                source_dialect,
+                                pronunciation.voice_profile.as_ref(),
+                            );
+                        }
                     }
                 }
             }
@@ -278,6 +273,15 @@ pub async fn entries(
                 translation: sentence.zh_text,
             });
         }
+        let mut seen_audio = std::collections::HashSet::new();
+        audio.retain(|item| {
+            seen_audio.insert((
+                item.target_id,
+                item.asset_id,
+                item.locale.clone(),
+                std::mem::discriminant(&item.source_dialect),
+            ))
+        });
         result.push(DictionaryEntry {
             content,
             audio,

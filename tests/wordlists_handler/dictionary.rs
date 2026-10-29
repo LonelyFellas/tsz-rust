@@ -446,3 +446,56 @@ async fn dictionary_audio_keeps_source_text_dialect_separate_from_voice_locale(p
         }
     }
 }
+
+#[sqlx::test]
+async fn dictionary_prefers_active_speech_and_spelling_recordings_before_legacy_versions(
+    pool: PgPool,
+) {
+    let (state, auth) = setup_bound(&pool).await;
+    let id = full_entry(&pool, "activesource").await;
+    let (publication, original): (Uuid, Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1")
+        .bind(id).fetch_one(&pool).await.unwrap();
+    let legacy = Uuid::now_v7();
+    let active = Uuid::now_v7();
+    let inactive = Uuid::now_v7();
+    let profile = |asset| json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"saved","locale":"en-GB","audio_asset_id":asset}]});
+    for spelling in [false, true] {
+        let mut snapshot = original.clone();
+        let variant = &mut snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"];
+        let text = variant["spelling"].clone();
+        let pronunciation = &mut variant["pronunciations"][0];
+        let target = pronunciation["id"].clone();
+        pronunciation["voice_profile"] = profile(legacy);
+        pronunciation["synthesis"] = json!({"alphabet":"ipa","ipa":"test","ups":"","use_spelling":spelling,
+            "uk":{"ipa":"test","ups":"","ipa_speech":{"content":{"version":2,"text":text,"annotations":[]},"voice_profile":profile(active)},
+            "ups_speech":{"content":{"version":2,"text":text,"annotations":[]},"voice_profile":profile(inactive)}}});
+        if spelling {
+            variant["spelling_speech"] = json!({"content":{"version":2,"text":text,"annotations":[]},"voice_profile":{"voices":[]},
+                "audio_assets":[{"id":active,"locale":"en-GB","gender":"female","content_type":"audio/mpeg","size_bytes":3,"duration_ms":null,"original_name":"fixture.mp3","created_at":"2026-10-29T00:00:00Z"}]});
+        }
+        sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+            .bind(publication)
+            .bind(snapshot)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, body) = call(
+            &state,
+            &auth,
+            "GET",
+            &format!("/api/v1/dictionary/entries/{id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let audio = body["audio"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["target_id"] == target)
+            .collect::<Vec<_>>();
+        assert_eq!(audio[0]["asset_id"], json!(active), "{body}");
+        assert!(audio.iter().any(|item| item["asset_id"] == json!(legacy)));
+        assert!(audio.iter().all(|item| item["asset_id"] != json!(inactive)));
+    }
+}

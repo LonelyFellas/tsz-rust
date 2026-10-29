@@ -22,6 +22,8 @@ use uuid::Uuid;
 
 #[path = "speech_generated/audio_updates.rs"]
 mod audio_updates_tests;
+#[path = "speech_generated/publication_review.rs"]
+mod publication_review;
 
 struct Provider {
     calls: AtomicUsize,
@@ -72,7 +74,247 @@ fn store() -> Arc<dyn ObjectStore> {
     )
 }
 
+#[sqlx::test]
+async fn same_effect_new_request_reuses_bytes_in_a_distinct_owned_asset(pool: PgPool) {
+    let actor = actor(&pool).await;
+    let provider = Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        fail_first: false,
+    });
+    let storage = store();
+    let service =
+        GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(storage.clone()));
+    let first = service
+        .generate(actor, 0, input(Uuid::now_v7(), Uuid::now_v7(), "hello"))
+        .await
+        .unwrap()
+        .asset;
+    let second = service
+        .generate(actor, 0, input(Uuid::now_v7(), Uuid::now_v7(), "hello"))
+        .await
+        .unwrap()
+        .asset;
+    assert_ne!(
+        first.id, second.id,
+        "business assets must retain independent ownership"
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "same synthesis effect must not be charged twice"
+    );
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT object_key FROM lexicon.audio_assets WHERE id=ANY($1) ORDER BY id",
+    )
+    .bind(vec![first.id, second.id])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_ne!(keys[0], keys[1]);
+    for key in keys {
+        assert_eq!(
+            storage.read(&ObjectKey::parse(key).unwrap()).await.unwrap(),
+            b"ID3-test-audio"
+        );
+    }
+    assert_eq!(second.size_bytes, first.size_bytes);
+}
+
 struct WavProvider;
+
+#[sqlx::test]
+async fn reuse_preserves_explicit_regeneration_and_effect_changes(pool: PgPool) {
+    let actor = actor(&pool).await;
+    let provider = Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        fail_first: false,
+    });
+    let service = GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(store()));
+    let first = service
+        .generate(actor, 0, input(Uuid::now_v7(), Uuid::now_v7(), "hello"))
+        .await
+        .unwrap()
+        .asset;
+    let mut regenerate = input(Uuid::now_v7(), Uuid::now_v7(), "hello");
+    regenerate.setting.audio_asset_id = Some(first.id);
+    let request = regenerate.request_id;
+    let version = regenerate.setting.version_id.unwrap();
+    let second = service.generate(actor, 0, regenerate).await.unwrap().asset;
+    assert_ne!(first.id, second.id);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let mut retry = input(request, version, "hello");
+    retry.setting.audio_asset_id = Some(first.id);
+    assert_eq!(
+        service.generate(actor, 0, retry).await.unwrap().asset.id,
+        second.id
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+    let mut faster = input(Uuid::now_v7(), Uuid::now_v7(), "hello");
+    faster.setting.rate_percent = 10;
+    service.generate(actor, 0, faster).await.unwrap();
+    service
+        .generate(actor, 0, input(Uuid::now_v7(), Uuid::now_v7(), "world"))
+        .await
+        .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    sqlx::query("UPDATE speech.voices SET provider_version='v2' WHERE alias='sonia'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    service
+        .generate(actor, 0, input(Uuid::now_v7(), Uuid::now_v7(), "hello"))
+        .await
+        .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 5);
+}
+
+#[sqlx::test]
+async fn reuse_is_owner_scoped_and_excludes_reclaiming_assets(pool: PgPool) {
+    let owner = actor(&pool).await;
+    let other = Uuid::now_v7();
+    AdminRepository::new(pool.clone())
+        .create(NewAdmin {
+            id: other,
+            phone: format!("reuse-{other}"),
+            display_name: "Other editor".into(),
+            password_hash: "hash".into(),
+            role: AdminRole::Admin,
+            must_change_password: false,
+            created_by_admin_id: None,
+        })
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1,unnest(ARRAY['words.access','words.edit','speech.generate']),$1").bind(other).execute(&pool).await.unwrap();
+    let provider = Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        fail_first: false,
+    });
+    let service = GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(store()));
+    let first = service
+        .generate(owner, 0, input(Uuid::now_v7(), Uuid::now_v7(), "hello"))
+        .await
+        .unwrap()
+        .asset;
+    let second = service
+        .generate(other, 0, input(Uuid::now_v7(), Uuid::now_v7(), "hello"))
+        .await
+        .unwrap()
+        .asset;
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let second_owner: Uuid =
+        sqlx::query_scalar("SELECT created_by_admin_id FROM lexicon.audio_assets WHERE id=$1")
+            .bind(second.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(second_owner, other);
+    sqlx::query("UPDATE lexicon.audio_assets SET reclamation_started_at=now() WHERE id=$1")
+        .bind(first.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    service
+        .generate(owner, 0, input(Uuid::now_v7(), Uuid::now_v7(), "hello"))
+        .await
+        .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+}
+
+#[sqlx::test]
+async fn unreadable_reuse_source_fails_without_spending_and_can_retry(pool: PgPool) {
+    let actor = actor(&pool).await;
+    let provider = Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        fail_first: false,
+    });
+    let storage = store();
+    let service =
+        GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(storage.clone()));
+    let first = service
+        .generate(actor, 0, input(Uuid::now_v7(), Uuid::now_v7(), "hello"))
+        .await
+        .unwrap()
+        .asset;
+    let key: String = sqlx::query_scalar("SELECT object_key FROM lexicon.audio_assets WHERE id=$1")
+        .bind(first.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let key = ObjectKey::parse(key).unwrap();
+    storage.delete(&key).await.unwrap();
+    let request = Uuid::now_v7();
+    let version = Uuid::now_v7();
+    assert!(
+        service
+            .generate(actor, 0, input(request, version, "hello"))
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM lexicon.audio_generations WHERE request_id=$1")
+            .bind(request)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "failed");
+    storage
+        .put(
+            &key,
+            b"ID3-test-audio".to_vec(),
+            tsz_rust::platform::storage::PutOptions::new(Some(
+                tsz_rust::platform::storage::ObjectContentType::parse("audio/mpeg").unwrap(),
+            )),
+        )
+        .await
+        .unwrap();
+    service
+        .generate(actor, 0, input(request, version, "hello"))
+        .await
+        .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+#[sqlx::test]
+async fn reuse_index_migration_preserves_generated_assets(pool: PgPool) {
+    let actor = actor(&pool).await;
+    let provider = Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        fail_first: false,
+    });
+    let service = GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(store()));
+    let request = Uuid::now_v7();
+    let version = Uuid::now_v7();
+    let first = service
+        .generate(actor, 0, input(request, version, "hello"))
+        .await
+        .unwrap()
+        .asset;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261028180000_generated_audio_reuse.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261028180000_generated_audio_reuse.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        service
+            .generate(actor, 0, input(request, version, "hello"))
+            .await
+            .unwrap()
+            .asset
+            .id,
+        first.id
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
 #[async_trait]
 impl SpeechProvider for WavProvider {
     fn provider_name(&self) -> &'static str {

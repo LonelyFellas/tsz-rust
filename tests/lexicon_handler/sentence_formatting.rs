@@ -30,7 +30,7 @@ async fn audit_count(pool: &PgPool) -> i64 {
 #[sqlx::test]
 async fn sentence_formatting_negotiates_reads_and_protects_legacy_writes(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
+    let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
@@ -125,6 +125,7 @@ async fn sentence_formatting_negotiates_reads_and_protects_legacy_writes(pool: P
     .await;
     assert_eq!(current["word"]["meanings"], saved["word"]["meanings"]);
     let key = Uuid::now_v7();
+    confirm_audio(&state, &bearer, &current).await;
     let publish_path = format!("{ROOT}/entries/{id}/publications");
     let input = json!({"schema_version":3,"base_revision":current["word"]["revision"]});
     let (status, old_published) = call_with_capabilities(

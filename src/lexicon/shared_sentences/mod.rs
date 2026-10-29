@@ -498,7 +498,10 @@ async fn read(pool: &PgPool, id: Uuid) -> Result<SharedSentence, AppError> {
     read_on(&mut snapshot, id).await
 }
 
-async fn read_on(snapshot: &mut PgConnection, id: Uuid) -> Result<SharedSentence, AppError> {
+pub(crate) async fn read_on(
+    snapshot: &mut PgConnection,
+    id: Uuid,
+) -> Result<SharedSentence, AppError> {
     let row = sqlx::query("SELECT s.*,a.display_name AS created_by FROM lexicon.shared_sentences s JOIN admins a ON a.id=s.created_by_admin_id WHERE s.id=$1 AND s.deleted_at IS NULL")
         .bind(id).fetch_optional(&mut *snapshot).await.map_err(AppError::internal)?.ok_or_else(missing)?;
     let ann = sqlx::query("SELECT * FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 ORDER BY source_dialect, source_segments->0->>'start',id").bind(id).fetch_all(&mut *snapshot).await.map_err(AppError::internal)?;

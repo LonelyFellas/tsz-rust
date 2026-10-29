@@ -6,7 +6,7 @@ async fn batch4_published_summary_never_uses_draft_label(pool: PgPool) {
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
     let word = batch3_word(&state, &bearer, "alpha").await;
-    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, _) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED);
     let draft = sentence(&state, &bearer, &word).await;
     publish_sentence(&state, &bearer, &draft).await;
@@ -25,7 +25,7 @@ async fn batch4_revocation_wins_against_waiting_publisher(pool: PgPool) {
     let actor = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let bearer = token(&state, actor);
     let word = batch3_word(&state, &bearer, "alpha").await;
-    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, _) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED);
     let draft = sentence(&state, &bearer, &word).await;
     sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
@@ -95,7 +95,7 @@ async fn batch4_mixed_replaces_only_selected_publication_sources(pool: PgPool) {
     a = save_v3_meanings(&state, &bearer, &a, meanings).await;
     let b = batch3_word(&state, &bearer, "beta").await;
     for word in [&a, &b] {
-        let (status, response) = publish_ready_v3(&state, &bearer, word).await;
+        let (status, response) = publish_reviewed_v3(&state, &bearer, word).await;
         assert_eq!(status, StatusCode::CREATED, "{response}");
     }
     let draft = sentence(&state, &bearer, &a).await;
@@ -120,6 +120,9 @@ async fn batch4_mixed_replaces_only_selected_publication_sources(pool: PgPool) {
         .unwrap()
         .remove(0);
     a = save_v3_meanings(&state, &bearer, &a, meanings).await;
+    for word in [&a] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let mut input = batch3_input(&[&a]);
     input["sentences"] = json!([item(&repaired)]);
     let path = format!("{ROOT}/entries/publications/batch");
@@ -258,7 +261,7 @@ async fn batch4_sentence_publication_isolated_history_and_idempotency(pool: PgPo
     let actor = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let bearer = token(&state, actor);
     let word = batch3_word(&state, &bearer, "alpha").await;
-    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, _) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED);
     let created = sentence(&state, &bearer, &word).await;
     assert_eq!(public_list(&state, &bearer, None).await["total"], 0);
@@ -374,7 +377,7 @@ async fn batch4_withdrawal_history_restoration_and_republication(pool: PgPool) {
     let other = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let other_bearer = token(&state, other);
     let word = batch3_word(&state, &bearer, "alpha").await;
-    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, _) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED);
     let draft = sentence(&state, &bearer, &word).await;
     let published = publish_sentence(&state, &bearer, &draft).await;
@@ -539,7 +542,7 @@ async fn batch4_local_visibility_follows_host_publication_not_sentence_updates(p
     let bearer = token(&state, actor);
     let word = batch3_word(&state, &bearer, "alpha").await;
     let word_id = word["word"]["id"].as_str().unwrap();
-    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, _) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED);
     let first: Uuid =
         sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id=$1")
@@ -587,7 +590,7 @@ async fn batch4_local_visibility_follows_host_publication_not_sentence_updates(p
         None,
     )
     .await;
-    let (status, _) = publish_ready_v3(&state, &bearer, &word_hidden).await;
+    let (status, _) = publish_reviewed_v3(&state, &bearer, &word_hidden).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
         public_list(&state, &bearer, Some(&word["word"]["id"])).await["total"],
@@ -657,6 +660,9 @@ async fn batch4_mixed_publication_resolves_explicit_dependency_and_is_atomic(poo
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    for word in [&word] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let mut input = batch3_input(&[&word]);
     input["sentences"] = json!([item(&draft)]);
     let key = Uuid::now_v7();
@@ -704,6 +710,9 @@ async fn batch4_mixed_late_failure_rolls_back_word_and_sentence(pool: PgPool) {
     let word = batch3_word(&state, &bearer, "alpha").await;
     let draft = sentence(&state, &bearer, &word).await;
     sqlx::raw_sql("CREATE FUNCTION lexicon.fail_batch4_annotation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'batch4 late failure'; END $$; CREATE TRIGGER fail_batch4_annotation BEFORE INSERT ON lexicon.shared_sentence_publication_annotations FOR EACH ROW EXECUTE FUNCTION lexicon.fail_batch4_annotation();").execute(&pool).await.unwrap();
+    for word in [&word] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let mut input = batch3_input(&[&word]);
     input["sentences"] = json!([item(&draft)]);
     let (status, _) = call(
@@ -736,6 +745,9 @@ async fn batch4_mixed_reverse_order_concurrency_has_one_winner(pool: PgPool) {
     let b = batch3_word(&state, &bearer, "beta").await;
     let sa = sentence(&state, &bearer, &a).await;
     let sb = sentence(&state, &bearer, &b).await;
+    for word in [&a, &b] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let mut x = batch3_input(&[&a, &b]);
     x["sentences"] = json!([item(&sa), item(&sb)]);
     let mut y = batch3_input(&[&b, &a]);
@@ -782,6 +794,9 @@ async fn permission_mixed_batch_requires_only_present_resource_actions(pool: PgP
     let word = batch3_word(&state, &bearer, "alpha").await;
     let draft = sentence(&state, &bearer, &word).await;
     let path = format!("{ROOT}/entries/publications/batch");
+    for word in [&word] {
+        confirm_audio(&state, &bearer, word).await;
+    }
     let mut mixed = batch3_input(&[&word]);
     mixed["sentences"] = json!([item(&draft)]);
     for missing in ["sentences.publish", "words.publish"] {
@@ -852,6 +867,7 @@ async fn permission_mixed_batch_requires_only_present_resource_actions(pool: PgP
     sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.publish',$1)")
         .bind(actor).execute(&pool).await.unwrap();
     let next_word = batch3_word(&state, &bearer, "beta").await;
+    confirm_audio(&state, &bearer, &next_word).await;
     let (status, result) = call(
         &state,
         Method::POST,
@@ -904,7 +920,7 @@ async fn permission_edit_scope_applies_to_drafts_and_published_revisions_at_serv
     for published in [false, true] {
         let mut word = batch3_word(&state, &bearer, if published { "beta" } else { "alpha" }).await;
         if published {
-            let (status, response) = publish_ready_v3(&state, &bearer, &word).await;
+            let (status, response) = publish_reviewed_v3(&state, &bearer, &word).await;
             assert_eq!(status, StatusCode::CREATED, "{response}");
             word = response;
         }
@@ -1028,7 +1044,7 @@ async fn permission_shared_sentence_body_scope_and_host_scope_are_independent(po
     let other_bearer = token(&state, outsider);
     let word = batch3_word(&state, &bearer, "alpha").await;
     let word_id = word["word"]["id"].as_str().unwrap();
-    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, _) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED);
     for published in [false, true] {
         let mut current = sentence(&state, &bearer, &word).await;
@@ -1138,7 +1154,7 @@ async fn batch4_published_only_reader_and_merged_restore_permission(pool: PgPool
     sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'sentences.read_published',$1)").bind(reader).execute(&pool).await.unwrap();
     let reader_bearer = token(&state, reader);
     let word = batch3_word(&state, &bearer, "alpha").await;
-    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    let (status, _) = publish_reviewed_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED);
     let draft = sentence(&state, &bearer, &word).await;
     let path = format!("{ROOT}/sentences/{}", draft["id"].as_str().unwrap());

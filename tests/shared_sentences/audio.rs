@@ -1,8 +1,8 @@
 use super::*;
 use std::{sync::Arc, time::Duration};
 use tsz_rust::platform::storage::{
-    MemoryAdapter, ObjectKey, ObjectStore, PutOptions, StoragePolicy, StoragePrivacy,
-    StorageRegistry, StorageSpace,
+    MemoryAdapter, ObjectContentType, ObjectKey, ObjectStore, PutOptions, StoragePolicy,
+    StoragePrivacy, StorageRegistry, StorageSpace,
 };
 
 fn storage(state: &mut AppState) -> Arc<dyn ObjectStore> {
@@ -18,6 +18,29 @@ fn with_audio(source: Uuid, assets: Value) -> Value {
     let mut value = content(source);
     value["sentence"]["en_text"]["common"]["audio_assets"] = assets;
     value
+}
+
+async fn confirm_sentence_audio(state: &AppState, actor: Uuid, id: &str, revision: i64) {
+    let (status, review) = call(
+        state,
+        actor,
+        Method::POST,
+        &format!("{ROOT}/{id}/publication-audio/check"),
+        Some(json!({"base_revision":revision})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["manifest"]["ready"], true, "{review}");
+    let (status, confirmed) = call(
+        state,
+        actor,
+        Method::POST,
+        &format!("{ROOT}/{id}/publication-audio/confirm"),
+        Some(json!({"base_revision":revision,"manifest_hash":review["manifest"]["manifest_hash"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    assert_eq!(confirmed["confirmed"], true);
 }
 
 async fn create(state: &AppState, actor: Uuid, source: Uuid, value: Value) -> (StatusCode, Value) {
@@ -95,7 +118,11 @@ async fn published_audio_survives_draft_removal_reclamation_and_history_restore(
     let asset_id: Uuid = asset["id"].as_str().unwrap().parse().unwrap();
     let key = ObjectKey::parse(format!("assets/{asset_id}.wav")).unwrap();
     store
-        .put(&key, vec![1, 2, 3], PutOptions::new(None))
+        .put(
+            &key,
+            vec![1, 2, 3],
+            PutOptions::new(Some(ObjectContentType::parse("audio/wav").unwrap())),
+        )
         .await
         .unwrap();
     let (status, created) = create(
@@ -122,6 +149,16 @@ async fn published_audio_survives_draft_removal_reclamation_and_history_restore(
         StatusCode::OK,
         "another authorized editor retains attached audio: {updated}"
     );
+    let (status, rejected) = call(
+        &state,
+        actor,
+        Method::POST,
+        &format!("{ROOT}/{id}/publications"),
+        Some(json!({"base_revision":2,"base_lifecycle_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    confirm_sentence_audio(&state, actor, id, 2).await;
     let (status, published) = call(
         &state,
         actor,
@@ -265,7 +302,7 @@ async fn cross_word_claims_are_rejected_and_published_readers_cannot_read_draft_
     pool: PgPool,
 ) {
     let mut state = AppState::for_test(pool.clone());
-    storage(&mut state);
+    let store = storage(&mut state);
     let actor = admin(&pool).await;
     let reader = admin_with_role(&pool, AdminRole::Admin).await;
     sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1")
@@ -287,6 +324,14 @@ async fn cross_word_claims_are_rejected_and_published_readers_cannot_read_draft_
     );
     let asset = audio_asset(&pool, actor).await;
     let asset_id: Uuid = asset["id"].as_str().unwrap().parse().unwrap();
+    store
+        .put(
+            &ObjectKey::parse(format!("assets/{asset_id}.wav")).unwrap(),
+            vec![1, 2, 3],
+            PutOptions::new(Some(ObjectContentType::parse("audio/wav").unwrap())),
+        )
+        .await
+        .unwrap();
     let (status, created) = create(&state, actor, source, with_audio(source, json!([asset]))).await;
     assert_eq!(status, StatusCode::OK, "{created}");
     let url = format!("/api/v1/admin/lexicon/audio-assets/{asset_id}/url");
@@ -314,6 +359,7 @@ async fn cross_word_claims_are_rejected_and_published_readers_cannot_read_draft_
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
+    confirm_sentence_audio(&state, actor, id, 2).await;
     let (status, body) = call(
         &state,
         actor,

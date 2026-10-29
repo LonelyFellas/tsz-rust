@@ -1156,6 +1156,12 @@ async fn origin_deletion_does_not_lock_or_remove_independently_published_sentenc
 #[sqlx::test]
 async fn shared_schema_can_be_reverted_and_reapplied_in_isolation(pool: PgPool) {
     sqlx::raw_sql(include_str!(
+        "../migrations/20261029010000_publication_audio_reviews.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20261018140000_shared_sentence_audio.down.sql"
     ))
     .execute(&pool)
@@ -1222,6 +1228,12 @@ async fn shared_schema_can_be_reverted_and_reapplied_in_isolation(pool: PgPool) 
     assert_eq!(count, 0);
     sqlx::raw_sql(include_str!(
         "../migrations/20261018140000_shared_sentence_audio.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261029010000_publication_audio_reviews.up.sql"
     ))
     .execute(&pool)
     .await
