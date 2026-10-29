@@ -85,6 +85,16 @@ pub struct AssetProbes {
     records: HashMap<Uuid, AssetProbe>,
 }
 
+impl AssetProbes {
+    /// Empty probes cannot validate any registered asset during locked inspection.
+    pub fn empty(owner: Owner) -> Self {
+        Self {
+            owner,
+            records: HashMap::new(),
+        }
+    }
+}
+
 struct AssetProbe {
     key: String,
     size: i64,

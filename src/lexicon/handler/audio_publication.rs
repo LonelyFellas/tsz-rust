@@ -198,13 +198,17 @@ async fn review_content(
     forms: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
     expected: Option<&str>,
 ) -> Result<PublicationAudioReview, AppError> {
-    let storage = state
-        .object_storage
-        .get(&crate::platform::storage::StorageSpace::parse("audio").expect("constant space"))
-        .map_err(|_| {
-            AppError::unavailable(ErrorCode::AudioStorageNotConfigured, "音频存储尚未配置")
-        })?;
-    let probes = probe_assets(&state.pool, owner, &requirements, storage.as_ref()).await?;
+    let probes = if requirements.iter().any(|item| item.asset_id.is_some()) {
+        let storage = state
+            .object_storage
+            .get(&crate::platform::storage::StorageSpace::parse("audio").expect("constant space"))
+            .map_err(|_| {
+                AppError::unavailable(ErrorCode::AudioStorageNotConfigured, "音频存储尚未配置")
+            })?;
+        probe_assets(&state.pool, owner, &requirements, storage.as_ref()).await?
+    } else {
+        crate::speech::publication_audio::review::AssetProbes::empty(owner)
+    };
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let manifest = inspect_in(
         &mut tx,

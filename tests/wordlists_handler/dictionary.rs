@@ -325,9 +325,26 @@ async fn dictionary_v3_keeps_native_regions_and_supplements_without_legacy_fallb
 
 #[sqlx::test]
 async fn dictionary_shared_examples_respect_hides_and_withdrawal(pool: PgPool) {
-    let (state, auth) = setup_bound(&pool).await;
+    use tsz_rust::platform::storage::{
+        MemoryAdapter, StoragePolicy, StoragePrivacy, StorageRegistry, StorageSpace,
+    };
+    let (mut state, auth) = setup_bound(&pool).await;
+    let store = MemoryAdapter::object_store(
+        StorageSpace::parse("audio").unwrap(),
+        StoragePolicy::new(
+            StoragePrivacy::Private,
+            1024,
+            std::time::Duration::from_secs(60),
+            None,
+        )
+        .unwrap(),
+    );
+    state.object_storage = StorageRegistry::from_stores([store]).unwrap();
     let id = full_entry(&pool, "apple").await;
     let manager = admin(&pool).await;
+    let asset = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$2,'audio/mpeg',3,'en-GB','female','fixture.mp3',$3)")
+        .bind(asset).bind(format!("assets/{asset}.mp3")).bind(manager).execute(&pool).await.unwrap();
     let (publication, snapshot): (Uuid,Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
     let sense = Uuid::parse_str(
         snapshot["meanings"]["pos"][0]["senses"][0]["id"]
@@ -344,7 +361,8 @@ async fn dictionary_shared_examples_respect_hides_and_withdrawal(pool: PgPool) {
     let sentence = Uuid::now_v7();
     let published = Uuid::now_v7();
     let rich = |text: &str| json!({"version":1,"text":text,"spans":[],"liaisons":[]});
-    let content = json!({"sentence":{"id":sentence,"level":"A1","en_text":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":rich("An apple.")}},"zh_text_id":Uuid::now_v7(),"zh_text":rich("一个苹果。"),"zh_translations":[],"links":[]},"annotations":[]});
+    let mut content = json!({"sentence":{"id":sentence,"level":"A1","en_text":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":rich("An apple.")}},"zh_text_id":Uuid::now_v7(),"zh_text":rich("一个苹果。"),"zh_translations":[],"links":[]},"annotations":[]});
+    content["sentence"]["en_text"]["common"]["audio_assets"] = json!([{"id":asset,"locale":"en-GB","gender":"female","content_type":"audio/mpeg","size_bytes":3,"duration_ms":null,"original_name":"fixture.mp3","created_at":"2026-10-29T00:00:00Z"}]);
     sqlx::query("INSERT INTO lexicon.shared_sentences(id,content,create_digest,created_by_admin_id) VALUES($1,$2,'dictionary-test',$3)").bind(sentence).bind(&content).bind(manager).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO lexicon.shared_sentence_publications(id,sentence_id,publication_number,source_revision,snapshot,published_by_admin_id) VALUES($1,$2,1,1,$3,$4)").bind(published).bind(sentence).bind(content).bind(manager).execute(&pool).await.unwrap();
     sqlx::query("UPDATE lexicon.shared_sentences SET current_publication_id=$2 WHERE id=$1")
@@ -356,6 +374,11 @@ async fn dictionary_shared_examples_respect_hides_and_withdrawal(pool: PgPool) {
     let target = json!({"state":"linked","target_entry_id":id,"target_sense_id":sense,"target_publication_id":publication});
     sqlx::query("INSERT INTO lexicon.shared_sentence_publication_annotations(publication_id,sentence_id,id,source_dialect,source_segments,target_entry_id,target_sense_id,target_ref) VALUES($1,$2,$3,'common',$4,$5,$6,$7)").bind(published).bind(sentence).bind(Uuid::now_v7()).bind(json!([{"start":3,"end":8,"surface":"apple"}])).bind(id).bind(sense).bind(target).execute(&pool).await.unwrap();
     let path = format!("/api/v1/dictionary/entries/{id}");
+    let audio_path = format!("{path}/audio/{asset}");
+    assert_eq!(
+        call(&state, &auth, "GET", &audio_path, Value::Null).await.0,
+        StatusCode::OK
+    );
     let visible = call(&state, &auth, "GET", &path, Value::Null).await;
     assert_eq!(visible.0, StatusCode::OK, "{}", visible.1);
     assert_eq!(
@@ -367,6 +390,10 @@ async fn dictionary_shared_examples_respect_hides_and_withdrawal(pool: PgPool) {
         call(&state, &auth, "GET", &path, Value::Null).await.1["examples"],
         json!([])
     );
+    assert_eq!(
+        call(&state, &auth, "GET", &audio_path, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
     sqlx::query("DELETE FROM lexicon.shared_sentence_publication_hides WHERE publication_id=$1")
         .bind(publication)
         .execute(&pool)
@@ -376,6 +403,10 @@ async fn dictionary_shared_examples_respect_hides_and_withdrawal(pool: PgPool) {
     assert_eq!(
         call(&state, &auth, "GET", &path, Value::Null).await.1["examples"],
         json!([])
+    );
+    assert_eq!(
+        call(&state, &auth, "GET", &audio_path, Value::Null).await.0,
+        StatusCode::NOT_FOUND
     );
 }
 

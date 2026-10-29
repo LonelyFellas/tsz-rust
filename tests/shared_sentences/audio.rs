@@ -401,3 +401,49 @@ async fn cross_word_claims_are_rejected_and_published_readers_cannot_read_draft_
         "history alone cannot authorize a public reader: {body}"
     );
 }
+
+#[sqlx::test]
+async fn empty_audio_requirements_do_not_require_a_storage_space(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let (status, empty) = create(&state, actor, source, content(source)).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    let check = |sentence: &Value| {
+        format!(
+            "{ROOT}/{}/publication-audio/check",
+            sentence["id"].as_str().unwrap()
+        )
+    };
+    let (status, review) = call(
+        &state,
+        actor,
+        Method::POST,
+        &check(&empty),
+        Some(json!({"base_revision":empty["revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["manifest"]["ready"], true);
+    assert_eq!(review["manifest"]["items"], json!([]));
+    let asset = audio_asset(&pool, actor).await;
+    let source_with_asset = entry(&pool, actor, "wonderful").await;
+    let (status, with_asset) = create(
+        &state,
+        actor,
+        source_with_asset,
+        with_audio(source_with_asset, json!([asset])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{with_asset}");
+    let (status, blocked) = call(
+        &state,
+        actor,
+        Method::POST,
+        &check(&with_asset),
+        Some(json!({"base_revision":with_asset["revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{blocked}");
+    assert_eq!(blocked["code"], "audio_storage_not_configured");
+}
