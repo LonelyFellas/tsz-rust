@@ -183,6 +183,9 @@ pub struct LearningTaskPage {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningRun {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub practice_mode: Option<String>,
     pub id: Uuid,
     pub task_id: Uuid,
     pub task_type: LearningTaskType,
@@ -228,6 +231,9 @@ pub struct LearningAnswerFeedback {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningQuestion {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub practice_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub options: Option<Vec<LearningOption>>,

@@ -1,0 +1,12 @@
+DROP TRIGGER z_choice_semantics_activation ON lexicon.entries;
+DROP TRIGGER z_choice_semantics_publication ON lexicon.entry_publications;
+DROP FUNCTION dictionary.refresh_choice_publication_trigger();
+DROP FUNCTION dictionary.refresh_choice_publication(uuid);
+DROP TRIGGER choice_semantics_content ON dictionary.entry_contents;
+DROP FUNCTION dictionary.refresh_choice_semantics_trigger();
+DROP FUNCTION dictionary.refresh_choice_semantics(bigint,text);
+DROP TABLE dictionary.choice_semantics;
+DROP FUNCTION dictionary.choice_supported(jsonb);
+DROP FUNCTION dictionary.choice_strings(jsonb,text);
+DROP FUNCTION dictionary.choice_words(jsonb,text);
+DROP INDEX lexicon.question_candidate_semantic_spelling;
