@@ -1,10 +1,10 @@
-use super::{dto::BankQuestionContent, source};
+use super::{algorithm, dto::BankQuestionContent, source};
 use crate::{
     auth::extract::AuthUser,
     error::AppError,
     learning_tasks::{
         dto::{LearningContext, LearningOption},
-        question::{AnswerSnapshot, Candidate, CandidatePool, LearningSource},
+        question::{AnswerSnapshot, CandidatePool, LearningSource},
         repository::Tx,
     },
     state::AppState,
@@ -16,13 +16,15 @@ use axum::{
     response::Response,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::types::Json;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use uuid::Uuid;
 pub const CHOICE: &str = "choice_zh_to_en";
 pub const GRADING: &str = "choice_id_v1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChoiceSnapshot {
+    #[serde(default)]
+    pub deferred: bool,
     pub question_id: Uuid,
     pub revision: i64,
     pub content: BankQuestionContent,
@@ -86,95 +88,137 @@ pub async fn capability_guard(
     }
     Ok(next.run(Request::from_parts(request_parts, body)).await)
 }
-pub async fn available(
-    tx: &mut Tx<'_>,
-    entries: &[Uuid],
-) -> Result<HashSet<(Uuid, i64)>, AppError> {
-    let rows:Vec<(Uuid,i64,Json<BankQuestionContent>)>=sqlx::query_as("SELECT id,revision,content FROM question_bank WHERE state='approved' AND target_entry_id=ANY($1) ORDER BY id FOR SHARE").bind(entries).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
-    let mut available = HashSet::new();
-    for (id, revision, content) in rows {
-        match source::validate_question(tx, &content).await {
-            Ok(()) => {
-                available.insert((id, revision));
-            }
-            Err(e) if e.status_code().is_client_error() => {}
-            Err(e) => return Err(e),
+pub async fn fingerprints(tx: &mut Tx<'_>, entries: &[Uuid]) -> Result<HashSet<String>, AppError> {
+    let mut result = HashSet::new();
+    for profile in ["BrE", "AmE"] {
+        for chunk in entries.chunks(64) {
+            result.extend(
+                source::candidates(tx, chunk, "C2", profile)
+                    .await?
+                    .into_iter()
+                    .map(|c| c.content_fingerprint),
+            );
         }
     }
-    Ok(available)
+    Ok(result)
 }
 pub async fn build_pool(
     tx: &mut Tx<'_>,
     sources: &[LearningSource],
     settings: &LearningContext,
 ) -> Result<CandidatePool, AppError> {
-    let entries: Vec<Uuid> = sources.iter().map(|s| s.entry_id).collect();
-    let rows:Vec<(Uuid,i64,Json<BankQuestionContent>)>=sqlx::query_as("SELECT id,revision,content FROM question_bank WHERE state='approved' AND target_entry_id=ANY($1) AND question_level=$2 AND answer_profile=$3 ORDER BY updated_at DESC,id DESC FOR SHARE").bind(&entries).bind(&settings.cefr_level).bind(&settings.english_variant).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
-    let mut valid = vec![];
-    for row in rows {
-        match source::validate_question(tx, &row.2).await {
-            Ok(()) => valid.push(row),
-            Err(e) if e.status_code().is_client_error() => {}
-            Err(e) => return Err(e),
+    let mut pool = crate::learning_tasks::question::build_candidates(sources, settings)?;
+    let mut ids: Vec<_> = sources.iter().map(|s| s.entry_id).collect();
+    ids.sort();
+    ids.dedup();
+    let mut targets = Vec::new();
+    for chunk in ids.chunks(64) {
+        targets.extend(
+            source::candidates(tx, chunk, &settings.cefr_level, &settings.english_variant).await?,
+        );
+    }
+    let parts: Vec<_> = targets
+        .iter()
+        .map(|t| t.part_of_speech.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut algorithm =
+        algorithm::Pool::load(tx, &settings.cefr_level, &settings.english_variant, &parts).await?;
+    let mut eligible = Vec::new();
+    for mut candidate in pool.candidates {
+        let Some(target) = targets.iter().find(|t| {
+            t.source.entry_id == candidate.entry_id
+                && t.source.publication_id == candidate.publication_id
+                && t.source.sense_id == candidate.sense_id
+                && t.source.definition_id == candidate.definition_id
+                && candidate.form_ids.contains(&t.source.form_id)
+        }) else {
+            continue;
+        };
+        let Some(content) = algorithm.content(tx, target, &settings.cefr_level).await? else {
+            continue;
+        };
+        if content.prompt.chars().count() > 2000 || content.explanation.chars().count() > 2000 {
+            continue;
+        }
+        if target.accepted_spellings.iter().any(|s| {
+            crate::learning_tasks::question::leaks(
+                &content.prompt,
+                &crate::platform::text::key_v1(s),
+            )
+        }) {
+            continue;
+        }
+        let digest =
+            Sha256::digest(serde_json::to_vec(&target.source).map_err(AppError::internal)?);
+        let mut identity = [0; 16];
+        identity.copy_from_slice(&digest[..16]);
+        candidate.answer.choice = Some(ChoiceSnapshot {
+            deferred: true,
+            question_id: Uuid::from_bytes(identity),
+            revision: 1,
+            content,
+            options: vec![],
+            correct_option_id: String::new(),
+        });
+        eligible.push(candidate);
+    }
+    pool.candidates = eligible;
+    Ok(pool)
+}
+/// Freeze options only for the learning units selected for this run, in the run transaction.
+pub async fn materialize(
+    tx: &mut Tx<'_>,
+    units: &[&crate::learning_tasks::repository::QuestionRow],
+    settings: &LearningContext,
+) -> Result<(), AppError> {
+    let mut parts = Vec::new();
+    for unit in units {
+        if let Some(value) = unit.answer_snapshot.get("choice").filter(|v| !v.is_null()) {
+            let c: ChoiceSnapshot =
+                serde_json::from_value(value.clone()).map_err(AppError::internal)?;
+            if c.deferred {
+                parts.push(c.content.target.part_of_speech);
+            }
         }
     }
-    let mut candidates = vec![];
-    let mut seen = HashSet::new();
-    for source in sources {
-        for (id, revision, content) in &valid {
-            let target = &content.target.source;
-            if target.entry_id != source.entry_id || target.publication_id != source.publication_id
-            {
-                continue;
-            }
-            let unit_key = format!("{}:{}:{}", target.entry_id, target.pos_id, target.sense_id);
-            if !seen.insert(unit_key.clone()) {
-                continue;
-            }
-            let options = content
-                .options
-                .iter()
-                .map(|o| LearningOption {
-                    option_id: o.option_id.clone(),
-                    spelling: o.candidate.spelling.clone(),
-                })
-                .collect();
-            candidates.push(Candidate {
-                source_wordlist_id: source.wordlist_id,
-                source_revision: source.revision,
-                source_membership_id: source.membership_id,
-                source_public_generation: source.public_generation,
-                entry_id: source.entry_id,
-                entry_archive_generation: source.archive_generation,
-                publication_id: source.publication_id,
-                pos_id: target.pos_id,
-                sense_id: target.sense_id,
-                definition_id: target.definition_id,
-                form_ids: vec![target.form_id],
-                unit_key,
-                prompt: crate::learning_tasks::dto::LearningPrompt {
-                    definition: content.prompt.clone(),
-                    part_of_speech: content.target.part_of_speech.clone(),
-                },
-                answer: AnswerSnapshot {
-                    answers: vec![content.target.spelling.clone()],
-                    keys: vec![],
-                    normalization_version: 1,
-                    choice: Some(ChoiceSnapshot {
-                        question_id: *id,
-                        revision: *revision,
-                        content: content.0.clone(),
-                        options,
-                        correct_option_id: content.correct_option_id.clone(),
-                    }),
-                },
-            });
-        }
+    if parts.is_empty() {
+        return Ok(());
     }
-    Ok(CandidatePool {
-        candidates,
-        exclusions: Default::default(),
-    })
+    let mut algorithm =
+        algorithm::Pool::load(tx, &settings.cefr_level, &settings.english_variant, &parts).await?;
+    for unit in units {
+        let mut answer: AnswerSnapshot =
+            serde_json::from_value(unit.answer_snapshot.clone()).map_err(AppError::internal)?;
+        let Some(c) = answer.choice.as_mut().filter(|c| c.deferred) else {
+            continue;
+        };
+        let content = algorithm
+            .content(tx, &c.content.target, &settings.cefr_level)
+            .await?
+            .ok_or_else(|| super::conflict("当前词库没有足够的无释义重叠选项，请检查来源后重试"))?;
+        source::validate_question(tx, &content).await?;
+        c.options = content
+            .options
+            .iter()
+            .map(|o| LearningOption {
+                option_id: o.option_id.clone(),
+                spelling: o.candidate.spelling.clone(),
+            })
+            .collect();
+        c.correct_option_id = content.correct_option_id.clone();
+        c.content = content;
+        c.deferred = false;
+        shuffle_answer(&mut answer);
+        sqlx::query("UPDATE learning_cycle_units SET answer_snapshot=$2 WHERE id=$1")
+            .bind(unit.id)
+            .bind(serde_json::to_value(answer).map_err(AppError::internal)?)
+            .execute(&mut **tx)
+            .await
+            .map_err(AppError::internal)?;
+    }
+    Ok(())
 }
 pub fn shuffle_answer(value: &mut AnswerSnapshot) {
     if let Some(choice) = &mut value.choice {

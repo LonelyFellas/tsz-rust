@@ -280,14 +280,14 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 
 汇总覆盖整个筛选结果，缓存命中率按已知 token 加权，缺失观测和费用为 `null`。主记录位于 `tsz-agent/docs/features/admin-ai-ledger/README.md`。先显式迁移 Agent `0003` 并更新其服务，再更新 Rust，最后开放 admin `/ai-ledger`；本仓无新增数据库迁移，现有 API 响应不变。
 
-## 中文释义单选题
+## 中文释义单选题：学习任务按需算法出题
 
-主记录沿用前端 `docs/features/vocabulary-mcq/implementation.md`。后台题库 API 位于 `/admin/question-bank`，复用 `words.access`、`words.edit`/`words.edit_others` 和 `words.publish` 权限；生成、编辑、审核分别复核来源与操作者。生成只产出草稿，编辑停用题后必须重新审核。四个来源固定发布版本、词义、基础词形和英美档位；任一来源变化即暂停出题，历史快照保留。
+跨仓主记录为前端 `docs/features/algorithmic-choice/README.md`。单选工作台、全库预生成、人工审核及 Agent 生成回调已移除；`/admin/question-bank` 与 `/api/internal/agent/v1/requests/{id}` 不再挂载。词库独立发布，学习任务直接使用有效发布词义，不读写题库表。历史题库、审核及学习快照保留；退役迁移取消未完成的本地生成并停用旧题，仍在运行的远端 Agent 任务须先完成或取消。
 
-新 Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写。支持单选的客户端为学习计划和批次请求携带 `X-TSZ-Learning-Capabilities: choice-v1`，在计划创建/预览中传 `question_type: choice_zh_to_en`；省略题型仍为拼写。旧客户端列表不显示单选，直接打开单选计划或批次得到 409。拼写响应不增加字段。单选题的 `options` 仅提供固定随机 ID 和词形，提交的 `answer` 为选项 ID；答前不返回正确项、来源或解析。单选不写拼写记忆，和拼写共用同词义去重的每日奖励结算。
+Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写。客户端为学习计划和批次请求携带 `X-TSZ-Learning-Capabilities: choice-v1`，计划创建/预览传 `question_type: choice_zh_to_en`；省略题型仍为拼写。旧客户端列表不显示单选，直接打开单选计划或批次得到 409；拼写响应不增加字段。
 
-Agent 配置为 `VOCABULARY_AGENT_URL`、`VOCABULARY_AGENT_TOKEN`（后端到 Agent）和 `VOCABULARY_AGENT_CALLBACK_TOKEN`（Agent 到后端）；两个凭据须不同且至少 32 字节。三者均缺省时禁用生成，已审核题仍可学习。URL 要求 HTTPS，仅 loopback 允许 HTTP。内部 `/api/internal/agent/v1/requests/{id}` 端点按服务凭据与持久化委托的真实管理员、权限版本、有效期和取消状态共同鉴权。生成投递与审核反馈分别记录在专用表中，未知 POST 结果沿原幂等键恢复后取消，不与既有 outbox 争抢消费状态。
+计划预览按用户当前等级/档位计算可成题单元，计划保存时只冻结目标。首次打开当前批次时，在同一事务按已发布词库生成四个选项、打乱顺序、赋予不透明 ID，并保存答题快照；恢复与重试使用已保存结果，不再次抽题。算法排除重复词条、有效拼写重叠、已知释义重叠及双向已发布同义关系；候选不足计为不可出题，预览到开练间候选失效则明确拒绝，不静默降题量。字面规则和词库关系不能证明词库尚未记录的所有语义。
 
-Agent 候选接口现在先按词性和允许等级筛选有效发布，以基本词形拼写与中文释义的字面相似度排序（复用已有 `pg_trgm`），再按权威词义绑定、档位、重复词条、同词变体及已知同释义规则过滤到最多 40 项；相似度不是语义唯一性的证明。词条 ID 仅用于相似度相同时稳定排序，不再决定首批候选。补查通过既有 `exclude_candidate_refs` 排除已返回词条及其变体，协议字段与管理端候选接口不变，无新增迁移。配套 Agent `mcq_zh_en_v3` 可在模型认为首批不能成题时预算内补查一次，并改进审核经验检索；主记录见 [Agent 检索策略与验证](https://github.com/LonelyFellas/tsz-agent/blob/main/docs/integration.md#检索策略与验证)。新旧 Agent 均可读取本端相同响应结构，只有新版 Agent 启用语义不足补查；更新 Agent 前应完成旧工作流的在途任务。
+单选响应的 `options` 仅提供固定随机 ID 和词形，提交 `answer` 为选项 ID；答前不返回正确项、来源或解析。判分仅使用保存的快照，发布来源失效会阻止未作答题继续提交；历史作答与完成事实保留，内容和反馈展示仍受既有来源权限约束。旧版完整学习快照无需题库记录仍可回读。单选不写拼写记忆，和拼写共用同词义去重的每日奖励结算。
 
-先发布后端再开放前端单选入口；旧前端可继续拼写。迁移 `20261028010000` 的 down 在存在单选学习任务时拒绝执行，避免删除学习事实；无学习任务时 down 会删除题库、生成委托和审核投递记录。存在这些记录时应保留数据库迁移并使用兼容构建，不把 down 当作无损回退。`lexicon.entries.teaching_eligible=false` 排除非教学词条；创建运营或验收专用词条时应明确其资格。
+`VOCABULARY_AGENT_*` 仅继续服务模型账号连接和历史调用账本，单选出题无需 Agent 配置。发布应先更新前端移除旧入口，再更新后端；旧 Admin 对新后端的题库请求返回 404。新建按需学习轮次后，不可直接回退不支持该快照的旧后端。`lexicon.entries.teaching_eligible=false` 仍排除非教学词条。

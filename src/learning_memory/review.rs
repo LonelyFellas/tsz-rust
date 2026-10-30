@@ -85,7 +85,7 @@ async fn access(
     lists.sort();
     lists.dedup();
     let entries: Vec<_> = items.iter().map(|i| i.entry_id).collect();
-    crate::learning_tasks::repository::sources_for_units(tx, auth, &lists, &entries, false).await
+    crate::learning_tasks::repository::sources_for_entries(tx, auth, &lists, &entries).await
 }
 async fn view_in(tx: &mut Tx<'_>, auth: &AuthUser, id: Uuid) -> Result<ReviewSession, AppError> {
     let s = session(tx, auth.subject, id).await?;
@@ -244,10 +244,9 @@ pub(super) async fn start(
     }
     let lists: Vec<_> = selected.iter().map(|s| s.wordlist_id).collect();
     let entries: Vec<_> = selected.iter().map(|s| s.entry_id).collect();
-    let visible = crate::learning_tasks::repository::sources_for_units(
-        &mut tx, auth, &lists, &entries, false,
-    )
-    .await?;
+    let visible =
+        crate::learning_tasks::repository::sources_for_entries(&mut tx, auth, &lists, &entries)
+            .await?;
     let mut prepared = Vec::new();
     for mut m in selected {
         if !visible.available(&m.question()) {

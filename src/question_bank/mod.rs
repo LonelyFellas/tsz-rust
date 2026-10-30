@@ -1,10 +1,8 @@
-mod batch;
+mod algorithm;
 pub mod dto;
 pub mod handler;
 pub(crate) mod learning;
-pub(crate) mod service;
 mod source;
-mod workbench;
 pub mod worker;
 
 use crate::error::{AppError, ErrorCode};

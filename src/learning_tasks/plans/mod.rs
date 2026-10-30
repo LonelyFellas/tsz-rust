@@ -130,7 +130,7 @@ async fn preview_in(
     if count == 0 {
         reasons.push(
             if input.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE) {
-                "所选词表、级别与英美档位没有已审核可用单选题"
+                "所选词表、级别与英美档位没有足够的无释义重叠选项，暂不可出单选题"
             } else {
                 "没有可出题内容，请更换词表；自定义词暂不参与出题"
             }
@@ -195,10 +195,15 @@ async fn write_cycle(
     let choice = candidates
         .first()
         .is_some_and(|c| c.answer.choice.is_some());
-    sqlx::query("INSERT INTO learning_cycles(id,task_id,user_id,cycle_number,state,total_count,settings_snapshot,generation_version,grading_version,after_cycle_id,earliest_day) VALUES($1,$2,$3,$4,'active',$5,$6,$7,$8,$9,$10)").bind(id).bind(task_id).bind(auth.subject).bind(predecessor.map_or(1, |c| c.cycle_number+1)).bind(candidates.len() as i32).bind(serde_json::to_value(&preview.settings).map_err(AppError::internal)?).bind(if choice {"choice_bank_v1"} else {GENERATION_VERSION}).bind(if choice {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(predecessor.map(|c|c.id)).bind(earliest).execute(&mut **tx).await.map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO learning_cycles(id,task_id,user_id,cycle_number,state,total_count,settings_snapshot,generation_version,grading_version,after_cycle_id,earliest_day) VALUES($1,$2,$3,$4,'active',$5,$6,$7,$8,$9,$10)").bind(id).bind(task_id).bind(auth.subject).bind(predecessor.map_or(1, |c| c.cycle_number+1)).bind(candidates.len() as i32).bind(serde_json::to_value(&preview.settings).map_err(AppError::internal)?).bind(if choice {"choice_algorithm_v1"} else {GENERATION_VERSION}).bind(if choice {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(predecessor.map(|c|c.id)).bind(earliest).execute(&mut **tx).await.map_err(AppError::internal)?;
     for (position, c) in candidates.iter().enumerate() {
         let mut answer = c.answer.clone();
-        crate::question_bank::learning::shuffle_answer(&mut answer);
+        if let Some(choice) = answer.choice.as_mut() {
+            choice.deferred = true;
+            choice.content.options.clear();
+            choice.content.correct_option_id.clear();
+            choice.content.explanation.clear();
+        }
         sqlx::query("INSERT INTO learning_cycle_units(id,cycle_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
    .bind(Uuid::now_v7()).bind(id).bind(position as i32).bind(c.source_wordlist_id).bind(c.source_revision).bind(c.source_membership_id).bind(c.source_public_generation).bind(c.entry_id).bind(c.entry_archive_generation).bind(c.publication_id).bind(c.pos_id).bind(c.sense_id).bind(c.definition_id).bind(&c.form_ids).bind(&c.unit_key).bind(serde_json::to_value(&c.prompt).map_err(AppError::internal)?).bind(serde_json::to_value(&answer).map_err(AppError::internal)?).bind(hash(c)?).execute(&mut **tx).await.map_err(AppError::internal)?;
     }
@@ -261,16 +266,8 @@ async fn ensure_cycle_sources(
     id: Uuid,
 ) -> Result<(), AppError> {
     let rows = units(tx, id).await?;
-    let entries: Vec<_> = rows.iter().map(|u| u.question.entry_id).collect();
-    let access = super::repository::sources_for_units(
-        tx,
-        auth,
-        lists,
-        &entries,
-        rows.iter()
-            .any(|u| u.question.answer_snapshot.get("choice").is_some()),
-    )
-    .await?;
+    let refs: Vec<_> = rows.iter().map(|u| &u.question).collect();
+    let access = super::repository::sources_for_units(tx, auth, lists, &refs).await?;
     if rows.iter().any(|u| !access.available(&u.question)) {
         return Err(unavailable());
     }
@@ -324,15 +321,8 @@ async fn summarize(
     rows: &[Unit],
     current: Option<&RunRow>,
 ) -> Result<LearningCycle, AppError> {
-    let fixed: Vec<_> = rows.iter().map(|u| u.question.entry_id).collect();
-    let access = super::repository::sources_for_units(
-        tx,
-        auth,
-        &t.wordlist_ids,
-        &fixed,
-        t.question_type.is_some(),
-    )
-    .await?;
+    let refs: Vec<_> = rows.iter().map(|u| &u.question).collect();
+    let access = super::repository::sources_for_units(tx, auth, &t.wordlist_ids, &refs).await?;
     let mut available = 0;
     // Only an active, unexpired run may lend its deletion grace to its own units.
     let time = now(tx).await?;
@@ -381,8 +371,7 @@ async fn source_cards(
     auth: &AuthUser,
     t: &LearningTask,
 ) -> Result<Vec<LearningPlanSource>, AppError> {
-    let access =
-        super::repository::sources_for_units(tx, auth, &t.wordlist_ids, &[], false).await?;
+    let access = super::repository::sources_for_units(tx, auth, &t.wordlist_ids, &[]).await?;
     let mut cards = vec![];
     for id in &t.wordlist_ids {
         let visible = access.lists.contains_key(id);
@@ -693,15 +682,8 @@ pub async fn start(
             }
         }
         let rows = units(&mut tx, c.id).await?;
-        let entries: Vec<_> = rows.iter().map(|u| u.question.entry_id).collect();
-        let access = super::repository::sources_for_units(
-            &mut tx,
-            auth,
-            &lists,
-            &entries,
-            t.question_type.is_some(),
-        )
-        .await?;
+        let refs: Vec<_> = rows.iter().map(|u| &u.question).collect();
+        let access = super::repository::sources_for_units(&mut tx, auth, &lists, &refs).await?;
         let pending: Vec<_> = rows
             .iter()
             .filter(|u| u.covered_answer_id.is_none() && access.available(&u.question))
@@ -719,10 +701,21 @@ pub async fn start(
         } else {
             rows.iter().map(|u| u.question.id).collect()
         };
+        if t.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE) {
+            let selected_units: Vec<_> = rows
+                .iter()
+                .filter(|u| selected.contains(&u.question.id))
+                .map(|u| &u.question)
+                .collect();
+            let settings =
+                serde_json::from_value(c.settings_snapshot.clone()).map_err(AppError::internal)?;
+            crate::question_bank::learning::materialize(&mut tx, &selected_units, &settings)
+                .await?;
+        }
         let run_id = Uuid::now_v7();
         let expires = daily.then(|| t.ends_at.map_or(window_end, |e| e.min(window_end)));
         sqlx::query("INSERT INTO learning_runs(id,task_id,user_id,task_revision,task_type,business_day,window_start,window_end,expires_at,settings_snapshot,seed,target_count,state,generation_version,grading_version,cycle_id,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active',$13,$14,$15,$16)")
-  .bind(run_id).bind(id).bind(auth.subject).bind(t.revision).bind(t.task_type).bind(daily.then_some(day)).bind(daily.then_some(window_start)).bind(daily.then_some(window_end)).bind(expires).bind(&c.settings_snapshot).bind(Uuid::now_v7()).bind(selected.len() as i32).bind(if t.question_type.is_some() {"choice_bank_v1"} else {GENERATION_VERSION}).bind(if t.question_type.as_deref()==Some(crate::question_bank::learning::CHOICE) {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(c.id).bind(t.question_type.as_deref().unwrap_or("spelling_zh_to_en")).execute(&mut *tx).await.map_err(AppError::internal)?;
+  .bind(run_id).bind(id).bind(auth.subject).bind(t.revision).bind(t.task_type).bind(daily.then_some(day)).bind(daily.then_some(window_start)).bind(daily.then_some(window_end)).bind(expires).bind(&c.settings_snapshot).bind(Uuid::now_v7()).bind(selected.len() as i32).bind(if t.question_type.is_some() {"choice_algorithm_v1"} else {GENERATION_VERSION}).bind(if t.question_type.as_deref()==Some(crate::question_bank::learning::CHOICE) {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(c.id).bind(t.question_type.as_deref().unwrap_or("spelling_zh_to_en")).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("INSERT INTO learning_questions(id,run_id,cycle_id,cycle_unit_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint) SELECT gen_random_uuid(),$1,cycle_id,id,(row_number() OVER(ORDER BY position)-1)::integer,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint FROM learning_cycle_units WHERE id=ANY($2) ORDER BY position").bind(run_id).bind(&selected).execute(&mut *tx).await.map_err(AppError::internal)?;
         run_id
     };
