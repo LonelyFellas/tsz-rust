@@ -2981,3 +2981,219 @@ async fn sentence_permission_migration_preserves_grants_and_tags(pool: PgPool) {
             .unwrap();
     assert_eq!(tag_keys, vec!["sentences.publish"]);
 }
+
+#[sqlx::test]
+async fn trash_roundtrip_preserves_annotations_and_rejects_stale_versions(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool).await;
+    let other = admin_with_role(&pool, AdminRole::Admin).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let (status, sentence) = call(&state, actor, Method::POST, ROOT, Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content(source)}))).await;
+    assert_eq!(status, StatusCode::OK, "{sentence}");
+    let id = sentence["id"].as_str().unwrap();
+    let path = format!("{ROOT}/{id}");
+    let revision = sentence["revision"].as_i64().unwrap();
+    let input = json!({"base_revision":revision});
+    assert_eq!(
+        call(
+            &state,
+            other,
+            Method::POST,
+            &format!("{path}/trash"),
+            Some(input.clone())
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{path}/trash"),
+            Some(json!({"base_revision":revision+1}))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{path}/trash"),
+            Some(input.clone())
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(&state, actor, Method::GET, &path, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, normal) = call(&state, actor, Method::GET, ROOT, None).await;
+    assert_eq!(normal["total"], 0);
+    let (_, trash) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?trash=true"),
+        None,
+    )
+    .await;
+    assert_eq!(trash["total"], 1, "{trash}");
+    assert_eq!(trash["items"][0]["content"], sentence["content"]);
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::PUT,
+            &path,
+            Some(json!({"base_revision":revision+1,"content":sentence["content"]}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{path}/untrash"),
+            Some(input)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{path}/untrash"),
+            Some(json!({"base_revision":revision+1}))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, restored) = call(&state, actor, Method::GET, &path, None).await;
+    assert_eq!(restored["content"], sentence["content"]);
+    assert_eq!(restored["revision"], revision + 2);
+    // Published-history drafts cannot enter trash, even after withdrawal.
+    let publication = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.shared_sentence_publications(id,sentence_id,publication_number,source_revision,snapshot,published_by_admin_id) VALUES($1,$2,1,$3,$4,$5)")
+        .bind(publication).bind(Uuid::parse_str(id).unwrap()).bind(revision+2).bind(&sentence["content"]).bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE lexicon.shared_sentences SET current_publication_id=$2 WHERE id=$1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .bind(publication)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{path}/trash"),
+            Some(json!({"base_revision":revision+2}))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[sqlx::test]
+async fn trash_refuses_invalid_targets_then_allows_permanent_delete(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let (_, sentence) = call(&state, actor, Method::POST, ROOT, Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content(source)}))).await;
+    let id = sentence["id"].as_str().unwrap();
+    let path = format!("{ROOT}/{id}");
+    let revision = sentence["revision"].as_i64().unwrap();
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{path}/trash"),
+            Some(json!({"base_revision":revision}))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    sqlx::query("UPDATE lexicon.entries SET archived_at=now() WHERE id=$1")
+        .bind(source)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let input = json!({"base_revision":revision+1});
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{path}/untrash"),
+            Some(input.clone())
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, trash) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?trash=true"),
+        None,
+    )
+    .await;
+    assert_eq!(trash["total"], 1);
+    assert_eq!(
+        call(&state, actor, Method::DELETE, &path, Some(input))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, trash) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?trash=true"),
+        None,
+    )
+    .await;
+    assert_eq!(trash["total"], 0);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1",
+    )
+    .bind(Uuid::parse_str(id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn empty_sentence_trash_migration_roundtrip(pool: PgPool) {
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261030010000_sentence_trash.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261030010000_sentence_trash.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+}

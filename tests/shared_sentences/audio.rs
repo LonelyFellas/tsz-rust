@@ -447,3 +447,87 @@ async fn empty_audio_requirements_do_not_require_a_storage_space(pool: PgPool) {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{blocked}");
     assert_eq!(blocked["code"], "audio_storage_not_configured");
 }
+
+#[sqlx::test]
+async fn trash_retains_audio_reference_until_permanent_delete(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let asset = audio_asset(&pool, actor).await;
+    let (status, sentence) = create(
+        &state,
+        actor,
+        source,
+        with_audio(source, json!([asset.clone()])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sentence}");
+    let id = sentence["id"].as_str().unwrap();
+    let asset_id = asset["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{ROOT}/{id}/trash"),
+            Some(json!({"base_revision":1}))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let references: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.shared_sentence_audio_asset_references WHERE asset_id=$1",
+    )
+    .bind(asset_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(references, 1);
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{ROOT}/{id}/untrash"),
+            Some(json!({"base_revision":2}))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, restored) = call(&state, actor, Method::GET, &format!("{ROOT}/{id}"), None).await;
+    assert_eq!(restored["content"], sentence["content"]);
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{ROOT}/{id}/trash"),
+            Some(json!({"base_revision":3}))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(
+            &state,
+            actor,
+            Method::DELETE,
+            &format!("{ROOT}/{id}"),
+            Some(json!({"base_revision":4}))
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let references: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.shared_sentence_audio_asset_references WHERE asset_id=$1",
+    )
+    .bind(asset_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(references, 0);
+}
