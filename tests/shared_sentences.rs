@@ -3157,6 +3157,29 @@ async fn trash_refuses_invalid_targets_then_allows_permanent_delete(pool: PgPool
     )
     .await;
     assert_eq!(trash["total"], 1);
+    let rollback_error = sqlx::raw_sql(include_str!(
+        "../migrations/20261030010000_sentence_trash.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(
+        rollback_error
+            .to_string()
+            .contains("Restore or purge sentence trash before rollback")
+    );
+    let (_, after_rollback) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?trash=true"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        after_rollback, trash,
+        "拒绝回退后，例句及其关联必须保持完整"
+    );
     assert_eq!(
         call(&state, actor, Method::DELETE, &path, Some(input))
             .await
