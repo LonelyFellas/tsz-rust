@@ -71,44 +71,65 @@ pub async fn capability_guard(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    if capable(request.headers()) && wordlist_capable(request.headers()) {
-        return Ok(next.run(request).await);
+    let choice_capable = capable(request.headers());
+    let mastery_capable = crate::learning_tasks::mastery::capable(request.headers());
+    let spelling_capable = wordlist_capable(request.headers());
+    if choice_capable && mastery_capable && spelling_capable {
+        return Ok(run_with_vary(request, next).await);
     }
     let path = request.uri().path();
     let mut parts = path.trim_start_matches('/').split('/');
     if parts.next() != Some("api") || parts.next() != Some("v1") || parts.next() != Some("me") {
-        return Ok(next.run(request).await);
+        return Ok(run_with_vary(request, next).await);
     }
     let resource = parts.next().unwrap_or("");
     let id = parts.next().and_then(|s| s.parse::<Uuid>().ok());
     if !["learning-plans", "learning-tasks", "learning-runs"].contains(&resource) || id.is_none() {
-        return Ok(next.run(request).await);
+        return Ok(run_with_vary(request, next).await);
     }
     let is_run = resource == "learning-runs";
     let creates_cycle = path.contains("/cycles");
     let (mut request_parts, body) = request.into_parts();
     let auth = AuthUser::from_request_parts(&mut request_parts, &state).await?;
     let sql = if is_run {
-        "SELECT question_type,generation_version='wordlist_all_v1' FROM learning_runs WHERE id=$1 AND user_id=$2"
+        "SELECT r.question_type,t.generation_policy,r.generation_version='wordlist_all_v1' FROM learning_runs r JOIN learning_tasks t ON t.id=r.task_id WHERE r.id=$1 AND r.user_id=$2"
     } else {
-        "SELECT t.question_type,EXISTS(SELECT 1 FROM learning_cycles c WHERE c.task_id=t.id AND c.generation_version='wordlist_all_v1') FROM learning_tasks t WHERE t.id=$1 AND t.user_id=$2"
+        "SELECT t.question_type,t.generation_policy,EXISTS(SELECT 1 FROM learning_cycles c WHERE c.task_id=t.id AND c.generation_version='wordlist_all_v1') FROM learning_tasks t WHERE t.id=$1 AND t.user_id=$2"
     };
-    let kind: Option<(String, bool)> = sqlx::query_as(sql)
+    let kind: Option<(String, String, bool)> = sqlx::query_as(sql)
         .bind(id)
         .bind(auth.subject)
         .fetch_optional(&state.pool)
         .await
         .map_err(AppError::internal)?;
-    if kind.as_ref().is_some_and(|(kind, mixed)| {
+    if kind.as_ref().is_some_and(|(kind, _, mixed)| {
         kind == CHOICE
-            && (!capable(&request_parts.headers)
+            && (!choice_capable
                 || ((*mixed
                     || (request_parts.method == axum::http::Method::POST && creates_cycle))
-                    && !wordlist_capable(&request_parts.headers)))
+                    && !spelling_capable))
     }) {
         return Err(super::conflict("此客户端不支持当前练习题型，请更新后继续"));
     }
-    Ok(next.run(Request::from_parts(request_parts, body)).await)
+    if kind
+        .as_ref()
+        .is_some_and(|(_, mode, _)| mode == crate::learning_tasks::mastery::MODE)
+        && !mastery_capable
+    {
+        return Err(super::conflict("请更新客户端后使用按掌握情况练习"));
+    }
+    Ok(run_with_vary(Request::from_parts(request_parts, body), next).await)
+}
+async fn run_with_vary(request: Request, next: Next) -> Response {
+    let learning = request.uri().path().starts_with("/api/v1/me/learning-");
+    let mut response = next.run(request).await;
+    if learning {
+        response.headers_mut().append(
+            axum::http::header::VARY,
+            axum::http::HeaderValue::from_static("X-TSZ-Learning-Capabilities"),
+        );
+    }
+    response
 }
 pub async fn fingerprints(tx: &mut Tx<'_>, entries: &[Uuid]) -> Result<HashSet<String>, AppError> {
     let mut result = HashSet::new();
@@ -223,7 +244,7 @@ pub async fn materialize(
         let Some(content) = content else {
             if !spelling_fallback {
                 return Err(super::conflict(
-                    "当前词库没有足够的无释义重叠选项，请检查来源后重试",
+                    "当前词库没有足够可靠且不含已知歧义的干扰项，请检查来源后重试",
                 ));
             }
             answer.choice = None;

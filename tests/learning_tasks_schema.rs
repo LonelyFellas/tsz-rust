@@ -1,8 +1,8 @@
 use sqlx::PgPool;
 #[sqlx::test]
 async fn wordlist_practice_migration_roundtrip_refuses_custom_fact_loss(pool: PgPool) {
-    let down = include_str!("../migrations/20261030040000_wordlist_practice.down.sql");
-    let up = include_str!("../migrations/20261030040000_wordlist_practice.up.sql");
+    let down = include_str!("../migrations/20261030070000_wordlist_practice.down.sql");
+    let up = include_str!("../migrations/20261030070000_wordlist_practice.up.sql");
     sqlx::raw_sql(down).execute(&pool).await.unwrap();
     sqlx::raw_sql(up).execute(&pool).await.unwrap();
     let nullable: i64=sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_name IN ('learning_questions','learning_cycle_units') AND column_name='entry_id' AND is_nullable='YES'").fetch_one(&pool).await.unwrap();

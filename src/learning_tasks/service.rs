@@ -99,20 +99,33 @@ async fn pool_for_policy(
     if entries.len() > 1000 {
         return Err(invalid("来源超过 1000 个词条，请拆分任务"));
     }
+    let candidates = candidates_for_sources(tx, &access, &context, choice, wordlist).await?;
+    if candidates.candidates.len() > 2000 {
+        return Err(invalid("候选超过 2000 题，请拆分任务"));
+    }
+    Ok((candidates, entries.len() as i64, context))
+}
+pub(super) async fn candidates_for_sources(
+    tx: &mut Tx<'_>,
+    access: &SourceAccess,
+    context: &LearningContext,
+    choice: bool,
+    wordlist: bool,
+) -> Result<CandidatePool, AppError> {
+    let entries: HashSet<_> = access.ordered.iter().map(|(_, e)| e).collect();
     let mut candidates = if choice {
-        crate::question_bank::learning::build_pool(tx, &access.learning_sources()?, &context)
-            .await?
+        crate::question_bank::learning::build_pool(tx, &access.learning_sources()?, context).await?
     } else if wordlist {
-        build_wordlist_candidates(&access.learning_sources()?, &context)?
+        build_wordlist_candidates(&access.learning_sources()?, context)?
     } else {
-        build_candidates(&access.learning_sources()?, &context)?
+        build_candidates(&access.learning_sources()?, context)?
     };
     candidates.exclusions.unavailable_entries = entries
         .iter()
         .filter(|e| !access.entries.contains_key(e))
         .count() as i64;
     if wordlist && choice {
-        let mut spelling = build_wordlist_candidates(&access.learning_sources()?, &context)?;
+        let mut spelling = build_wordlist_candidates(&access.learning_sources()?, context)?;
         spelling.candidates.retain(|candidate| {
             !candidates
                 .candidates
@@ -137,11 +150,9 @@ async fn pool_for_policy(
             }
         }
     }
-    if candidates.candidates.len() > 2000 {
-        return Err(invalid("候选超过 2000 题，请拆分任务"));
-    }
-    Ok((candidates, entries.len() as i64, context))
+    Ok(candidates)
 }
+
 pub async fn preview(
     pool: &PgPool,
     auth: &AuthUser,
@@ -570,11 +581,22 @@ pub async fn answer(
     }
     let snapshot: AnswerSnapshot =
         serde_json::from_value(q.answer_snapshot.clone()).map_err(AppError::internal)?;
-    let (normalized, correct) = if snapshot.choice.is_some() {
-        crate::question_bank::learning::grade(&snapshot, &input.answer)?
-    } else {
-        grade_spelling(&snapshot, &input.answer)?
-    };
+    if row.practice_mode.is_some()
+        && qs
+            .iter()
+            .find(|q| !ans.contains_key(&q.id))
+            .is_none_or(|next| next.id != q.id)
+    {
+        return Err(conflict("请按顺序完成当前题目后继续重练"));
+    }
+    let (normalized, correct) =
+        if row.practice_mode.is_some() && input.answer == super::mastery::UNKNOWN {
+            (input.answer.clone(), false)
+        } else if snapshot.choice.is_some() {
+            crate::question_bank::learning::grade(&snapshot, &input.answer)?
+        } else {
+            grade_spelling(&snapshot, &input.answer)?
+        };
     let access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
     let view = run_view(&mut tx, &row, &qs, &access).await?;
     if view.state != LearningRunState::Active
@@ -604,8 +626,21 @@ pub async fn answer(
     }
     let at = now(&mut tx).await?;
     let answer_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO learning_answers(id,run_id,question_id,request_key,request_hash,submitted_answer,normalized_answer,is_correct,accepted_at,grading_version,cycle_unit_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)").bind(answer_id).bind(id).bind(q.id).bind(input.idempotency_key).bind(h).bind(&input.answer).bind(normalized).bind(correct).bind(at).bind(if snapshot.choice.is_some() {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(q.cycle_unit_id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO learning_answers(id,run_id,question_id,request_key,request_hash,submitted_answer,normalized_answer,is_correct,accepted_at,grading_version,cycle_unit_id,is_repeat) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)").bind(answer_id).bind(id).bind(q.id).bind(input.idempotency_key).bind(h).bind(&input.answer).bind(normalized).bind(correct).bind(at).bind(if snapshot.choice.is_some() {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(q.cycle_unit_id).bind(q.practice_kind!="new").execute(&mut *tx).await.map_err(AppError::internal)?;
     super::plans::cover(&mut tx, q.cycle_unit_id, answer_id).await?;
+    let mut target_count = row.target_count;
+    if row.practice_mode.is_some() {
+        super::mastery::record(&mut tx, q, correct).await?;
+        let remaining = qs
+            .iter()
+            .filter(|other| {
+                other.id != q.id && !ans.contains_key(&other.id) && access.available(other)
+            })
+            .count();
+        if !correct && super::mastery::retry(&mut tx, &row, q, remaining).await? {
+            target_count += 1;
+        }
+    }
     let (answered, correct_count): (i64, i64) = sqlx::query_as(
         "SELECT count(*),count(*) FILTER(WHERE is_correct) FROM learning_answers WHERE run_id=$1",
     )
@@ -614,10 +649,10 @@ pub async fn answer(
     .await
     .map_err(AppError::internal)?;
     let mut completed = false;
-    if answered == i64::from(row.target_count) {
+    if answered == i64::from(target_count) {
         completed = true;
         let completion_id = Uuid::now_v7();
-        sqlx::query("INSERT INTO learning_completions(id,run_id,task_id,user_id,task_type,business_day,task_revision,target_count,answered_count,correct_count,completed_at,generation_version,grading_version,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)").bind(completion_id).bind(id).bind(task_id).bind(auth.subject).bind(row.task_type).bind(row.business_day).bind(row.task_revision).bind(row.target_count).bind(answered as i32).bind(correct_count as i32).bind(at).bind(&row.generation_version).bind(&row.grading_version).bind(&row.question_type).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO learning_completions(id,run_id,task_id,user_id,task_type,business_day,task_revision,target_count,answered_count,correct_count,completed_at,generation_version,grading_version,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)").bind(completion_id).bind(id).bind(task_id).bind(auth.subject).bind(row.task_type).bind(row.business_day).bind(row.task_revision).bind(target_count).bind(answered as i32).bind(correct_count as i32).bind(at).bind(&row.generation_version).bind(&row.grading_version).bind(&row.question_type).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("UPDATE learning_runs SET state='completed' WHERE id=$1")
             .bind(id)
             .execute(&mut *tx)
@@ -661,7 +696,7 @@ pub async fn answer(
     if completed && !access.grace.is_empty() {
         super::plans::cancel_cycles(&mut tx, task_id).await?;
     }
-    if memory_enabled && row.question_type == "spelling_zh_to_en" {
+    if memory_enabled && row.question_type == "spelling_zh_to_en" && q.practice_kind != "retry" {
         crate::learning_memory::record_answer(
             &mut tx,
             auth.subject,

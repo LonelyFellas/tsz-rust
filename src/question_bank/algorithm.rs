@@ -1,15 +1,20 @@
 //! Pure selection rules over the published candidate index; never writes a question bank.
-use super::{dto::*, source};
+use super::{
+    dto::*,
+    semantics::{self, Evidence},
+    source,
+};
 use crate::{error::AppError, learning_tasks::repository::Tx, platform::text::key_v1};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+type Quality = (u16, Reverse<usize>, Reverse<usize>);
 use uuid::Uuid;
 
 const PAGE_SIZE: usize = 64;
 #[derive(Default)]
 struct Features {
     spelling_key: String,
-    spelling: Vec<char>,
-    definition_chars: HashSet<char>,
 }
 #[derive(sqlx::FromRow)]
 struct IndexedCandidate {
@@ -22,6 +27,7 @@ struct IndexedCandidate {
     spelling: String,
     accepted_keys: Vec<String>,
     definition_keys: Vec<String>,
+    level: String,
     #[sqlx(skip)]
     features: Features,
 }
@@ -31,8 +37,16 @@ struct PageCache {
     after: Option<[Uuid; 5]>,
     exhausted: bool,
 }
+#[derive(Clone, Hash, Eq, PartialEq)]
+struct Recall {
+    pos: String,
+    domains: Vec<String>,
+    related: Vec<String>,
+    definition: String,
+}
 pub struct Pool {
-    pages: HashMap<(String, Option<String>), PageCache>,
+    pages: HashMap<Recall, PageCache>,
+    evidence: HashMap<String, Arc<Evidence>>,
     current: HashMap<Uuid, Vec<QuestionCandidate>>,
     synonyms: HashMap<Uuid, (HashSet<Uuid>, HashSet<String>)>,
     level: String,
@@ -43,36 +57,39 @@ impl Pool {
         tx: &mut Tx<'_>,
         level: &str,
         profile: &str,
-        parts: &[String],
+        _parts: &[String],
     ) -> Result<Self, AppError> {
         source::validate_context(level, profile)?;
-        let mut pool = Self {
+        let _: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM dictionary.datasets WHERE status='active' ORDER BY id FOR SHARE",
+        )
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(AppError::internal)?;
+        Ok(Self {
             pages: HashMap::new(),
+            evidence: HashMap::new(),
             current: HashMap::new(),
             synonyms: HashMap::new(),
             level: level.into(),
             profile: profile.into(),
-        };
-        for part in parts.iter().collect::<HashSet<_>>() {
-            pool.load_next(tx, &(part.clone(), None)).await?;
-        }
-        Ok(pool)
+        })
     }
-    async fn load_next(
-        &mut self,
-        tx: &mut Tx<'_>,
-        key: &(String, Option<String>),
-    ) -> Result<(), AppError> {
+    async fn load_next(&mut self, tx: &mut Tx<'_>, key: &Recall) -> Result<(), AppError> {
         let after = self.pages.get(key).and_then(|p| p.after);
         let mut query = sqlx::QueryBuilder::new(
-            "SELECT c.entry_id,c.publication_id,c.pos_id,c.sense_id,c.definition_id,c.form_id,c.spelling,c.accepted_keys,c.definition_keys FROM lexicon.question_candidate_index c JOIN lexicon.entries e ON e.id=c.entry_id AND e.current_publication_id=c.publication_id WHERE e.archived_at IS NULL AND e.teaching_eligible AND c.answer_profile=",
+            "SELECT c.entry_id,c.publication_id,c.pos_id,c.sense_id,c.definition_id,c.form_id,c.spelling,c.accepted_keys,c.definition_keys,c.level FROM lexicon.question_candidate_index c JOIN lexicon.entries e ON e.id=c.entry_id AND e.current_publication_id=c.publication_id WHERE e.archived_at IS NULL AND e.teaching_eligible AND c.answer_profile=",
         );
         query
             .push_bind(&self.profile)
             .push(" AND c.level<=")
             .push_bind(&self.level)
             .push(" AND c.part_of_speech=")
-            .push_bind(&key.0);
+            .push_bind(&key.pos);
+        query
+            .push(" AND NOT (")
+            .push_bind(&key.definition)
+            .push("=ANY(c.definition_keys))");
         if let Some(cursor) = after {
             query.push(" AND (c.entry_id,c.pos_id,c.sense_id,c.definition_id,c.form_id)>(");
             let mut values = query.separated(",");
@@ -81,8 +98,13 @@ impl Pool {
             }
             query.push(")");
         }
-        if let Some(pattern) = &key.1 {
-            query.push(" AND c.spelling ILIKE ").push_bind(pattern);
+        if key.domains.is_empty() {
+            query
+                .push(" AND lexicon.question_candidate_key_v1(c.spelling)=ANY(")
+                .push_bind(&key.related)
+                .push("::text[])");
+        } else {
+            query.push(" AND EXISTS(SELECT 1 FROM dictionary.choice_semantics sem JOIN dictionary.datasets d ON d.id=sem.dataset_id WHERE d.status='active' AND sem.normalized_term=lexicon.question_candidate_key_v1(c.spelling) AND sem.pos=c.part_of_speech AND sem.domains && ").push_bind(&key.domains).push("::text[])");
         }
         query
             .push(" ORDER BY c.entry_id,c.pos_id,c.sense_id,c.definition_id,c.form_id LIMIT ")
@@ -96,12 +118,6 @@ impl Pool {
         for row in &mut rows {
             row.features = Features {
                 spelling_key: key_v1(&row.spelling),
-                spelling: row.spelling.chars().collect(),
-                definition_chars: row
-                    .definition_keys
-                    .iter()
-                    .flat_map(|d| definition_chars(d))
-                    .collect(),
             };
         }
         let page = self.pages.entry(key.clone()).or_default();
@@ -131,30 +147,62 @@ impl Pool {
         }
         let target_key = key_v1(&target.spelling);
         let spelling: Vec<_> = target.spelling.chars().collect();
-        let target_definition = key_v1(&target.definition);
-        let target_chars = definition_chars(&target_definition);
-        let prefix: String = target_key
-            .chars()
-            .take(2)
-            .flat_map(|c| {
-                if matches!(c, '%' | '_' | '\\') {
-                    vec!['\\', c]
-                } else {
-                    vec![c]
-                }
-            })
-            .collect();
-        let mut spelling_keys: HashSet<_> = target
+        let evidence_key = target
+            .accepted_spellings
+            .iter()
+            .map(|s| key_v1(s))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !self.evidence.contains_key(&evidence_key) {
+            self.evidence.insert(
+                evidence_key.clone(),
+                Arc::new(Evidence::load(tx, &target.accepted_spellings).await?),
+            );
+        }
+        let target_evidence = self.evidence[&evidence_key].clone();
+        let Some(context) = target_evidence.context(target) else {
+            return Ok(None);
+        };
+        let mut domains: Vec<_> = context.domains.iter().cloned().collect();
+        domains.sort();
+        let keys: Vec<_> = target
             .accepted_spellings
             .iter()
             .chain(std::iter::once(&target.spelling))
             .map(|s| key_v1(s))
             .collect();
-        let mut entries = HashSet::from([target.source.entry_id]);
-        let mut choices = Vec::new();
-        // Bounded spelling-prefix recall first, then the shared POS pool. Both paginate to exhaustion.
-        for pattern in [Some(format!("{prefix}%")), None] {
-            let key = (target.part_of_speech.clone(), pattern);
+        let incoming:Vec<String>=sqlx::query_scalar("SELECT DISTINCT sem.normalized_term FROM dictionary.choice_semantics sem JOIN dictionary.datasets d ON d.id=sem.dataset_id WHERE d.status='active' AND sem.pos=$1 AND sem.antonyms && $2::text[] ORDER BY sem.normalized_term")
+            .bind(&target.part_of_speech).bind(&keys).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+        let mut related: Vec<_> = context.related.iter().cloned().chain(incoming).collect();
+        related.sort();
+        related.dedup();
+        let mut recalls = Vec::new();
+        if !related.is_empty() {
+            recalls.push(Recall {
+                pos: target.part_of_speech.clone(),
+                domains: vec![],
+                related,
+                definition: key_v1(&target.definition),
+            });
+        }
+        if !domains.is_empty() {
+            recalls.push(Recall {
+                pos: target.part_of_speech.clone(),
+                domains,
+                related: vec![],
+                definition: key_v1(&target.definition),
+            });
+        }
+        let spelling_keys: HashSet<_> = target
+            .accepted_spellings
+            .iter()
+            .chain(std::iter::once(&target.spelling))
+            .map(|s| key_v1(s))
+            .collect();
+        let entries = HashSet::from([target.source.entry_id]);
+        let mut choices: HashMap<Uuid, (Quality, QuestionCandidate)> = HashMap::new();
+        // Explicit relations use indexed word lookup; domain pages are shared across targets.
+        for key in recalls {
             let mut start = 0;
             loop {
                 if !self.pages.contains_key(&key)
@@ -167,35 +215,17 @@ impl Pool {
                 if start == end {
                     break;
                 }
-                let mut ranked: Vec<_> = page.rows[start..end]
+                let ranked: Vec<_> = page.rows[start..end]
                     .iter()
                     .filter(|r| {
                         !r.spelling.trim().is_empty()
                             && !entries.contains(&r.entry_id)
-                            && r.features.definition_chars.is_disjoint(&target_chars)
-                            && !r.definition_keys.iter().any(|d| {
-                                d == &target_definition
-                                    || d.contains(&target_definition)
-                                    || target_definition.contains(d)
-                            })
+                            && !r
+                                .definition_keys
+                                .iter()
+                                .any(|d| semantics::meanings_overlap(&target.definition, d))
                     })
                     .collect();
-                ranked.sort_by_cached_key(|r| {
-                    (
-                        std::cmp::Reverse(
-                            spelling
-                                .iter()
-                                .zip(&r.features.spelling)
-                                .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
-                                .count(),
-                        ),
-                        spelling.len().abs_diff(r.features.spelling.len()),
-                        r.entry_id,
-                        r.sense_id,
-                        r.definition_id,
-                        r.form_id,
-                    )
-                });
                 for r in ranked {
                     if entries.contains(&r.entry_id)
                         || self.synonyms[&target.source.entry_id]
@@ -242,14 +272,47 @@ impl Pool {
                     {
                         continue;
                     }
-                    entries.insert(r.entry_id);
-                    spelling_keys.extend(c.accepted_spellings.iter().map(|s| key_v1(s)));
-                    choices.push(c.clone());
-                    if choices.len() == 3 {
-                        break;
+                    let candidate_key = c
+                        .accepted_spellings
+                        .iter()
+                        .map(|s| key_v1(s))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !self.evidence.contains_key(&candidate_key) {
+                        self.evidence.insert(
+                            candidate_key.clone(),
+                            Arc::new(Evidence::load(tx, &c.accepted_spellings).await?),
+                        );
+                    }
+                    let evidence = &self.evidence[&candidate_key];
+                    if target_evidence.conflicts(evidence, target, c) {
+                        continue;
+                    }
+                    let Some(quality) = evidence.quality(&context, target, c) else {
+                        continue;
+                    };
+                    let score = (
+                        quality,
+                        Reverse(level_distance(&target.level, &r.level)),
+                        Reverse(
+                            spelling
+                                .len()
+                                .abs_diff(r.features.spelling_key.chars().count()),
+                        ),
+                    );
+                    match choices.entry(r.entry_id) {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert((score, c.clone()));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            if score > e.get().0 {
+                                e.insert((score, c.clone()));
+                            }
+                        }
                     }
                 }
-                if choices.len() == 3 {
+                // A bounded window of distinct entries; continue if spelling aliases still prevent a triple.
+                if choices.len() >= 24 && best_choices(&choices, target).len() == 3 {
                     break;
                 }
                 start = end;
@@ -257,10 +320,8 @@ impl Pool {
                     break;
                 }
             }
-            if choices.len() == 3 {
-                break;
-            }
         }
+        let mut choices = best_choices(&choices, target);
         if choices.len() != 3 {
             return Ok(None);
         }
@@ -290,32 +351,48 @@ impl Pool {
         }))
     }
 }
-fn definition_chars(value: &str) -> HashSet<char> {
-    value
-        .chars()
-        .filter(|c| {
-            ('\u{3400}'..='\u{9fff}').contains(c) && !"的地得一某种个人和与或及等".contains(*c)
-        })
-        .collect()
+fn best_choices(
+    choices: &HashMap<Uuid, (Quality, QuestionCandidate)>,
+    target: &QuestionCandidate,
+) -> Vec<QuestionCandidate> {
+    let mut ranked: Vec<_> = choices.values().collect();
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.source.entry_id.cmp(&b.1.source.entry_id))
+    });
+    let mut used: HashSet<_> = target
+        .accepted_spellings
+        .iter()
+        .chain(std::iter::once(&target.spelling))
+        .map(|s| key_v1(s))
+        .collect();
+    let mut selected = Vec::new();
+    for (_, c) in ranked {
+        let keys: HashSet<_> = c
+            .accepted_spellings
+            .iter()
+            .chain(std::iter::once(&c.spelling))
+            .map(|s| key_v1(s))
+            .collect();
+        if !keys.is_disjoint(&used) {
+            continue;
+        }
+        used.extend(keys);
+        selected.push(c.clone());
+        if selected.len() == 3 {
+            break;
+        }
+    }
+    selected
+}
+fn level_distance(a: &str, b: &str) -> usize {
+    let levels = ["A1", "A2", "B1", "B2", "C1", "C2"];
+    levels
+        .iter()
+        .position(|s| *s == a)
+        .unwrap_or(0)
+        .abs_diff(levels.iter().position(|s| *s == b).unwrap_or(0))
 }
 pub fn definitions_overlap(a: &str, b: &str) -> bool {
-    let a_key = key_v1(a);
-    let b_key = key_v1(b);
-    if a_key == b_key || a_key.contains(&b_key) || b_key.contains(&a_key) {
-        return true;
-    }
-    // Reject even partial known meaning overlap (e.g. 拿/带 in take and bring).
-    !definition_chars(a).is_disjoint(&definition_chars(b))
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn excludes_partial_answers_without_rejecting_every_adjective() {
-        assert!(definitions_overlap("拿；取；带走", "带来；拿来"));
-        assert!(definitions_overlap("结束；完成", "完成"));
-        assert!(definitions_overlap("苦的,苦涩的", "苦涩的"));
-        assert!(!definitions_overlap("苦的,苦涩的", "忙碌的"));
-        assert!(!definitions_overlap("苹果", "香蕉"));
-    }
+    semantics::meanings_overlap(a, b)
 }

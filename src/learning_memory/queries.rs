@@ -205,6 +205,7 @@ impl Selected {
     pub fn question(&self) -> QuestionRow {
         QuestionRow {
             custom_item_id: None,
+            practice_kind: "new".into(),
             cycle_unit_id: None,
             id: self.id,
             position: 0,

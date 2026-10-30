@@ -1,6 +1,7 @@
 //! Coverage plans reuse task/run/answer facts. Main record: tsz/docs/features/task-spelling-creation/.
 pub mod dto;
 pub mod handler;
+mod source_refresh;
 use super::{dto::*, question::*, repository::*, service};
 use crate::{
     auth::extract::AuthUser,
@@ -36,6 +37,7 @@ struct Unit {
     #[sqlx(flatten)]
     question: QuestionRow,
     covered_answer_id: Option<Uuid>,
+    practice_success_days: i16,
 }
 async fn meta(tx: &mut Tx<'_>, id: Uuid) -> Result<PlanMeta, AppError> {
     sqlx::query_as("SELECT generation_policy,start_date,end_date FROM learning_tasks WHERE id=$1")
@@ -48,7 +50,7 @@ async fn latest(tx: &mut Tx<'_>, id: Uuid) -> Result<CycleRow, AppError> {
     sqlx::query_as("SELECT * FROM learning_cycles WHERE task_id=$1 ORDER BY cycle_number DESC LIMIT 1 FOR UPDATE").bind(id).fetch_one(&mut **tx).await.map_err(AppError::internal)
 }
 async fn units(tx: &mut Tx<'_>, id: Uuid) -> Result<Vec<Unit>, AppError> {
-    sqlx::query_as("SELECT *,id AS cycle_unit_id FROM learning_cycle_units WHERE cycle_id=$1 ORDER BY position").bind(id).fetch_all(&mut **tx).await.map_err(AppError::internal)
+    sqlx::query_as("SELECT *,id AS cycle_unit_id,'new' AS practice_kind FROM learning_cycle_units WHERE cycle_id=$1 ORDER BY position").bind(id).fetch_all(&mut **tx).await.map_err(AppError::internal)
 }
 fn schedule(m: &PlanMeta) -> Option<LearningSchedule> {
     m.start_date
@@ -65,6 +67,18 @@ fn digest(value: &impl serde::Serialize) -> Result<String, AppError> {
     Ok(hash(value)?.iter().map(|b| format!("{b:02x}")).collect())
 }
 fn validate(input: &PreviewLearningPlan) -> Result<(), AppError> {
+    if input
+        .practice_mode
+        .as_deref()
+        .is_some_and(|m| m != super::mastery::MODE)
+    {
+        return Err(invalid("练习模式无效"));
+    }
+    if input.practice_mode.is_some() && input.daily_question_count.is_some_and(|n| n > 20) {
+        return Err(invalid(
+            "每次新学和到期复习最多 20 题，含重练总计最多 30 题",
+        ));
+    }
     if input
         .question_type
         .as_deref()
@@ -125,14 +139,18 @@ async fn preview_in(
     let at = now(tx).await?;
     let day = business_window(at).0;
     let count = pool.candidates.len() as i64;
-    let estimated = input
-        .daily_question_count
-        .map(|n| ceil(count, i64::from(n)));
+    let estimated = if input.practice_mode.is_some() {
+        None
+    } else {
+        input
+            .daily_question_count
+            .map(|n| ceil(count, i64::from(n)))
+    };
     let mut reasons = vec![];
     if count == 0 {
         reasons.push(
             if input.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE) {
-                "所选词表、级别与英美档位没有足够的无释义重叠选项，暂不可出单选题"
+                "所选词表、级别与英美档位没有足够可靠且不含已知歧义的干扰项，暂不可出单选题"
             } else {
                 "词表中没有可出题内容，请先添加词条和释义"
             }
@@ -237,8 +255,8 @@ pub async fn create(
     }
     let id = Uuid::now_v7();
     let s = input.schedule.as_ref();
-    sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,daily_question_count,ends_at,create_key,create_hash,generation_policy,start_date,end_date,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'coverage_v1',$10,$11,$12)")
- .bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.task_type).bind(&input.wordlist_ids).bind(input.daily_question_count).bind(s.map(|s|boundary(s.end_date+Duration::days(1)))).bind(input.idempotency_key).bind(h).bind(s.map(|s|s.start_date)).bind(s.map(|s|s.end_date)).bind(input.question_type.as_deref().unwrap_or("spelling_zh_to_en")).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,daily_question_count,ends_at,create_key,create_hash,generation_policy,start_date,end_date,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$13,$10,$11,$12)")
+ .bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.task_type).bind(&input.wordlist_ids).bind(input.daily_question_count).bind(s.map(|s|boundary(s.end_date+Duration::days(1)))).bind(input.idempotency_key).bind(h).bind(s.map(|s|s.start_date)).bind(s.map(|s|s.end_date)).bind(input.question_type.as_deref().unwrap_or("spelling_zh_to_en")).bind(input.practice_mode.as_deref().unwrap_or("coverage_v1")).execute(&mut *tx).await.map_err(AppError::internal)?;
     let cycle_id = write_cycle(
         &mut tx,
         auth,
@@ -288,7 +306,7 @@ pub(super) async fn require_legacy_in(
     auth: &AuthUser,
     id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let has:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM learning_tasks WHERE user_id=$1 AND ($2::uuid IS NULL OR id=$2) AND generation_policy='coverage_v1' AND ($2::uuid IS NOT NULL OR question_type='spelling_zh_to_en'))").bind(auth.subject).bind(id).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
+    let has:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM learning_tasks WHERE user_id=$1 AND ($2::uuid IS NULL OR id=$2) AND generation_policy<>'legacy_v1' AND ($2::uuid IS NOT NULL OR question_type='spelling_zh_to_en'))").bind(auth.subject).bind(id).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
     if has {
         return Err(conflict("任务功能已更新，请刷新页面后继续"));
     }
@@ -308,8 +326,11 @@ pub(super) async fn cover(
     answer: Uuid,
 ) -> Result<(), AppError> {
     if let Some(unit) = unit {
-        let cycle:Uuid=sqlx::query_scalar("UPDATE learning_cycle_units SET covered_answer_id=$2 WHERE id=$1 AND covered_answer_id IS NULL RETURNING cycle_id").bind(unit).bind(answer).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
-        sqlx::query("UPDATE learning_cycles SET state='completed',completed_at=clock_timestamp() WHERE id=$1 AND state='active' AND NOT EXISTS(SELECT 1 FROM learning_cycle_units WHERE cycle_id=$1 AND covered_answer_id IS NULL)").bind(cycle).execute(&mut **tx).await.map_err(AppError::internal)?;
+        let cycle:Option<Uuid>=sqlx::query_scalar("UPDATE learning_cycle_units SET covered_answer_id=$2 WHERE id=$1 AND covered_answer_id IS NULL RETURNING cycle_id").bind(unit).bind(answer).fetch_optional(&mut **tx).await.map_err(AppError::internal)?;
+        let Some(cycle) = cycle else {
+            return Ok(());
+        };
+        sqlx::query("UPDATE learning_cycles SET state='completed',completed_at=clock_timestamp() WHERE id=$1 AND state='active' AND NOT EXISTS(SELECT 1 FROM learning_tasks t WHERE t.id=learning_cycles.task_id AND t.generation_policy='mastery_v1') AND NOT EXISTS(SELECT 1 FROM learning_cycle_units WHERE cycle_id=$1 AND covered_answer_id IS NULL)").bind(cycle).execute(&mut **tx).await.map_err(AppError::internal)?;
     }
     Ok(())
 }
@@ -323,6 +344,7 @@ async fn summarize(
 ) -> Result<LearningCycle, AppError> {
     let refs: Vec<_> = rows.iter().map(|u| &u.question).collect();
     let access = super::repository::sources_for_units(tx, auth, &t.wordlist_ids, &refs).await?;
+    let mastery = meta(tx, t.id).await?.generation_policy == super::mastery::MODE;
     let mut available = 0;
     // Only an active, unexpired run may lend its deletion grace to its own units.
     let time = now(tx).await?;
@@ -337,7 +359,13 @@ async fn summarize(
     } else {
         None
     };
-    for u in rows.iter().filter(|u| u.covered_answer_id.is_none()) {
+    for u in rows.iter().filter(|u| {
+        if mastery {
+            u.practice_success_days < 2
+        } else {
+            u.covered_answer_id.is_none()
+        }
+    }) {
         if access.available(&u.question)
             || grace.as_ref().is_some_and(|(qs, a)| {
                 qs.iter()
@@ -349,7 +377,13 @@ async fn summarize(
     }
     let covered = rows
         .iter()
-        .filter(|u| u.covered_answer_id.is_some())
+        .filter(|u| {
+            if mastery {
+                u.practice_success_days == 2
+            } else {
+                u.covered_answer_id.is_some()
+            }
+        })
         .count() as i64;
     let remaining = i64::from(c.total_count) - covered;
     Ok(LearningCycle {
@@ -407,7 +441,7 @@ pub async fn detail(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Learning
     let m = meta(&mut tx, id).await?;
     let at = now(&mut tx).await?;
     let (day, _, next_day_at) = business_window(at);
-    let c = if m.generation_policy == "coverage_v1" {
+    let c = if m.generation_policy != "legacy_v1" {
         Some(latest(&mut tx, id).await?)
     } else {
         None
@@ -437,7 +471,65 @@ pub async fn detail(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Learning
     let mut from = None;
     let mut risk = false;
     let mut reasons = vec![];
-    let (can_start, status) = if let Some(c) = cycle.as_ref() {
+    let mastery = if m.generation_policy == super::mastery::MODE {
+        Some(super::mastery::summary(&mut tx, c.as_ref().expect("mastery cycle").id, day).await?)
+    } else {
+        None
+    };
+    let (can_start, status) = if mastery.is_some() {
+        let c = c.as_ref().expect("mastery cycle");
+        let rows = units(&mut tx, c.id).await?;
+        let refs: Vec<_> = rows.iter().map(|u| &u.question).collect();
+        let access = sources_for_units(&mut tx, auth, &lists, &refs).await?;
+        let ids = super::mastery::eligible(&mut tx, c.id, day).await?;
+        let available = ids
+            .iter()
+            .filter(|id| {
+                rows.iter()
+                    .any(|u| u.question.id == **id && access.available(&u.question))
+            })
+            .count() as i64;
+        let active = current_run
+            .as_ref()
+            .is_some_and(|r| r.state == LearningRunState::Active);
+        let done = t.task_type == LearningTaskType::Daily
+            && current_run
+                .as_ref()
+                .is_some_and(|r| r.state == LearningRunState::Completed);
+        let started = c.earliest_day <= day;
+        a = if active {
+            current_run
+                .as_ref()
+                .map_or(0, |r| i64::from(r.target_count) - r.answered_count)
+        } else if open && started && !done {
+            available
+                .min(i64::from(t.daily_question_count.unwrap_or(20)))
+                .min(20)
+        } else {
+            0
+        };
+
+        (
+            open && started && !done && a > 0,
+            if !open {
+                if t.state == LearningTaskState::Archived {
+                    "archived"
+                } else {
+                    "schedule_ended"
+                }
+            } else if !started {
+                "not_started"
+            } else if done {
+                "today_completed"
+            } else if a > 0 {
+                "ready"
+            } else if ids.is_empty() {
+                "review_waiting"
+            } else {
+                "source_blocked"
+            },
+        )
+    } else if let Some(c) = cycle.as_ref() {
         let started = c.earliest_day <= day;
         let active = c.state == "active";
         let done = current_run
@@ -521,8 +613,10 @@ pub async fn detail(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Learning
             },
         )
     };
-    let can_next = open && cycle.as_ref().is_some_and(|c| c.state == "completed");
-    let can_restart = open
+    let can_next =
+        mastery.is_none() && open && cycle.as_ref().is_some_and(|c| c.state == "completed");
+    let can_restart = mastery.is_none()
+        && open
         && cycle
             .as_ref()
             .is_some_and(|c| c.state == "active" && c.blocked_count > 0);
@@ -530,6 +624,7 @@ pub async fn detail(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Learning
     learner(&mut tx, auth).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(LearningPlan {
+        mastery,
         task: t,
         mode: m.generation_policy.clone(),
         schedule: schedule(&m),
@@ -556,19 +651,21 @@ pub async fn list(
     auth: &AuthUser,
     query: LearningPageQuery,
     include_choice: bool,
+    include_mastery: bool,
 ) -> Result<LearningPlanPage, AppError> {
     let (p, s) = page(&query)?;
     let mut tx = begin(pool, auth, &[]).await?;
     let state = query.state.unwrap_or(LearningTaskState::Active);
     let total: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($3 OR question_type='spelling_zh_to_en')")
+        sqlx::query_scalar("SELECT count(*) FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($3 OR question_type='spelling_zh_to_en') AND ($4 OR generation_policy<>'mastery_v1')")
             .bind(auth.subject)
             .bind(state)
             .bind(include_choice)
+            .bind(include_mastery)
             .fetch_one(&mut *tx)
             .await
             .map_err(AppError::internal)?;
-    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($5 OR question_type='spelling_zh_to_en') ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4").bind(auth.subject).bind(state).bind(i64::from(s)).bind(i64::from(p-1)*i64::from(s)).bind(include_choice).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($5 OR question_type='spelling_zh_to_en') AND ($6 OR generation_policy<>'mastery_v1') ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4").bind(auth.subject).bind(state).bind(i64::from(s)).bind(i64::from(p-1)*i64::from(s)).bind(include_choice).bind(include_mastery).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
     let mut items = vec![];
     for id in ids {
@@ -587,7 +684,7 @@ pub async fn rename(
 ) -> Result<LearningPlan, AppError> {
     let mut tx = begin(pool, auth, &[]).await?;
     task(&mut tx, auth, id).await?;
-    if meta(&mut tx, id).await?.generation_policy == "coverage_v1" {
+    if meta(&mut tx, id).await?.generation_policy != "legacy_v1" {
         plan_name(&input.name)?;
     }
     tx.commit().await.map_err(AppError::internal)?;
@@ -652,7 +749,21 @@ pub async fn start(
     }
     let mut recover = None;
     if let Some(last) = last {
-        let row = run(&mut tx, auth, last).await?;
+        let mut row = run(&mut tx, auth, last).await?;
+        if row.practice_mode.is_some() && row.state == LearningRunState::Active {
+            let qs = questions(&mut tx, last).await?;
+            let access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
+            let view = run_view(&mut tx, &row, &qs, &access).await?;
+            if view.state != row.state {
+                sqlx::query("UPDATE learning_runs SET state=$2 WHERE id=$1")
+                    .bind(last)
+                    .bind(view.state)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(AppError::internal)?;
+                row.state = view.state;
+            }
+        }
         if row.state == LearningRunState::Active && row.expires_at.is_some_and(|e| e <= at) {
             sqlx::query("UPDATE learning_runs SET state='expired' WHERE id=$1")
                 .bind(last)
@@ -665,6 +776,9 @@ pub async fn start(
                 row.state,
                 LearningRunState::Active | LearningRunState::Completed
             )
+            && (m.generation_policy != super::mastery::MODE
+                || row.state == LearningRunState::Active
+                || t.task_type == LearningTaskType::Daily)
         {
             recover = Some(last);
         }
@@ -688,11 +802,29 @@ pub async fn start(
             .iter()
             .filter(|u| u.covered_answer_id.is_none() && access.available(&u.question))
             .collect();
-        if pending.is_empty() {
+        if pending.is_empty() && m.generation_policy != super::mastery::MODE {
             return Err(conflict("来源不可用，已保留本轮进度，请检查来源"));
         }
         let daily = t.task_type == LearningTaskType::Daily;
-        let selected: Vec<Uuid> = if daily {
+        let selected: Vec<Uuid> = if m.generation_policy == super::mastery::MODE {
+            let eligible = super::mastery::eligible(&mut tx, c.id, day).await?;
+            let mut seen = std::collections::HashSet::new();
+            eligible
+                .into_iter()
+                .filter(|id| {
+                    rows.iter().find(|u| u.question.id == *id).is_some_and(|u| {
+                        access.available(&u.question)
+                            && seen.insert((
+                                u.question.entry_id,
+                                u.question
+                                    .custom_item_id
+                                    .map(|item| (u.question.source_wordlist_id, item)),
+                            ))
+                    })
+                })
+                .take(t.daily_question_count.unwrap_or(20).min(20) as usize)
+                .collect()
+        } else if daily {
             pending
                 .iter()
                 .take(t.daily_question_count.expect("daily count") as usize)
@@ -701,6 +833,9 @@ pub async fn start(
         } else {
             rows.iter().map(|u| u.question.id).collect()
         };
+        if selected.is_empty() {
+            return Err(conflict("本次已无新词或到期复习，请按下次复习日期继续"));
+        }
         if t.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE) {
             let selected_units: Vec<_> = rows
                 .iter()
@@ -719,9 +854,9 @@ pub async fn start(
         }
         let run_id = Uuid::now_v7();
         let expires = daily.then(|| t.ends_at.map_or(window_end, |e| e.min(window_end)));
-        sqlx::query("INSERT INTO learning_runs(id,task_id,user_id,task_revision,task_type,business_day,window_start,window_end,expires_at,settings_snapshot,seed,target_count,state,generation_version,grading_version,cycle_id,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active',$13,$14,$15,$16)")
-  .bind(run_id).bind(id).bind(auth.subject).bind(t.revision).bind(t.task_type).bind(daily.then_some(day)).bind(daily.then_some(window_start)).bind(daily.then_some(window_end)).bind(expires).bind(&c.settings_snapshot).bind(Uuid::now_v7()).bind(selected.len() as i32).bind(&c.generation_version).bind(if c.generation_version == WORDLIST_GENERATION_VERSION && t.question_type.as_deref()==Some(crate::question_bank::learning::CHOICE) {WORDLIST_GRADING_VERSION} else {&c.grading_version}).bind(c.id).bind(t.question_type.as_deref().unwrap_or("spelling_zh_to_en")).execute(&mut *tx).await.map_err(AppError::internal)?;
-        sqlx::query("INSERT INTO learning_questions(id,run_id,cycle_id,cycle_unit_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint,custom_item_id) SELECT gen_random_uuid(),$1,cycle_id,id,(row_number() OVER(ORDER BY position)-1)::integer,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint,custom_item_id FROM learning_cycle_units WHERE id=ANY($2) ORDER BY position").bind(run_id).bind(&selected).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO learning_runs(id,task_id,user_id,task_revision,task_type,business_day,window_start,window_end,expires_at,settings_snapshot,seed,target_count,state,generation_version,grading_version,cycle_id,question_type,practice_mode) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active',$13,$14,$15,$16,$17)")
+  .bind(run_id).bind(id).bind(auth.subject).bind(t.revision).bind(t.task_type).bind(daily.then_some(day)).bind(daily.then_some(window_start)).bind(daily.then_some(window_end)).bind(expires).bind(&c.settings_snapshot).bind(Uuid::now_v7()).bind(selected.len() as i32).bind(&c.generation_version).bind(if c.generation_version == WORDLIST_GENERATION_VERSION && t.question_type.as_deref()==Some(crate::question_bank::learning::CHOICE) {WORDLIST_GRADING_VERSION} else {&c.grading_version}).bind(c.id).bind(t.question_type.as_deref().unwrap_or("spelling_zh_to_en")).bind((m.generation_policy==super::mastery::MODE).then_some(super::mastery::MODE)).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO learning_questions(id,run_id,cycle_id,cycle_unit_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint,custom_item_id,practice_kind) SELECT gen_random_uuid(),$1,cycle_id,id,(row_number() OVER(ORDER BY array_position($2::uuid[],id))-1)::integer,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint,custom_item_id,CASE WHEN covered_answer_id IS NULL THEN 'new' ELSE 'review' END FROM learning_cycle_units WHERE id=ANY($2) ORDER BY position").bind(run_id).bind(&selected).execute(&mut *tx).await.map_err(AppError::internal)?;
         run_id
     };
     let row = run(&mut tx, auth, run_id).await?;
@@ -753,8 +888,11 @@ async fn cycle_preview_in(
     m: &PlanMeta,
     input: &PreviewLearningCycle,
 ) -> Result<(LearningCyclePreview, Vec<Candidate>, CycleRow), AppError> {
+    if input.operation == CycleOperation::RefreshSources {
+        return source_refresh::preview_in(tx, auth, t, m, input).await;
+    }
     if m.generation_policy != "coverage_v1" {
-        return Err(conflict("旧模式任务不支持覆盖轮次，请新建任务"));
+        return Err(conflict("此模式不支持整轮重建；掌握任务请重新确认来源"));
     }
     let c = latest(tx, t.id).await?;
     if c.id != input.after_cycle_id || t.revision != input.expected_revision {
@@ -794,6 +932,7 @@ async fn cycle_preview_in(
         earliest = earliest.max(m.start_date.unwrap_or(day));
     }
     let req = PreviewLearningPlan {
+        practice_mode: None,
         question_type: t.question_type.clone(),
         task_type: t.task_type,
         wordlist_ids: t.wordlist_ids.clone(),
@@ -806,6 +945,7 @@ async fn cycle_preview_in(
     }
     Ok((
         LearningCyclePreview {
+            source_refresh: None,
             preview: p,
             earliest_day: earliest,
             previous_covered_count: old.covered_count,
@@ -898,28 +1038,41 @@ pub async fn cycle_create(
     if !p.preview.can_create {
         return Err(invalid(&p.preview.reasons.join("；")));
     }
-    if input.operation == CycleOperation::RestartBlocked {
-        cancel_cycles(&mut tx, id).await?;
-        sqlx::query(
-            "UPDATE learning_runs SET state='cancelled' WHERE task_id=$1 AND state='active'",
+    let refreshed = if input.operation == CycleOperation::RefreshSources {
+        Some(source_refresh::apply(&mut tx, &c, &candidates).await?)
+    } else {
+        None
+    };
+    let result = if refreshed.is_some() {
+        c.id
+    } else {
+        if input.operation == CycleOperation::RestartBlocked {
+            cancel_cycles(&mut tx, id).await?;
+            sqlx::query(
+                "UPDATE learning_runs SET state='cancelled' WHERE task_id=$1 AND state='active'",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+        }
+        write_cycle(
+            &mut tx,
+            auth,
+            id,
+            Some(&c),
+            p.earliest_day,
+            &p.preview,
+            &candidates,
         )
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::internal)?;
+        .await?
+    };
+    sqlx::query("INSERT INTO learning_cycle_requests(user_id,idempotency_key,request_hash,task_id,after_cycle_id,operation,result_cycle_id) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(auth.subject).bind(input.idempotency_key).bind(h).bind(id).bind(c.id).bind(match input.operation {CycleOperation::Next=>"next",CycleOperation::RestartBlocked=>"restart_blocked",CycleOperation::RefreshSources=>"refresh_sources"}).bind(result).execute(&mut *tx).await.map_err(AppError::internal)?;
+    if let Some(ids) = refreshed {
+        source_refresh::ensure_sources(&mut tx, auth, &lists, c.id, &ids).await?;
+    } else {
+        ensure_cycle_sources(&mut tx, auth, &lists, result).await?;
     }
-    let result = write_cycle(
-        &mut tx,
-        auth,
-        id,
-        Some(&c),
-        p.earliest_day,
-        &p.preview,
-        &candidates,
-    )
-    .await?;
-    sqlx::query("INSERT INTO learning_cycle_requests(user_id,idempotency_key,request_hash,task_id,after_cycle_id,operation,result_cycle_id) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(auth.subject).bind(input.idempotency_key).bind(h).bind(id).bind(c.id).bind(if input.operation==CycleOperation::Next{"next"}else{"restart_blocked"}).bind(result).execute(&mut *tx).await.map_err(AppError::internal)?;
-    ensure_cycle_sources(&mut tx, auth, &lists, result).await?;
     learner(&mut tx, auth).await?;
     let end = now(&mut tx).await?;
     if business_window(end).0 != p.preview.business_day || t.ends_at.is_some_and(|e| e <= end) {

@@ -135,6 +135,7 @@ pub async fn run_task(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Uuid, 
 }
 #[derive(sqlx::FromRow)]
 pub struct RunRow {
+    pub practice_mode: Option<String>,
     pub question_type: String,
     pub cycle_id: Option<Uuid>,
     pub id: Uuid,
@@ -162,6 +163,7 @@ pub async fn run(tx: &mut Tx<'_>, auth: &AuthUser, id: Uuid) -> Result<RunRow, A
 #[derive(sqlx::FromRow)]
 pub struct QuestionRow {
     pub custom_item_id: Option<Uuid>,
+    pub practice_kind: String,
     pub cycle_unit_id: Option<Uuid>,
     pub id: Uuid,
     pub position: i32,
@@ -519,6 +521,7 @@ pub fn question_view(
     let snapshot: AnswerSnapshot =
         serde_json::from_value(q.answer_snapshot.clone()).map_err(AppError::internal)?;
     Ok(LearningQuestion {
+        practice_kind: (q.practice_kind != "new").then(|| q.practice_kind.clone()),
         options: if visible {
             snapshot.choice.map(|c| c.options)
         } else {
@@ -556,7 +559,9 @@ pub async fn run_view(
         .await
         .map_err(AppError::internal)?;
     let state = if row.state == LearningRunState::Active {
-        if row.cycle_id.is_none() && qs.iter().any(|q| !access.available(q)) {
+        if (row.cycle_id.is_none() || row.practice_mode.is_some())
+            && qs.iter().any(|q| !access.available(q))
+        {
             LearningRunState::Invalidated
         } else if row.expires_at.is_some_and(|e| e <= time) {
             LearningRunState::Expired
@@ -567,6 +572,7 @@ pub async fn run_view(
         row.state
     };
     Ok(LearningRun {
+        practice_mode: row.practice_mode.clone(),
         id: row.id,
         task_id: row.task_id,
         task_type: row.task_type,

@@ -56,5 +56,8 @@ pub struct BankQuestionContent {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub practice_modes: Option<Vec<String>>,
     pub question_types: Vec<String>,
 }
