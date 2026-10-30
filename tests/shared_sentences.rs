@@ -117,6 +117,106 @@ async fn minimum_sentence_creation_grant_supports_owned_source_and_cascades_revo
     );
 }
 
+#[sqlx::test]
+async fn standalone_sentence_persists_retries_and_can_be_linked_later(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin_with_role(&pool, AdminRole::Admin).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let mut linked = content(source);
+    linked["annotations"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|a| a["target"]["state"] == "linked");
+    let mut standalone = linked.clone();
+    standalone["annotations"] = json!([]);
+    let input = json!({"content": standalone});
+    let (status, created) = call(&state, actor, Method::POST, ROOT, Some(input.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["entries"], json!([]));
+    let id = created["id"].as_str().unwrap();
+    let origin: Option<Uuid> =
+        sqlx::query_scalar("SELECT source_entry_id FROM lexicon.shared_sentences WHERE id=$1")
+            .bind(Uuid::parse_str(id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(origin, None);
+    let (status, retry) = call(&state, actor, Method::POST, ROOT, Some(input)).await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["id"], created["id"]);
+    assert_eq!(retry["revision"], 1);
+    let (status, fetched) = call(&state, actor, Method::GET, &format!("{ROOT}/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["content"], standalone);
+    let (status, updated) = call(
+        &state,
+        actor,
+        Method::PUT,
+        &format!("{ROOT}/{id}"),
+        Some(json!({"base_revision":1,"content":linked})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let (status, listed) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?entry_id={source}&sense_id={}", sense_id(source)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["total"], 1);
+    assert_eq!(listed["items"][0]["id"], created["id"]);
+    assert_eq!(listed["items"][0]["content"], linked);
+}
+
+#[sqlx::test]
+async fn standalone_creation_keeps_permission_context_and_target_validation(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin_with_role(&pool, AdminRole::Admin).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let mut standalone = content(source);
+    standalone["annotations"] = json!([]);
+    for context in [
+        json!({"source_entry_id":source}),
+        json!({"source_sense_id":sense_id(source)}),
+        json!({"source_entry_id":source,"source_sense_id":sense_id(source)}),
+    ] {
+        let mut input = context;
+        input["content"] = standalone.clone();
+        let (status, body) = call(&state, actor, Method::POST, ROOT, Some(input)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    let mut invalid = content(source);
+    invalid["annotations"][0]["target"]["target_sense_id"] = json!(Uuid::now_v7());
+    let (status, body) = call(
+        &state,
+        actor,
+        Method::POST,
+        ROOT,
+        Some(json!({"content":invalid})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.create'")
+        .bind(actor).execute(&pool).await.unwrap();
+    let (status, body) = call(
+        &state,
+        actor,
+        Method::POST,
+        ROOT,
+        Some(json!({"content":standalone})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.shared_sentences")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
 const ROOT: &str = "/api/v1/admin/lexicon/sentences";
 
 async fn audio_asset(pool: &PgPool, owner: Uuid) -> Value {
@@ -2010,8 +2110,8 @@ async fn sense_identity_cannot_be_forged_and_legacy_links_require_repair(pool: P
     .await;
     assert_eq!(
         status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "unsaved sense cannot create a sentence"
+        StatusCode::BAD_REQUEST,
+        "a source entry without its sense cannot create a sentence"
     );
     let (status,saved)=call(&state,actor,Method::POST,ROOT,Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content(source)}))).await;
     assert_eq!(status, StatusCode::OK, "{saved}");

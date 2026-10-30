@@ -120,8 +120,12 @@ pub struct SharedSentenceContent {
 #[serde(deny_unknown_fields)]
 pub struct CreateSharedSentence {
     /// Stable client-generated UUID makes retries safe.
-    pub source_entry_id: Uuid,
-    pub source_sense_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub source_entry_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub source_sense_id: Option<Uuid>,
     pub content: SharedSentenceContent,
 }
 
@@ -813,6 +817,9 @@ pub async fn create(
     ApiJson(mut input): ApiJson<CreateSharedSentence>,
 ) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
+    if input.source_entry_id.is_some() != input.source_sense_id.is_some() {
+        return Err(invalid("来源词条与词义必须同时提供"));
+    }
     validate(&input.content)?;
     if !crate::lexicon::voice_versions::dubbing_supported(&headers)
         && crate::lexicon::voice_versions::contains_dubbing(
@@ -850,20 +857,16 @@ pub async fn create(
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let authorization = crate::admin::permissions::lock(&mut tx, admin.id).await?;
     authorization.require("sentences.create")?;
-    lock_targets(
-        &mut tx,
-        Some(&input.content),
-        Some(input.source_entry_id),
-        None,
-    )
-    .await?;
-    writable_entry(&mut tx, input.source_entry_id, &authorization).await?;
+    lock_targets(&mut tx, Some(&input.content), input.source_entry_id, None).await?;
+    if let Some(source) = input.source_entry_id {
+        writable_entry(&mut tx, source, &authorization).await?;
+    }
     audio::normalize(&mut tx, admin.id, id, &mut input.content.sentence.en_text).await?;
     validate_targets(
         &mut tx,
         &input.content,
-        Some(input.source_entry_id),
-        Some(input.source_sense_id),
+        input.source_entry_id,
+        input.source_sense_id,
     )
     .await?;
     let inserted=sqlx::query("INSERT INTO lexicon.shared_sentences(id,content,create_digest,source_entry_id,created_by_admin_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING")
