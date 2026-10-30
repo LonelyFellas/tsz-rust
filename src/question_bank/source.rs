@@ -260,3 +260,42 @@ pub async fn validate_question(
     }
     Ok(())
 }
+
+/// Published synonym links are exclusion evidence, including links from another sense.
+pub async fn synonym_refs(
+    tx: &mut Tx<'_>,
+    entry: Uuid,
+) -> Result<
+    (
+        std::collections::HashSet<Uuid>,
+        std::collections::HashSet<String>,
+    ),
+    AppError,
+> {
+    let publications = published::read_current_in(tx, &[entry]).await?;
+    let mut ids = std::collections::HashSet::new();
+    let mut words = std::collections::HashSet::new();
+    if let Some(p) = publications.get(&entry) {
+        let content = p.content_v3()?;
+        for relation in content
+            .meanings
+            .pos
+            .iter()
+            .flat_map(|p| &p.senses)
+            .flat_map(|s| &s.relations)
+            .filter(|r| r.relation == "synonym")
+        {
+            if let Some(id) = relation.target_word_id {
+                ids.insert(id);
+            }
+            if let Some(word) = relation
+                .target_headword
+                .as_ref()
+                .or(relation.pending_target_headword.as_ref())
+            {
+                words.insert(key_v1(word));
+            }
+        }
+    }
+    Ok((ids, words))
+}

@@ -198,7 +198,7 @@ pub async fn answers(tx: &mut Tx<'_>, id: Uuid) -> Result<HashMap<Uuid, AnswerRo
     Ok(rows.into_iter().map(|r| (r.question_id, r)).collect())
 }
 pub struct SourceAccess {
-    pub choice_available: std::collections::HashSet<(Uuid, i64)>,
+    pub choice_fingerprints: std::collections::HashSet<String>,
     pub lists: HashMap<Uuid, (i64, Option<i64>)>,
     pub(crate) entries: HashMap<Uuid, CurrentPublication>,
     pub members: HashMap<(Uuid, Uuid), Uuid>,
@@ -212,7 +212,7 @@ pub async fn sources(
     auth: &AuthUser,
     ids: &[Uuid],
 ) -> Result<SourceAccess, AppError> {
-    source_access(tx, auth, ids, None, None, false).await
+    source_access(tx, auth, ids, None, None).await
 }
 /// Grace is scoped to a run, not a task or user: only a run that was already in
 /// flight when the wordlist was deleted may finish from its frozen questions.
@@ -223,25 +223,59 @@ pub async fn sources_for_questions(
     run: &RunRow,
     questions: &[QuestionRow],
 ) -> Result<SourceAccess, AppError> {
+    let refs: Vec<_> = questions.iter().collect();
     let entries: Vec<_> = questions.iter().map(|q| q.entry_id).collect();
-    source_access(
-        tx,
-        auth,
-        ids,
-        Some(&entries),
-        Some(run),
-        run.question_type == crate::question_bank::learning::CHOICE,
-    )
-    .await
+    let mut access = source_access(tx, auth, ids, Some(&entries), Some(run)).await?;
+    add_choice_sources(tx, &mut access, &refs).await?;
+    Ok(access)
 }
 pub async fn sources_for_units(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     ids: &[Uuid],
-    entries: &[Uuid],
-    include_choice: bool,
+    questions: &[&QuestionRow],
 ) -> Result<SourceAccess, AppError> {
-    source_access(tx, auth, ids, Some(entries), None, include_choice).await
+    let entries: Vec<_> = questions.iter().map(|q| q.entry_id).collect();
+    let mut access = source_access(tx, auth, ids, Some(&entries), None).await?;
+    add_choice_sources(tx, &mut access, questions).await?;
+    Ok(access)
+}
+pub async fn sources_for_entries(
+    tx: &mut Tx<'_>,
+    auth: &AuthUser,
+    ids: &[Uuid],
+    entries: &[Uuid],
+) -> Result<SourceAccess, AppError> {
+    source_access(tx, auth, ids, Some(entries), None).await
+}
+async fn add_choice_sources(
+    tx: &mut Tx<'_>,
+    access: &mut SourceAccess,
+    questions: &[&QuestionRow],
+) -> Result<(), AppError> {
+    let mut ids = Vec::new();
+    for q in questions {
+        if let Some(value) = q.answer_snapshot.get("choice").filter(|v| !v.is_null()) {
+            let choice: crate::question_bank::learning::ChoiceSnapshot =
+                serde_json::from_value(value.clone()).map_err(AppError::internal)?;
+            ids.push(choice.content.target.source.entry_id);
+            if !choice.deferred {
+                ids.extend(
+                    choice
+                        .content
+                        .options
+                        .iter()
+                        .map(|o| o.candidate.source.entry_id),
+                );
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    if !ids.is_empty() {
+        access.choice_fingerprints = crate::question_bank::learning::fingerprints(tx, &ids).await?;
+    }
+    Ok(())
 }
 async fn deletion_grace(
     tx: &mut Tx<'_>,
@@ -275,7 +309,6 @@ async fn source_access(
     ids: &[Uuid],
     fixed_entries: Option<&[Uuid]>,
     run: Option<&RunRow>,
-    include_choice: bool,
 ) -> Result<SourceAccess, AppError> {
     // Lock the wordlist rows before reading deletion events. A concurrent delete
     // holds the same row lock and inserts its event in the same transaction, so
@@ -337,13 +370,8 @@ async fn source_access(
     grace.retain(|_, generations| !generations.is_empty());
     let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w LEFT JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND w.deleted_at IS NULL AND (w.owner_admin_id IS NOT NULL OR (u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())))").bind(&visible_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     lists.retain(|id, _| grace.contains_key(id) || visible.contains(id));
-    let choice_available = if include_choice {
-        crate::question_bank::learning::available(tx, &entry_ids).await?
-    } else {
-        Default::default()
-    };
     Ok(SourceAccess {
-        choice_available,
+        choice_fingerprints: Default::default(),
         lists,
         entries,
         members: members.iter().map(|(l, e, m)| ((*l, *e), *m)).collect(),
@@ -354,14 +382,21 @@ async fn source_access(
 impl SourceAccess {
     pub fn available(&self, q: &QuestionRow) -> bool {
         if let Some(choice) = q.answer_snapshot.get("choice").filter(|c| !c.is_null()) {
-            let id = choice
-                .get("question_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<Uuid>().ok());
-            let revision = choice.get("revision").and_then(|v| v.as_i64());
-            if !id
-                .zip(revision)
-                .is_some_and(|pair| self.choice_available.contains(&pair))
+            let Ok(choice) = serde_json::from_value::<crate::question_bank::learning::ChoiceSnapshot>(
+                choice.clone(),
+            ) else {
+                return false;
+            };
+            if !self
+                .choice_fingerprints
+                .contains(&choice.content.target.content_fingerprint)
+                || (!choice.deferred
+                    && (choice.content.options.len() != 4
+                        || choice.content.options.iter().any(|o| {
+                            !self
+                                .choice_fingerprints
+                                .contains(&o.candidate.content_fingerprint)
+                        })))
             {
                 return false;
             }

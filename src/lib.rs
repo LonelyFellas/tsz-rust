@@ -337,7 +337,6 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     };
 
     if !config.deployment_smoke_only {
-        crate::question_bank::worker::run_worker(state.clone());
         crate::learning_memory::retention::run_worker(state.pool.clone());
         crate::account_deletion::worker::run_worker(state.pool.clone());
         crate::avatar::cleanup::run_worker(state.clone());
