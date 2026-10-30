@@ -3158,7 +3158,7 @@ async fn trash_refuses_invalid_targets_then_allows_permanent_delete(pool: PgPool
     .await;
     assert_eq!(trash["total"], 1);
     let rollback_error = sqlx::raw_sql(include_str!(
-        "../migrations/20261030010000_sentence_trash.down.sql"
+        "../migrations/20261030020000_sentence_trash.down.sql"
     ))
     .execute(&pool)
     .await
@@ -3208,13 +3208,13 @@ async fn trash_refuses_invalid_targets_then_allows_permanent_delete(pool: PgPool
 #[sqlx::test]
 async fn empty_sentence_trash_migration_roundtrip(pool: PgPool) {
     sqlx::raw_sql(include_str!(
-        "../migrations/20261030010000_sentence_trash.down.sql"
+        "../migrations/20261030020000_sentence_trash.down.sql"
     ))
     .execute(&pool)
     .await
     .unwrap();
     sqlx::raw_sql(include_str!(
-        "../migrations/20261030010000_sentence_trash.up.sql"
+        "../migrations/20261030020000_sentence_trash.up.sql"
     ))
     .execute(&pool)
     .await
