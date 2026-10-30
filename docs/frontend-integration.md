@@ -29,6 +29,10 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 该命令会更新前端生成文件；同步后必须检查差异并执行项目规定的契约验证，不能把同步成功等同于联调完成。
 
+## 独立创建例句
+
+禅道 #154 的契约、兼容顺序及真实联调记录统一维护在前端仓库 `docs/features/independent-sentence-creation/README.md`。
+
 ## 智能词库列表筛选
 
 搜索栏重排与创建人独立筛选的主记录在前端 `docs/features/dictionary-search-layout/README.md`。列表新增可选 `headword`（仅词面）和 `created_by`（管理员 UUID），与其他条件取交集；旧 `q` 保留词面或创建人混合匹配。`GET /admin/lexicon/entries/creators` 仅返回有词条的创建人 ID 与姓名，要求 `words.access`，包含已停用的历史创建人。发布须先后端再前端，无数据库迁移；回退后端前先回退配套前端。
