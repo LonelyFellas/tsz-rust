@@ -6,3 +6,5 @@ DO $$ BEGIN
 END $$;
 UPDATE question_generations SET state='cancelled',revision=revision+1,updated_at=now() WHERE state IN ('queued','running');
 UPDATE question_bank SET state='disabled',revision=revision+1,updated_at=now() WHERE state IN ('draft','approved');
+
+CREATE INDEX question_candidate_learning ON lexicon.question_candidate_index(answer_profile,part_of_speech,entry_id,pos_id,sense_id,definition_id,form_id) INCLUDE(publication_id,level);

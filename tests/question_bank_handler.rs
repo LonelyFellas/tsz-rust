@@ -314,6 +314,12 @@ async fn losing_distractors_before_open_does_not_commit_a_partial_run(pool: PgPo
 }
 #[sqlx::test]
 async fn retirement_preserves_old_facts_and_refuses_rollback_after_on_demand_cycles(pool: PgPool) {
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261030030000_retire_question_bank.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
     let f = fixture(&pool).await;
     let admin = wordlists_support::admin(&pool).await;
     let g = Uuid::now_v7();
@@ -431,5 +437,154 @@ async fn longterm_source_loss_cannot_copy_deferred_empty_questions_into_a_run(po
             .unwrap()
             .iter()
             .all(|q| q["options"].as_array().unwrap().len() == 4)
+    );
+}
+
+// Real publication/index triggers stay enabled; these are owned synthetic corpus rows.
+async fn seed_corpus(
+    pool: &PgPool,
+    template: Uuid,
+    count: usize,
+    entry_base: u128,
+    publication_base: u128,
+    prefix: &str,
+    definition: &str,
+) -> Vec<Uuid> {
+    let (mut content,admin):(Value,Uuid)=sqlx::query_as("SELECT p.snapshot,e.created_by_admin_id FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(template).fetch_one(pool).await.unwrap();
+    content["forms"]["pos"][0]["forms"] = json!([content["forms"]["pos"][0]["forms"][0].clone()]);
+    let mut group = content["forms"]["pos"][0]["form_groups"][0].clone();
+    group["members"] = json!([group["members"][0].clone()]);
+    content["forms"]["pos"][0]["form_groups"] = json!([group]);
+    content["meanings"]["pos"][0]["senses"] =
+        json!([content["meanings"]["pos"][0]["senses"][0].clone()]);
+    content["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
+        json!(definition);
+    let ids: Vec<_> = (0..count)
+        .map(|i| Uuid::from_u128(entry_base + i as u128))
+        .collect();
+    let pubs: Vec<_> = (0..count)
+        .map(|i| Uuid::from_u128(publication_base + i as u128))
+        .collect();
+    for (offset, chunk) in ids.chunks(250).enumerate() {
+        let begin = offset * 250;
+        let mut entries = sqlx::QueryBuilder::new(
+            "INSERT INTO lexicon.entries(id,content_schema_version,language,kind,detection_snapshot,created_by_admin_id,updated_by_admin_id) ",
+        );
+        entries.push_values(chunk, |mut b, id| {
+            b.push_bind(*id)
+                .push("3")
+                .push("'en'")
+                .push("'word'")
+                .push("'{}'")
+                .push_bind(admin)
+                .push_bind(admin);
+        });
+        entries.build().execute(pool).await.unwrap();
+        let mut rows = Vec::new();
+        for (j, id) in chunk.iter().enumerate() {
+            let mut c = content.clone();
+            let number = begin + j;
+            let word = if prefix == "target" {
+                // Spread targets over 676 prefixes rather than measuring a single hot prefix.
+                format!(
+                    "{}{}unit{number:04}",
+                    char::from(b'a' + ((number / 26) % 26) as u8),
+                    char::from(b'a' + (number % 26) as u8)
+                )
+            } else {
+                format!("{prefix}{number:04}")
+            };
+            c["id"] = json!(id);
+            c["presentation"]["label"] = json!(word);
+            for side in ["uk", "us"] {
+                c["forms"]["pos"][0]["forms"][0]["regional_variants"][side]["spelling"] =
+                    json!(word);
+            }
+            rows.push((pubs[begin + j], *id, c));
+        }
+        let mut insert = sqlx::QueryBuilder::new(
+            "INSERT INTO lexicon.entry_publications(id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id) ",
+        );
+        insert.push_values(&rows, |mut b, (publication, id, c)| {
+            b.push_bind(*publication)
+                .push_bind(*id)
+                .push("1")
+                .push("2")
+                .push("3")
+                .push_bind(c.clone())
+                .push_bind(publication.as_bytes().to_vec())
+                .push_bind(admin);
+        });
+        insert.build().execute(pool).await.unwrap();
+        sqlx::query("UPDATE lexicon.entries e SET current_publication_id=x.publication FROM unnest($1::uuid[],$2::uuid[])x(id,publication) WHERE e.id=x.id").bind(chunk).bind(&pubs[begin..begin+chunk.len()]).execute(pool).await.unwrap();
+    }
+    ids
+}
+#[sqlx::test]
+async fn paged_recall_continues_past_overlapping_entries(pool: PgPool) {
+    let f = fixture(&pool).await;
+    seed_corpus(&pool, f.entries[0], 80, 100, 10000, "lookalike", "苹果").await;
+    let p = call(&f, "POST", "/api/v1/me/learning-plans/preview", preview(&f)).await;
+    assert_eq!(p.0, 200, "{}", p.1);
+    assert!(p.1["eligible_count"].as_i64().unwrap() >= 1);
+    assert_eq!(p.1["can_create"], true);
+    let plan = plan(&f).await;
+    let run = open(&f, &plan).await;
+    let page = questions(&f, &run).await;
+    assert_eq!(page["items"][0]["prompt"]["definition"], "苹果");
+    assert_eq!(page["items"][0]["options"].as_array().unwrap().len(), 4);
+}
+#[sqlx::test]
+#[ignore = "manual 50k publication/1000-target performance evidence; run explicitly before shipping changes to recall"]
+async fn on_demand_scale_50k_candidates_1000_targets(pool: PgPool) {
+    let mut f = fixture(&pool).await;
+    let seed_started = std::time::Instant::now();
+    seed_corpus(
+        &pool,
+        f.entries[0],
+        50000,
+        0x80000000000000000000000000000000,
+        0x90000000000000000000000000000000,
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "备用",
+    )
+    .await;
+    let ids = seed_corpus(
+        &pool,
+        f.entries[0],
+        1000,
+        0x20000000000000000000000000000000,
+        0x30000000000000000000000000000000,
+        "target",
+        "目标",
+    )
+    .await;
+    let list = account_deletion_support::call(
+        &f.state,
+        &f.auth,
+        "POST",
+        "/api/v1/me/wordlists",
+        wordlists_support::create_body(&ids),
+    )
+    .await;
+    assert_eq!(list.0, 200, "{}", list.1);
+    f.list = Uuid::parse_str(list.1["id"].as_str().unwrap()).unwrap();
+    eprintln!("scale corpus prepared in {:?}", seed_started.elapsed());
+    let request_started = std::time::Instant::now();
+    let p = call(&f, "POST", "/api/v1/me/learning-plans/preview", preview(&f)).await;
+    let elapsed = request_started.elapsed();
+    assert_eq!(p.0, 200, "{}", p.1);
+    assert_eq!(p.1["eligible_count"], 1000);
+    assert_eq!(p.1["can_create"], true);
+    eprintln!(
+        "50k published distractors, 1000 target units: preview {:?}",
+        elapsed
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM question_bank")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
     );
 }

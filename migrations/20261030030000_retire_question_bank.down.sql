@@ -4,3 +4,5 @@ DO $$ BEGIN
   RAISE EXCEPTION 'on-demand learning snapshots exist; rollback requires an explicit compatibility plan';
  END IF;
 END $$;
+
+DROP INDEX lexicon.question_candidate_learning;
