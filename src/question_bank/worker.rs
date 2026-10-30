@@ -91,9 +91,6 @@ impl AgentConfig {
     }
 }
 pub fn run_worker(state: AppState) {
-    if state.vocabulary_agent.is_none() {
-        return;
-    }
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         loop {
@@ -105,6 +102,7 @@ pub fn run_worker(state: AppState) {
     });
 }
 pub async fn tick(state: &AppState) -> Result<(), AppError> {
+    generate_algorithmic(state).await?;
     let Some(config) = &state.vocabulary_agent else {
         return Ok(());
     };
@@ -122,7 +120,7 @@ pub async fn tick(state: &AppState) -> Result<(), AppError> {
           expires_at=CASE WHEN submitted_at IS NULL AND state='queued' THEN now()+interval '2 hours' ELSE expires_at END,
           submitted_at=CASE WHEN state='queued' THEN COALESCE(submitted_at,now()) ELSE submitted_at END
         WHERE id=(SELECT g.id FROM question_generations g LEFT JOIN dispatch d ON d.batch_id IS NOT DISTINCT FROM g.batch_id
-          WHERE next_attempt_at<=now() AND (
+          WHERE generation_method='agent' AND next_attempt_at<=now() AND (
             (state IN ('cancelled','failed') AND NOT cancel_delivered) OR
             (state IN ('queued','running') AND (submitted_at IS NOT NULL OR (SELECT n FROM active)<2)))
           ORDER BY CASE WHEN state IN ('cancelled','failed') THEN 0 WHEN submitted_at IS NOT NULL THEN 1 ELSE 2 END,
@@ -158,6 +156,79 @@ pub async fn tick(state: &AppState) -> Result<(), AppError> {
     }
     generation_result
 }
+async fn generate_algorithmic(state: &AppState) -> Result<(), AppError> {
+    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM question_generations WHERE generation_method='algorithm' AND state='queued' AND next_attempt_at<=now() ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1")
+        .fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
+    let Some(id) = id else {
+        return Ok(());
+    };
+    let current = match service::delegation(&mut tx, id).await {
+        Ok(row) => row,
+        Err(error) if !error.status_code().is_server_error() => {
+            sqlx::query("UPDATE question_generations SET state='failed',error_code='authorization_or_source_changed',revision=revision+1,updated_at=now() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+            tx.commit().await.map_err(AppError::internal)?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let search = AgentCandidateSearch {
+        contract_version: 1,
+        target_source: current.target.source.clone(),
+        question_level: current.question_level.clone(),
+        answer_profile: current.answer_profile.clone(),
+        exclude_candidate_refs: vec![],
+        limit: 40,
+    };
+    let candidates = service::agent_candidates(&mut tx, &current.target, &search)
+        .await?
+        .items;
+    if candidates.len() < 3 {
+        sqlx::query("UPDATE question_generations SET state='insufficient_candidates',reasons=ARRAY['词库内符合条件的候选不足三个'],revision=revision+1,updated_at=now() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    } else {
+        let target = current.target.0.clone();
+        let correct_index = usize::from(id.as_bytes()[15]) % 4;
+        let mut choices: Vec<_> = candidates.into_iter().take(3).collect();
+        choices.insert(correct_index, target.clone());
+        let options: Vec<_> = choices
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| BankQuestionOption {
+                option_id: ["A", "B", "C", "D"][index].into(),
+                explanation: format!("{}：{}", candidate.spelling, candidate.definition),
+                candidate,
+            })
+            .collect();
+        let content = BankQuestionContent {
+            prompt: target.definition.clone(),
+            target,
+            question_level: current.question_level.clone(),
+            answer_profile: current.answer_profile.clone(),
+            correct_option_id: ["A", "B", "C", "D"][correct_index].into(),
+            explanation: options
+                .iter()
+                .map(|o| o.explanation.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            options,
+            concerns: vec!["算法仅筛选词库候选，请人工核查每个选项的语义和答案唯一性。".into()],
+        };
+        match source::validate_question(&mut tx, &content).await {
+            Ok(()) => {
+                let qid = Uuid::now_v7();
+                sqlx::query("INSERT INTO question_bank(id,generation_id,content,original_content,target_entry_id,target_sense_id,target_publication_id,question_level,answer_profile,created_by,review_id,question_revision_id) VALUES($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+                    .bind(qid).bind(id).bind(Json(&content)).bind(content.target.source.entry_id).bind(content.target.source.sense_id).bind(content.target.source.publication_id).bind(&content.question_level).bind(&content.answer_profile).bind(current.created_by).bind(Uuid::now_v7()).bind(Uuid::now_v7()).execute(&mut *tx).await.map_err(AppError::internal)?;
+                sqlx::query("UPDATE question_generations SET state='succeeded',question_id=$2,revision=revision+1,updated_at=now() WHERE id=$1").bind(id).bind(qid).execute(&mut *tx).await.map_err(AppError::internal)?;
+            }
+            Err(error) if !error.status_code().is_server_error() => {
+                sqlx::query("UPDATE question_generations SET state='failed',error_code='source_or_question_invalid',revision=revision+1,updated_at=now() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    tx.commit().await.map_err(AppError::internal)?;
+    Ok(())
+}
 async fn process(state: &AppState, config: &AgentConfig, id: Uuid) -> Result<(), AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let row = service::generation(&mut tx, id).await?;
@@ -181,15 +252,12 @@ async fn process(state: &AppState, config: &AgentConfig, id: Uuid) -> Result<(),
     }
     tx.commit().await.map_err(AppError::internal)?;
     if cancelled {
-        let mut known_run = row.agent_run_id;
+        let known_run = row.agent_run_id;
         if known_run.is_none() && row.submitted_at.is_some() {
-            // Recover a lost POST response with the same execution identity before cancellation.
-            let response=config.call(reqwest::Method::POST,"/v1/runs",Some(json!({"contract_version":1,"external_request_id":id,"capability":"vocabulary_mcq_zh_en"})),Some(id)).await?;
-            if response["external_request_id"] != json!(id) {
-                return Err(super::conflict("Agent 执行身份不匹配"));
-            }
-            known_run =
-                Some(serde_json::from_value(response["id"].clone()).map_err(AppError::internal)?);
+            // The remote run identity is unknown. Do not replay creation: it could start a new AI run.
+            return Err(super::conflict(
+                "旧生成任务的远端执行身份未知，无法自动取消",
+            ));
         }
         if let Some(run) = known_run {
             config

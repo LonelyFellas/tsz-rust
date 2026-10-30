@@ -330,7 +330,7 @@ async fn reviewed_choice_resumes_without_answer_leaks_and_shares_reward_deduplic
     let approved = approve(&f, &draft).await;
     assert_eq!(approved["revision"], 2);
     tick(&f.state).await.unwrap();
-    assert_eq!(f.reviews.load(Ordering::SeqCst), 1);
+    assert_eq!(f.reviews.load(Ordering::SeqCst), 0);
     let p = plan(&f, true).await;
     assert_eq!(p["task"]["question_type"], "choice_zh_to_en");
     let r = open(&f, &p).await;
@@ -488,7 +488,7 @@ async fn delegation_auth_cancellation_and_all_four_sources_fail_closed(pool: PgP
             .0,
         403
     );
-    sqlx::query("UPDATE question_generations SET submitted_at=now() WHERE id=$1")
+    sqlx::query("UPDATE question_generations SET generation_method='agent',submitted_at=now(),agent_run_id=gen_random_uuid() WHERE id=$1")
         .bind(Uuid::parse_str(id).unwrap())
         .execute(&pool)
         .await
@@ -699,6 +699,11 @@ async fn edited_rejection_delivers_the_reviewed_question_revision(pool: PgPool) 
         "explanation":"当前修订的解析"
     })).await;
     assert_eq!(edited.0, 200, "{}", edited.1);
+    sqlx::query("UPDATE question_generations SET agent_run_id=gen_random_uuid() WHERE id=$1")
+        .bind(Uuid::parse_str(draft["generation_id"].as_str().unwrap()).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
     let rejected = wordlists_support::admin_call(
         &f.state,
         f.admin,
@@ -1117,6 +1122,14 @@ async fn worker_limits_admission_and_rotates_batches_while_cancellation_survives
     )
     .await;
     let second = create_batch(&f, &p).await;
+    sqlx::query(
+        "UPDATE question_generations SET generation_method='agent' WHERE batch_id IN ($1,$2)",
+    )
+    .bind(Uuid::parse_str(first["id"].as_str().unwrap()).unwrap())
+    .bind(Uuid::parse_str(second["id"].as_str().unwrap()).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
     // Separate worker ticks operate on persistent rows, with no in-memory batch scheduler.
     tick(&f.state).await.unwrap();
     tick(&f.state).await.unwrap();
@@ -1250,6 +1263,11 @@ async fn insufficient_candidates_is_terminal_and_can_be_filled_again(pool: PgPoo
     let s = json!({"question_levels":["A1"],"answer_profiles":["BrE"]});
     let p = batch_preview(&f, s.clone()).await;
     let first = create_batch(&f, &p).await;
+    sqlx::query("UPDATE question_generations SET generation_method='agent' WHERE batch_id=$1")
+        .bind(Uuid::parse_str(first["id"].as_str().unwrap()).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
     for _ in 0..8 {
         tick(&f.state).await.unwrap();
     }
@@ -1394,10 +1412,10 @@ async fn workbench_search_is_server_paginated_and_inspects_pinned_publication_so
     .await;
     assert_eq!(inspection.0, 200, "{}", inspection.1);
     assert_eq!(inspection.1["target_current"], true);
-    assert_eq!(
-        inspection.1["sources"],
-        json!([{"option_id":"A","current":true},{"option_id":"B","current":false},{"option_id":"C","current":true},{"option_id":"D","current":true}])
-    );
+    let expected_sources: Vec<_> = second["content"]["options"].as_array().unwrap().iter().map(|option| {
+        json!({"option_id":option["option_id"], "current":option["candidate"]["source"]["entry_id"] != json!(source)})
+    }).collect();
+    assert_eq!(inspection.1["sources"], json!(expected_sources));
     assert_eq!(inspection.1["question"]["content"], second["content"]);
     let stale = batch_call(&f, "GET", "questions/workbench", Value::Null).await;
     assert_eq!(stale.0, 200);
@@ -1700,6 +1718,12 @@ async fn semantic_review_evidence_is_structured_and_unchanged_ambiguity_cannot_b
     let f = fixture(&pool).await;
     let q = generate(&f).await;
     let id = q["id"].as_str().unwrap();
+    sqlx::query("UPDATE question_bank SET semantic_review=$2 WHERE id=$1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .bind(json!({"verdict":"no_obvious_issue","issues":[]}))
+        .execute(&pool)
+        .await
+        .unwrap();
     let inspect_path = format!("{BANK}/questions/{id}/inspection");
     let read =
         wordlists_support::admin_call(&f.state, f.admin, "GET", &inspect_path, Value::Null).await;
@@ -1792,6 +1816,11 @@ async fn semantic_review_migration_preserves_legacy_questions_without_inventing_
     let f = fixture(&pool).await;
     let q = generate(&f).await;
     let id = q["id"].as_str().unwrap();
+    sqlx::query("UPDATE question_generations SET generation_method='agent' WHERE id=$1")
+        .bind(Uuid::parse_str(q["generation_id"].as_str().unwrap()).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
     let migrator = sqlx::migrate!("./migrations");
     migrator.undo(&pool, 20261029020000).await.unwrap();
     let preserved: serde_json::Value =
@@ -1814,4 +1843,131 @@ async fn semantic_review_migration_preserves_legacy_questions_without_inventing_
     assert_eq!(read.1["semantic_review"], Value::Null);
     assert_eq!(read.1["semantic_review_current"], false);
     assert_eq!(read.1["question"]["content"], q["content"]);
+}
+
+#[sqlx::test]
+async fn algorithm_generation_without_agent_requires_human_review(pool: PgPool) {
+    let mut f = fixture(&pool).await;
+    f.state.vocabulary_agent = None;
+    let created = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "POST",
+        &format!("{BANK}/generations"),
+        generation_input(&f),
+    )
+    .await;
+    assert_eq!(created.0, 200, "{}", created.1);
+    tick(&f.state).await.unwrap();
+    let generation = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "GET",
+        &format!("{BANK}/generations/{}", created.1["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(generation.1["state"], "succeeded", "{}", generation.1);
+    assert_eq!(generation.1["agent_run_id"], Value::Null);
+    let question = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "GET",
+        &format!(
+            "{BANK}/questions/{}",
+            generation.1["question_id"].as_str().unwrap()
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(question.1["state"], "draft");
+    assert_eq!(
+        question.1["content"]["options"].as_array().unwrap().len(),
+        4
+    );
+    let approved = approve(&f, &question.1).await;
+    assert_eq!(approved["state"], "approved");
+    let deliveries: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM question_review_deliveries WHERE question_id=$1")
+            .bind(Uuid::parse_str(question.1["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(deliveries, 0);
+}
+
+#[sqlx::test]
+async fn algorithm_generation_reports_insufficient_candidates(pool: PgPool) {
+    let mut f = fixture(&pool).await;
+    f.state.vocabulary_agent = None;
+    for candidate in &f.candidates[1..] {
+        let id = Uuid::parse_str(candidate["source"]["entry_id"].as_str().unwrap()).unwrap();
+        sqlx::query("UPDATE lexicon.entries SET teaching_eligible=false WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let created = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "POST",
+        &format!("{BANK}/generations"),
+        generation_input(&f),
+    )
+    .await;
+    assert_eq!(created.0, 200, "{}", created.1);
+    tick(&f.state).await.unwrap();
+    let generation = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "GET",
+        &format!("{BANK}/generations/{}", created.1["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        generation.1["state"], "insufficient_candidates",
+        "{}",
+        generation.1
+    );
+    assert_eq!(generation.1["question_id"], Value::Null);
+}
+
+#[sqlx::test]
+async fn migration_disables_existing_ai_questions_and_prevents_reapproval(pool: PgPool) {
+    let mut f = fixture(&pool).await;
+    f.state.vocabulary_agent = None;
+    let q = generate(&f).await;
+    let id = Uuid::parse_str(q["id"].as_str().unwrap()).unwrap();
+    let generation_id = Uuid::parse_str(q["generation_id"].as_str().unwrap()).unwrap();
+    approve(&f, &q).await;
+    sqlx::query("UPDATE question_generations SET generation_method='agent' WHERE id=$1")
+        .bind(generation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261030010000_algorithmic_choice.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261030010000_algorithmic_choice.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let disabled = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "GET",
+        &format!("{BANK}/questions/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(disabled.1["state"], "disabled");
+    let attempt = wordlists_support::admin_call(&f.state, f.admin, "POST", &format!("{BANK}/questions/{id}/review"), json!({"expected_revision":disabled.1["revision"],"decision":"approve","reason_codes":[],"comment":""})).await;
+    assert_eq!(attempt.0, 409);
 }
