@@ -104,7 +104,7 @@ pub async fn retry(
             crate::wordlists::service::hash(&(seed, &o.option_id)).expect("serializable option")
         });
     }
-    sqlx::query("INSERT INTO learning_questions(id,run_id,cycle_id,cycle_unit_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint,practice_kind,retry_of) SELECT $2,run_id,cycle_id,cycle_unit_id,$3,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,$4,fingerprint,'retry',id FROM learning_questions WHERE id=$1")
+    sqlx::query("INSERT INTO learning_questions(id,run_id,cycle_id,cycle_unit_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint,custom_item_id,practice_kind,retry_of) SELECT $2,run_id,cycle_id,cycle_unit_id,$3,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,$4,fingerprint,custom_item_id,'retry',id FROM learning_questions WHERE id=$1")
         .bind(q.id).bind(Uuid::now_v7()).bind(row.target_count).bind(serde_json::to_value(answer).map_err(AppError::internal)?).execute(&mut **tx).await.map_err(AppError::internal)?;
     sqlx::query("UPDATE learning_runs SET target_count=target_count+1 WHERE id=$1")
         .bind(row.id)

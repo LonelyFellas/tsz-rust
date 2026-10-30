@@ -13,10 +13,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 pub const GENERATION_VERSION: &str = "zh_base_v1";
+pub const WORDLIST_GRADING_VERSION: &str = "wordlist_mixed_v1";
+pub const WORDLIST_GENERATION_VERSION: &str = "wordlist_all_v1";
 pub const GRADING_VERSION: &str = "spelling_exact_v1";
 pub const ANSWER_NORMALIZATION_VERSION: i16 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnswerSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_word: Option<crate::wordlists::dto::CustomWord>,
+    #[serde(default)]
+    pub wordlist_fallback: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice: Option<crate::question_bank::learning::ChoiceSnapshot>,
     pub answers: Vec<String>,
@@ -25,16 +31,17 @@ pub struct AnswerSnapshot {
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
+    pub custom_item_id: Option<Uuid>,
     pub source_wordlist_id: Uuid,
     pub source_revision: i64,
     pub source_membership_id: Uuid,
     pub source_public_generation: Option<i64>,
-    pub entry_id: Uuid,
-    pub entry_archive_generation: i64,
-    pub publication_id: Uuid,
-    pub pos_id: Uuid,
-    pub sense_id: Uuid,
-    pub definition_id: Uuid,
+    pub entry_id: Option<Uuid>,
+    pub entry_archive_generation: Option<i64>,
+    pub publication_id: Option<Uuid>,
+    pub pos_id: Option<Uuid>,
+    pub sense_id: Option<Uuid>,
+    pub definition_id: Option<Uuid>,
     pub form_ids: Vec<Uuid>,
     pub unit_key: String,
     pub prompt: LearningPrompt,
@@ -114,6 +121,56 @@ pub fn build_candidates(
     sources: &[LearningSource],
     context: &LearningContext,
 ) -> Result<CandidatePool, AppError> {
+    build_with_policy(sources, context, false)
+}
+
+pub fn build_wordlist_candidates(
+    sources: &[LearningSource],
+    context: &LearningContext,
+) -> Result<CandidatePool, AppError> {
+    build_with_policy(sources, context, true)
+}
+
+fn definition_text<'a>(
+    definition: &'a WordDefinitionV3,
+    context: &LearningContext,
+) -> Option<(Uuid, &'a str)> {
+    use crate::lexicon::dto::{DialectVariantRichTextSlotV3, EnglishTextV3};
+    let (id, text) = match definition {
+        WordDefinitionV3::ZhDefinition { id, content, .. }
+        | WordDefinitionV3::ZhSentence { id, content, .. } => (*id, content.text()),
+        WordDefinitionV3::EnDefinition { id, content, .. }
+        | WordDefinitionV3::EnSentence { id, content, .. } => {
+            let value = match content {
+                EnglishTextV3::Unified { common } => &common.value,
+                EnglishTextV3::Distinguish { uk, us, .. } => {
+                    let slots = if context.english_variant == "BrE" {
+                        [uk, us]
+                    } else {
+                        [us, uk]
+                    };
+                    slots.into_iter().find_map(|slot| match slot {
+                        DialectVariantRichTextSlotV3::Ready { variant }
+                            if !variant.value.text().trim().is_empty() =>
+                        {
+                            Some(&variant.value)
+                        }
+                        _ => None,
+                    })?
+                }
+            };
+            (*id, value.text())
+        }
+    };
+    let text = text.trim();
+    (!text.is_empty()).then_some((id, text))
+}
+
+fn build_with_policy(
+    sources: &[LearningSource],
+    context: &LearningContext,
+    all_content: bool,
+) -> Result<CandidatePool, AppError> {
     let mut pool = CandidatePool {
         candidates: vec![],
         exclusions: LearningExclusions::default(),
@@ -135,35 +192,56 @@ pub fn build_candidates(
                 if !seen.insert(unit_key.clone()) {
                     continue;
                 }
-                if sense.depends_on_context {
+                if sense.depends_on_context && !all_content {
                     pool.exclusions.context_dependent += 1;
                     continue;
                 }
-                let Some(WordDefinitionV3::ZhDefinition { id, content, .. }) =
+                let standard_definition =
                     select_definition(&sense.definitions, &context.cefr_level)
-                else {
+                        .filter(|d| matches!(d, WordDefinitionV3::ZhDefinition { .. }))
+                        .and_then(|d| definition_text(d, context));
+                let selected = standard_definition.or_else(|| {
+                    if !all_content {
+                        return None;
+                    }
+                    sense
+                        .definitions
+                        .iter()
+                        .filter(|d| chinese(d))
+                        .find_map(|d| definition_text(d, context))
+                        .or_else(|| {
+                            sense
+                                .definitions
+                                .iter()
+                                .find_map(|d| definition_text(d, context))
+                        })
+                });
+                let Some((definition_id, text)) = selected else {
                     pool.exclusions.no_chinese_definition += 1;
                     continue;
                 };
-                let text = content.text().trim();
-                if text.is_empty() {
-                    pool.exclusions.no_chinese_definition += 1;
-                    continue;
-                }
+                let forms: Vec<_> = pos
+                    .forms
+                    .iter()
+                    .filter(|form| {
+                        allowed_form_senses(pos, &source.content.meanings, form.id)
+                            .any(|s| s.id == sense.id)
+                    })
+                    .collect();
+                let has_base = forms.iter().any(|f| f.form_type.as_str() == "base");
                 let mut answer = AnswerSnapshot {
+                    custom_word: None,
+                    wordlist_fallback: false,
                     choice: None,
                     answers: vec![],
                     keys: vec![],
                     normalization_version: ANSWER_NORMALIZATION_VERSION,
                 };
                 let mut form_ids = vec![];
-                for form in &pos.forms {
-                    if form.form_type.as_str() != "base"
-                        || !allowed_form_senses(pos, &source.content.meanings, form.id)
-                            .any(|s| s.id == sense.id)
-                    {
-                        continue;
-                    }
+                for form in forms
+                    .into_iter()
+                    .filter(|f| (all_content && !has_base) || f.form_type.as_str() == "base")
+                {
                     let spelling = match &form.regional_variants {
                         WordRegionalVariantsV3::Common { common } => &common.spelling,
                         WordRegionalVariantsV3::UkUs { uk, us } => {
@@ -186,21 +264,27 @@ pub fn build_candidates(
                     pool.exclusions.no_base_form += 1;
                     continue;
                 }
-                if answer.keys.iter().any(|key| leaks(text, key)) {
+                let contains_answer = answer.keys.iter().any(|key| leaks(text, key));
+                if contains_answer && !all_content {
                     pool.exclusions.answer_in_prompt += 1;
                     continue;
                 }
+                answer.wordlist_fallback = sense.depends_on_context
+                    || standard_definition.is_none()
+                    || !has_base
+                    || contains_answer;
                 pool.candidates.push(Candidate {
+                    custom_item_id: None,
                     source_wordlist_id: source.wordlist_id,
                     source_revision: source.revision,
                     source_membership_id: source.membership_id,
                     source_public_generation: source.public_generation,
-                    entry_id: source.entry_id,
-                    entry_archive_generation: source.archive_generation,
-                    publication_id: source.publication_id,
-                    pos_id: pos.pos_id,
-                    sense_id: sense.id,
-                    definition_id: *id,
+                    entry_id: Some(source.entry_id),
+                    entry_archive_generation: Some(source.archive_generation),
+                    publication_id: Some(source.publication_id),
+                    pos_id: Some(pos.pos_id),
+                    sense_id: Some(sense.id),
+                    definition_id: Some(definition_id),
                     form_ids,
                     unit_key,
                     prompt: LearningPrompt {
@@ -214,6 +298,43 @@ pub fn build_candidates(
     }
     Ok(pool)
 }
+
+pub fn custom_candidate(
+    source: &super::repository::CustomSource,
+    revision: i64,
+    generation: Option<i64>,
+) -> Option<Candidate> {
+    let word = &source.custom_word.0;
+    let (answer, key) = normalize_answer_v1(&display_v1(&word.word))?;
+    Some(Candidate {
+        custom_item_id: Some(source.item_id),
+        source_wordlist_id: source.wordlist_id,
+        source_revision: revision,
+        source_membership_id: source.learning_membership_id,
+        source_public_generation: generation,
+        entry_id: None,
+        entry_archive_generation: None,
+        publication_id: None,
+        pos_id: None,
+        sense_id: None,
+        definition_id: None,
+        form_ids: vec![],
+        unit_key: format!("custom:{}:{}", source.wordlist_id, source.item_id),
+        prompt: LearningPrompt {
+            definition: word.definition.clone(),
+            part_of_speech: String::new(),
+        },
+        answer: AnswerSnapshot {
+            custom_word: Some(word.clone()),
+            wordlist_fallback: true,
+            choice: None,
+            answers: vec![answer],
+            keys: vec![key],
+            normalization_version: ANSWER_NORMALIZATION_VERSION,
+        },
+    })
+}
+
 fn normalize_answer_v1(value: &str) -> Option<(String, String)> {
     if value.chars().any(char::is_control) {
         return None;
@@ -269,6 +390,8 @@ mod tests {
         assert_eq!(business_window(before).0.to_string(), "2026-10-07");
         assert_eq!(business_window(after).0.to_string(), "2026-10-08");
         let snapshot = AnswerSnapshot {
+            custom_word: None,
+            wordlist_fallback: false,
             choice: None,
             answers: vec!["don't".into()],
             keys: vec!["don't".into()],
@@ -284,6 +407,8 @@ mod tests {
             ("ＣＥＮＴＥＲ", "center"),
         ] {
             let historical = AnswerSnapshot {
+                custom_word: None,
+                wordlist_fallback: false,
                 choice: None,
                 answers: vec![expected_key.into()],
                 keys: vec![expected_key.into()],

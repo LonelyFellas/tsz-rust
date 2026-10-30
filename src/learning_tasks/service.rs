@@ -73,6 +73,23 @@ pub(super) async fn pool_for_type(
     ids: &[Uuid],
     choice: bool,
 ) -> Result<(CandidatePool, i64, LearningContext), AppError> {
+    pool_for_policy(tx, auth, ids, choice, false).await
+}
+pub(super) async fn pool_for_plan(
+    tx: &mut Tx<'_>,
+    auth: &AuthUser,
+    ids: &[Uuid],
+    choice: bool,
+) -> Result<(CandidatePool, i64, LearningContext), AppError> {
+    pool_for_policy(tx, auth, ids, choice, true).await
+}
+async fn pool_for_policy(
+    tx: &mut Tx<'_>,
+    auth: &AuthUser,
+    ids: &[Uuid],
+    choice: bool,
+    wordlist: bool,
+) -> Result<(CandidatePool, i64, LearningContext), AppError> {
     let context = learner(tx, auth).await?;
     let access = sources(tx, auth, ids).await?;
     if access.lists.len() != ids.len() {
@@ -82,21 +99,60 @@ pub(super) async fn pool_for_type(
     if entries.len() > 1000 {
         return Err(invalid("来源超过 1000 个词条，请拆分任务"));
     }
-    let mut candidates = if choice {
-        crate::question_bank::learning::build_pool(tx, &access.learning_sources()?, &context)
-            .await?
-    } else {
-        build_candidates(&access.learning_sources()?, &context)?
-    };
-    candidates.exclusions.unavailable_entries = entries
-        .iter()
-        .filter(|e| !access.entries.contains_key(e))
-        .count() as i64;
+    let candidates = candidates_for_sources(tx, &access, &context, choice, wordlist).await?;
     if candidates.candidates.len() > 2000 {
         return Err(invalid("候选超过 2000 题，请拆分任务"));
     }
     Ok((candidates, entries.len() as i64, context))
 }
+pub(super) async fn candidates_for_sources(
+    tx: &mut Tx<'_>,
+    access: &SourceAccess,
+    context: &LearningContext,
+    choice: bool,
+    wordlist: bool,
+) -> Result<CandidatePool, AppError> {
+    let entries: HashSet<_> = access.ordered.iter().map(|(_, e)| e).collect();
+    let mut candidates = if choice {
+        crate::question_bank::learning::build_pool(tx, &access.learning_sources()?, context).await?
+    } else if wordlist {
+        build_wordlist_candidates(&access.learning_sources()?, context)?
+    } else {
+        build_candidates(&access.learning_sources()?, context)?
+    };
+    candidates.exclusions.unavailable_entries = entries
+        .iter()
+        .filter(|e| !access.entries.contains_key(e))
+        .count() as i64;
+    if wordlist && choice {
+        let mut spelling = build_wordlist_candidates(&access.learning_sources()?, context)?;
+        spelling.candidates.retain(|candidate| {
+            !candidates
+                .candidates
+                .iter()
+                .any(|c| c.unit_key == candidate.unit_key)
+        });
+        candidates.candidates.extend(spelling.candidates);
+        candidates.exclusions = spelling.exclusions;
+        candidates.exclusions.unavailable_entries = entries
+            .iter()
+            .filter(|e| !access.entries.contains_key(e))
+            .count() as i64;
+    }
+    if wordlist {
+        for source in &access.custom {
+            if let Some((revision, generation)) = access.lists.get(&source.wordlist_id) {
+                if let Some(candidate) = custom_candidate(source, *revision, *generation) {
+                    candidates.candidates.push(candidate);
+                } else {
+                    candidates.exclusions.no_base_form += 1;
+                }
+            }
+        }
+    }
+    Ok(candidates)
+}
+
 pub async fn preview(
     pool: &PgPool,
     auth: &AuthUser,
@@ -536,7 +592,7 @@ pub async fn answer(
     let (normalized, correct) =
         if row.practice_mode.is_some() && input.answer == super::mastery::UNKNOWN {
             (input.answer.clone(), false)
-        } else if row.question_type == crate::question_bank::learning::CHOICE {
+        } else if snapshot.choice.is_some() {
             crate::question_bank::learning::grade(&snapshot, &input.answer)?
         } else {
             grade_spelling(&snapshot, &input.answer)?
@@ -547,7 +603,11 @@ pub async fn answer(
         || t.state != LearningTaskState::Active
         || !access.available(q)
         || row.grading_version
-            != if row.question_type == crate::question_bank::learning::CHOICE {
+            != if row.generation_version == WORDLIST_GENERATION_VERSION
+                && row.question_type == crate::question_bank::learning::CHOICE
+            {
+                WORDLIST_GRADING_VERSION
+            } else if row.question_type == crate::question_bank::learning::CHOICE {
                 crate::question_bank::learning::GRADING
             } else {
                 GRADING_VERSION
@@ -566,7 +626,7 @@ pub async fn answer(
     }
     let at = now(&mut tx).await?;
     let answer_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO learning_answers(id,run_id,question_id,request_key,request_hash,submitted_answer,normalized_answer,is_correct,accepted_at,grading_version,cycle_unit_id,is_repeat) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)").bind(answer_id).bind(id).bind(q.id).bind(input.idempotency_key).bind(h).bind(&input.answer).bind(normalized).bind(correct).bind(at).bind(&row.grading_version).bind(q.cycle_unit_id).bind(q.practice_kind!="new").execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO learning_answers(id,run_id,question_id,request_key,request_hash,submitted_answer,normalized_answer,is_correct,accepted_at,grading_version,cycle_unit_id,is_repeat) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)").bind(answer_id).bind(id).bind(q.id).bind(input.idempotency_key).bind(h).bind(&input.answer).bind(normalized).bind(correct).bind(at).bind(if snapshot.choice.is_some() {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(q.cycle_unit_id).bind(q.practice_kind!="new").execute(&mut *tx).await.map_err(AppError::internal)?;
     super::plans::cover(&mut tx, q.cycle_unit_id, answer_id).await?;
     let mut target_count = row.target_count;
     if row.practice_mode.is_some() {

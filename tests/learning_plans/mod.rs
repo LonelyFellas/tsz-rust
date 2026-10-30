@@ -3,6 +3,279 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tsz_rust::{auth::extract::AuthUser, state::AppState};
 use uuid::Uuid;
+#[sqlx::test]
+async fn mixed_custom_questions_are_included_in_platform_archive_impact(pool: PgPool) {
+    use crate::wordlists_support::{admin, admin_call};
+    let (state, auth, list) = fixture(&pool, 1).await;
+    let state = state
+        .with_smart_lexicon_v3_flags_for_test(tsz_rust::config::SmartLexiconV3Flags::all_enabled());
+    let entry: Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(list)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let item = Uuid::now_v7();
+    let content = json!({"word":"starlight","definition":"星光"});
+    sqlx::query(
+        "INSERT INTO wordlist_items(wordlist_id,item_id,custom_word,position) VALUES($1,$2,$3,1)",
+    )
+    .bind(list)
+    .bind(item)
+    .bind(&content)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let membership: Uuid = sqlx::query_scalar(
+        "SELECT learning_membership_id FROM wordlist_items WHERE wordlist_id=$1 AND item_id=$2",
+    )
+    .bind(list)
+    .bind(item)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (plan, _) = create_plan(&state, &auth, list, None).await;
+    let run = open(&state, &auth, &plan).await;
+    let page = questions(&state, &auth, &run).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["content_available"] == true)
+    );
+    let actor = admin(&pool).await;
+    let path = "/api/v1/admin/lexicon/entries/archive-impact";
+    let body = json!({"entries":[{"id":entry,"base_revision":1,"base_lifecycle_revision":1}]});
+    let impact = admin_call(&state, actor, "POST", path, body.clone()).await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(impact.1, json!({"wordlist_count":1,"active_run_count":1}));
+    for (current_item, current_membership, current_content, expected_count) in [
+        (Uuid::now_v7(), membership, content.clone(), 0),
+        (item, Uuid::now_v7(), content.clone(), 0),
+        (
+            item,
+            membership,
+            json!({"word":"moonlight","definition":"月光"}),
+            0,
+        ),
+        (item, membership, content.clone(), 1),
+    ] {
+        sqlx::query("DELETE FROM wordlist_items WHERE wordlist_id=$1 AND entry_id IS NULL")
+            .bind(list)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO wordlist_items(wordlist_id,item_id,learning_membership_id,custom_word,position) VALUES($1,$2,$3,$4,1)")
+            .bind(list).bind(current_item).bind(current_membership).bind(current_content).execute(&pool).await.unwrap();
+        let impact = admin_call(&state, actor, "POST", path, body.clone()).await;
+        assert_eq!(impact.0, 200, "{}", impact.1);
+        assert_eq!(impact.1["active_run_count"], expected_count);
+    }
+}
+#[sqlx::test]
+async fn saved_custom_whitespace_does_not_block_other_learning_sources(pool: PgPool) {
+    let (state, auth, original) = fixture(&pool, 1).await;
+    let entry: Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(original)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let words = [
+        ("  starlight\t\r\n", "星光"),
+        ("ice\tcream", "冰淇淋"),
+        ("\u{0001}", "不可拼写的控制字符"),
+    ];
+    let mut items = vec![json!({"entry_id":entry,"private_note":""})];
+    items.extend(words.iter().map(|(word, definition)| json!({"item_id":Uuid::now_v7(),"custom_word":{"word":word,"definition":definition},"private_note":""})));
+    let created = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/wordlists",
+        json!({"idempotency_key":Uuid::now_v7(),"name":"粘贴词面回归","items":items}),
+    )
+    .await;
+    assert_eq!(created.0, 200, "{}", created.1);
+    let list: Uuid = created.1["id"].as_str().unwrap().parse().unwrap();
+    let saved: Vec<String> = sqlx::query_scalar("SELECT custom_word->>'word' FROM wordlist_items WHERE wordlist_id=$1 AND custom_word IS NOT NULL ORDER BY position")
+        .bind(list).fetch_all(&pool).await.unwrap();
+    assert_eq!(saved, words.map(|(word, _)| word.to_owned()));
+    let preview = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        preview_body(list, None),
+    )
+    .await;
+    assert_eq!(preview.0, 200, "{}", preview.1);
+    assert_eq!(preview.1["eligible_count"], 3);
+    assert_eq!(preview.1["exclusions"]["no_base_form"], 1);
+    let (plan, _) = create_plan(&state, &auth, list, None).await;
+    let run = open(&state, &auth, &plan).await;
+    let page = questions(&state, &auth, &run).await;
+    for q in page["items"].as_array().unwrap() {
+        let expected = match q["prompt"]["definition"].as_str().unwrap() {
+            "星光" => "starlight",
+            "冰淇淋" => "ice cream",
+            _ => "apple",
+        };
+        let answer = call(
+            &state,
+            &auth,
+            "POST",
+            &answer_path(&run),
+            answer_body(q, expected),
+        )
+        .await;
+        assert_eq!(answer.0, 200, "{}", answer.1);
+        assert_eq!(answer.1["is_correct"], true);
+        let accepted = &answer.1["question"]["feedback"]["accepted_answers"];
+        if expected == "apple" {
+            assert!(accepted.as_array().unwrap().contains(&json!(expected)));
+        } else {
+            assert_eq!(accepted, &json!([expected]));
+        }
+    }
+    let persisted = get(&state, &auth, &plan).await;
+    assert_eq!(persisted["current_cycle"]["covered_count"], 3);
+    assert_eq!(persisted["current_run"]["state"], "completed");
+}
+#[sqlx::test]
+async fn private_custom_wordlist_can_complete_a_learning_plan(pool: PgPool) {
+    let (state, auth, list) = setup(&pool).await;
+    sqlx::query("DELETE FROM wordlist_items WHERE wordlist_id=$1")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO wordlist_items(wordlist_id,item_id,custom_word,position) VALUES($1,$2,$3,0)",
+    )
+    .bind(list)
+    .bind(Uuid::now_v7())
+    .bind(json!({"word":"starlight","definition":"星光"}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (plan, _) = create_plan(&state, &auth, list, None).await;
+    assert_eq!(plan["current_cycle"]["total_count"], 1);
+    let run = open(&state, &auth, &plan).await;
+    let page = questions(&state, &auth, &run).await;
+    let question = &page["items"][0];
+    assert_eq!(question["prompt"]["definition"], "星光");
+    assert_eq!(question["content_available"], true);
+    assert!(question["feedback"].is_null());
+    assert!(!question.to_string().contains("starlight"));
+    let (_, other) = crate::account_deletion_support::setup_bound(&pool).await;
+    sqlx::query(
+        "INSERT INTO student_profiles(user_id,cefr_level,english_variant) VALUES($1,'A1','BrE')",
+    )
+    .bind(other.subject)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let denied = call(
+        &state,
+        &other,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        preview_body(list, None),
+    )
+    .await;
+    assert_eq!(denied.0, 409);
+    assert_eq!(denied.1["code"], "learning_run_unavailable");
+    assert!(!denied.1.to_string().contains("starlight"));
+    let answer = call(
+        &state,
+        &auth,
+        "POST",
+        &answer_path(&run),
+        answer_body(question, "STARLIGHT"),
+    )
+    .await;
+    assert_eq!(answer.0, 200, "{}", answer.1);
+    assert_eq!(answer.1["question"]["feedback"]["is_correct"], true);
+    let persisted = get(&state, &auth, &plan).await;
+    assert_eq!(persisted["current_cycle"]["covered_count"], 1);
+    assert_eq!(persisted["current_run"]["state"], "completed");
+}
+#[sqlx::test]
+async fn custom_content_edits_hide_old_questions_and_block_stale_answers(pool: PgPool) {
+    let (state, auth, list) = setup(&pool).await;
+    let item = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO wordlist_items(wordlist_id,item_id,custom_word,position) VALUES($1,$2,$3,1)",
+    )
+    .bind(list)
+    .bind(item)
+    .bind(json!({"word":"starlight","definition":"星光"}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (plan, _) = create_plan(&state, &auth, list, None).await;
+    assert_eq!(plan["current_cycle"]["total_count"], 3);
+    let run = open(&state, &auth, &plan).await;
+    let before = questions(&state, &auth, &run).await;
+    let q = before["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["prompt"]["definition"] == "星光")
+        .unwrap();
+    sqlx::query("UPDATE wordlist_items SET custom_word=$2 WHERE item_id=$1")
+        .bind(item)
+        .bind(json!({"word":"moonlight","definition":"月光"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let after = questions(&state, &auth, &run).await;
+    let hidden = after["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == q["id"])
+        .unwrap();
+    assert_eq!(hidden["content_available"], false);
+    assert!(hidden["prompt"].is_null());
+    let answer = call(
+        &state,
+        &auth,
+        "POST",
+        &answer_path(&run),
+        answer_body(q, "starlight"),
+    )
+    .await;
+    assert_eq!(answer.0, 409);
+    assert_eq!(
+        get(&state, &auth, &plan).await["current_cycle"]["blocked_count"],
+        1
+    );
+}
+#[sqlx::test]
+async fn level_and_context_do_not_exclude_private_wordlist_content(pool: PgPool) {
+    let (state, auth, list) = fixture(&pool, 1).await;
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=jsonb_set(jsonb_set(snapshot,'{meanings,pos,0,senses,0,depends_on_context}','true'),'{meanings,pos,0,senses,0,definitions,0,level}','\"C2\"') WHERE id=(SELECT e.current_publication_id FROM lexicon.entries e JOIN wordlist_items i ON i.entry_id=e.id WHERE i.wordlist_id=$1)")
+        .bind(list).execute(&pool).await.unwrap();
+    let (plan, _) = create_plan(&state, &auth, list, None).await;
+    assert_eq!(plan["current_cycle"]["total_count"], 1);
+    let run = open(&state, &auth, &plan).await;
+    let q = questions(&state, &auth, &run).await;
+    assert_eq!(q["items"][0]["content_available"], true);
+    let answer = call(
+        &state,
+        &auth,
+        "POST",
+        &answer_path(&run),
+        answer_body(&q["items"][0], "apple"),
+    )
+    .await;
+    assert_eq!(answer.0, 200, "{}", answer.1);
+    assert_eq!(answer.1["is_correct"], true);
+}
 async fn fixture(pool: &PgPool, count: usize) -> (AppState, AuthUser, Uuid) {
     let (state, auth, list) = setup(pool).await;
     let entry: Uuid =

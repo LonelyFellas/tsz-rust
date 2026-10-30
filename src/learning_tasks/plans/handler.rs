@@ -36,6 +36,10 @@ pub async fn preview(
     ApiJson(input): ApiJson<PreviewLearningPlan>,
 ) -> Result<Json<LearningPlanPreview>, AppError> {
     crate::question_bank::learning::require_capability(&headers, input.question_type.as_deref())?;
+    crate::question_bank::learning::require_wordlist_capability(
+        &headers,
+        input.question_type.as_deref(),
+    )?;
     super::super::mastery::require(&headers, input.practice_mode.as_deref())?;
     Ok(Json(super::preview(&state.pool, &auth, input).await?))
 }
@@ -47,6 +51,10 @@ pub async fn create(
     ApiJson(input): ApiJson<CreateLearningPlan>,
 ) -> Result<Json<LearningPlan>, AppError> {
     crate::question_bank::learning::require_capability(&headers, input.question_type.as_deref())?;
+    crate::question_bank::learning::require_wordlist_capability(
+        &headers,
+        input.question_type.as_deref(),
+    )?;
     super::super::mastery::require(&headers, input.practice_mode.as_deref())?;
     Ok(Json(super::create(&state.pool, &auth, input).await?))
 }

@@ -53,9 +53,9 @@ impl Memory {
 #[derive(Serialize)]
 struct ContentIdentity<'a> {
     version: i16,
-    entry_id: Uuid,
-    pos_id: Uuid,
-    sense_id: Uuid,
+    entry_id: Option<Uuid>,
+    pos_id: Option<Uuid>,
+    sense_id: Option<Uuid>,
     skill: &'static str,
     answer_profile: &'a str,
     prompt: &'a LearningPrompt,
@@ -95,7 +95,10 @@ fn current_signature(
     context: &LearningContext,
     access: &SourceAccess,
 ) -> Result<Option<Vec<u8>>, AppError> {
-    let Some(publication) = access.entries.get(&question.entry_id) else {
+    let Some(entry_id) = question.entry_id else {
+        return Ok(None);
+    };
+    let Some(publication) = access.entries.get(&entry_id) else {
         return Ok(None);
     };
     let source = LearningSource {
@@ -103,7 +106,7 @@ fn current_signature(
         revision: 0,
         membership_id: question.source_membership_id,
         public_generation: question.source_public_generation,
-        entry_id: question.entry_id,
+        entry_id,
         archive_generation: publication.archive_generation,
         publication_id: publication.publication_id,
         content: publication.content_v3()?,
@@ -156,6 +159,15 @@ pub(crate) async fn record_answer(
     answer_id: Uuid,
     access: &SourceAccess,
 ) -> Result<(), AppError> {
+    if question.custom_item_id.is_some()
+        || question
+            .answer_snapshot
+            .get("wordlist_fallback")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return Ok(());
+    }
     let enabled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM learning_memory_enrollments WHERE user_id=$1 AND enabled AND enabled_at<=clock_timestamp())")
         .bind(user).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
     if !enabled {
@@ -199,7 +211,11 @@ pub(crate) async fn record_answer(
         &context,
         &prompt,
         &answer,
-        &run.generation_version,
+        if run.generation_version == crate::learning_tasks::question::WORDLIST_GENERATION_VERSION {
+            GENERATION_VERSION
+        } else {
+            &run.generation_version
+        },
         &run.grading_version,
     )?;
     let current_signature = current_signature(question, &context, access)?;
@@ -272,10 +288,10 @@ pub(crate) async fn record_answer(
             .bind(schedule.last_feedback_at).bind(at).execute(&mut **tx).await.map_err(AppError::internal)?;
     }
     // A deleted wordlist's in-flight grace is not permission for a new review source.
-    if access
-        .members
-        .get(&(question.source_wordlist_id, question.entry_id))
-        == Some(&question.source_membership_id)
+    if access.members.get(&(
+        question.source_wordlist_id,
+        question.entry_id.expect("platform memory"),
+    )) == Some(&question.source_membership_id)
         && !access.grace.contains_key(&question.source_wordlist_id)
     {
         sqlx::query("INSERT INTO learning_memory_sources(memory_id,user_id,wordlist_id,membership_id,public_generation,entry_archive_generation,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(memory_id,wordlist_id) DO UPDATE SET membership_id=EXCLUDED.membership_id,public_generation=EXCLUDED.public_generation,entry_archive_generation=EXCLUDED.entry_archive_generation,observed_at=EXCLUDED.observed_at")

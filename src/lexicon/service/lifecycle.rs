@@ -85,18 +85,22 @@ impl LexiconService {
                          SELECT 1 FROM wordlists w
                          LEFT JOIN users u ON u.id=w.owner_user_id
                          JOIN wordlist_items i ON i.wordlist_id=w.id
-                             AND i.entry_id=source_question.entry_id
+                             AND ((source_question.custom_item_id IS NULL
+                                   AND i.entry_id=source_question.entry_id)
+                               OR (i.item_id=source_question.custom_item_id AND i.entry_id IS NULL
+                                   AND i.custom_word=(source_question.answer_snapshot->'custom_word')))
                              AND i.learning_membership_id=source_question.source_membership_id
-                         JOIN lexicon.entries e ON e.id=i.entry_id
-                         JOIN lexicon.entry_publications p ON p.id=e.current_publication_id
+                         LEFT JOIN lexicon.entries e ON e.id=i.entry_id
+                         LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id
                              AND p.entry_id=e.id AND p.content_schema_version=3
                          WHERE w.id=source_question.source_wordlist_id
                            AND w.deleted_at IS NULL AND {VISIBLE_OWNER}
                            AND ((w.owner_user_id=r.user_id AND source_question.source_public_generation IS NULL)
                              OR (w.owner_user_id IS DISTINCT FROM r.user_id AND w.state='published'
                                  AND source_question.source_public_generation=w.learning_public_generation))
-                           AND e.archived_at IS NULL
-                           AND source_question.entry_archive_generation=e.wordlist_archive_generation
+                           AND (source_question.custom_item_id IS NOT NULL
+                             OR (e.archived_at IS NULL AND p.id IS NOT NULL
+                                 AND source_question.entry_archive_generation=e.wordlist_archive_generation))
                      )
                )",
         )))

@@ -37,6 +37,21 @@ pub fn capable(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.split(',').any(|x| x.trim() == "choice-v1"))
 }
+pub fn wordlist_capable(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-tsz-learning-capabilities")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|x| x.trim() == "wordlist-spelling-v1"))
+}
+pub fn require_wordlist_capability(
+    headers: &HeaderMap,
+    kind: Option<&str>,
+) -> Result<(), AppError> {
+    if kind == Some(CHOICE) && !wordlist_capable(headers) {
+        return Err(super::conflict("此客户端不支持拼写回退，请更新后继续"));
+    }
+    Ok(())
+}
 pub fn require_capability(
     headers: &HeaderMap,
     question_type: Option<&str>,
@@ -58,7 +73,8 @@ pub async fn capability_guard(
 ) -> Result<Response, AppError> {
     let choice_capable = capable(request.headers());
     let mastery_capable = crate::learning_tasks::mastery::capable(request.headers());
-    if choice_capable && mastery_capable {
+    let spelling_capable = wordlist_capable(request.headers());
+    if choice_capable && mastery_capable && spelling_capable {
         return Ok(run_with_vary(request, next).await);
     }
     let path = request.uri().path();
@@ -72,25 +88,32 @@ pub async fn capability_guard(
         return Ok(run_with_vary(request, next).await);
     }
     let is_run = resource == "learning-runs";
+    let creates_cycle = path.contains("/cycles");
     let (mut request_parts, body) = request.into_parts();
     let auth = AuthUser::from_request_parts(&mut request_parts, &state).await?;
     let sql = if is_run {
-        "SELECT r.question_type,t.generation_policy FROM learning_runs r JOIN learning_tasks t ON t.id=r.task_id WHERE r.id=$1 AND r.user_id=$2"
+        "SELECT r.question_type,t.generation_policy,r.generation_version='wordlist_all_v1' FROM learning_runs r JOIN learning_tasks t ON t.id=r.task_id WHERE r.id=$1 AND r.user_id=$2"
     } else {
-        "SELECT question_type,generation_policy FROM learning_tasks WHERE id=$1 AND user_id=$2"
+        "SELECT t.question_type,t.generation_policy,EXISTS(SELECT 1 FROM learning_cycles c WHERE c.task_id=t.id AND c.generation_version='wordlist_all_v1') FROM learning_tasks t WHERE t.id=$1 AND t.user_id=$2"
     };
-    let kind: Option<(String, String)> = sqlx::query_as(sql)
+    let kind: Option<(String, String, bool)> = sqlx::query_as(sql)
         .bind(id)
         .bind(auth.subject)
         .fetch_optional(&state.pool)
         .await
         .map_err(AppError::internal)?;
-    if kind.as_ref().is_some_and(|(kind, _)| kind == CHOICE) && !choice_capable {
-        return Err(super::conflict("此客户端不支持单选题，请更新后继续"));
+    if kind.as_ref().is_some_and(|(kind, _, mixed)| {
+        kind == CHOICE
+            && (!choice_capable
+                || ((*mixed
+                    || (request_parts.method == axum::http::Method::POST && creates_cycle))
+                    && !spelling_capable))
+    }) {
+        return Err(super::conflict("此客户端不支持当前练习题型，请更新后继续"));
     }
     if kind
         .as_ref()
-        .is_some_and(|(_, mode)| mode == crate::learning_tasks::mastery::MODE)
+        .is_some_and(|(_, mode, _)| mode == crate::learning_tasks::mastery::MODE)
         && !mastery_capable
     {
         return Err(super::conflict("请更新客户端后使用按掌握情况练习"));
@@ -148,10 +171,10 @@ pub async fn build_pool(
     let mut eligible = Vec::new();
     for mut candidate in pool.candidates {
         let Some(target) = targets.iter().find(|t| {
-            t.source.entry_id == candidate.entry_id
-                && t.source.publication_id == candidate.publication_id
-                && t.source.sense_id == candidate.sense_id
-                && t.source.definition_id == candidate.definition_id
+            Some(t.source.entry_id) == candidate.entry_id
+                && Some(t.source.publication_id) == candidate.publication_id
+                && Some(t.source.sense_id) == candidate.sense_id
+                && Some(t.source.definition_id) == candidate.definition_id
                 && candidate.form_ids.contains(&t.source.form_id)
         }) else {
             continue;
@@ -192,6 +215,7 @@ pub async fn materialize(
     tx: &mut Tx<'_>,
     units: &[&crate::learning_tasks::repository::QuestionRow],
     settings: &LearningContext,
+    spelling_fallback: bool,
 ) -> Result<(), AppError> {
     let mut parts = Vec::new();
     for unit in units {
@@ -216,10 +240,23 @@ pub async fn materialize(
         };
         let content = algorithm
             .content(tx, &c.content.target, &settings.cefr_level)
-            .await?
-            .ok_or_else(|| {
-                super::conflict("当前词库没有足够可靠且不含已知歧义的干扰项，请检查来源后重试")
-            })?;
+            .await?;
+        let Some(content) = content else {
+            if !spelling_fallback {
+                return Err(super::conflict(
+                    "当前词库没有足够可靠且不含已知歧义的干扰项，请检查来源后重试",
+                ));
+            }
+            answer.choice = None;
+            answer.wordlist_fallback = true;
+            sqlx::query("UPDATE learning_cycle_units SET answer_snapshot=$2 WHERE id=$1")
+                .bind(unit.id)
+                .bind(serde_json::to_value(answer).map_err(AppError::internal)?)
+                .execute(&mut **tx)
+                .await
+                .map_err(AppError::internal)?;
+            continue;
+        };
         source::validate_question(tx, &content).await?;
         c.options = content
             .options

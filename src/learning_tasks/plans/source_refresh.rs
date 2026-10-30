@@ -2,11 +2,28 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
-fn identity(q: &QuestionRow) -> (Uuid, Uuid, Uuid) {
-    (q.entry_id, q.pos_id, q.sense_id)
+// Custom item identity is scoped to its wordlist; platform units use entry/POS/sense.
+type Identity = (
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<(Uuid, Uuid)>,
+);
+fn identity(q: &QuestionRow) -> Identity {
+    (
+        q.entry_id,
+        q.pos_id,
+        q.sense_id,
+        q.custom_item_id.map(|item| (q.source_wordlist_id, item)),
+    )
 }
-fn candidate_identity(c: &Candidate) -> (Uuid, Uuid, Uuid) {
-    (c.entry_id, c.pos_id, c.sense_id)
+fn candidate_identity(c: &Candidate) -> Identity {
+    (
+        c.entry_id,
+        c.pos_id,
+        c.sense_id,
+        c.custom_item_id.map(|item| (c.source_wordlist_id, item)),
+    )
 }
 fn same_content(unit: &Unit, candidate: &Candidate) -> Result<bool, AppError> {
     let old: AnswerSnapshot = serde_json::from_value(unit.question.answer_snapshot.clone())
@@ -44,19 +61,21 @@ pub(super) async fn preview_in(
     let rows = units(tx, c.id).await?;
     let old = summarize(tx, auth, t, &c, &rows, None).await?;
     let by_identity: HashMap<_, _> = rows.iter().map(|u| (identity(&u.question), u)).collect();
-    let mut entries: Vec<_> = rows.iter().map(|u| u.question.entry_id).collect();
+    let mut entries: Vec<_> = rows.iter().filter_map(|u| u.question.entry_id).collect();
     entries.sort();
     entries.dedup();
     // Current access only: an in-flight deletion grace must not enroll new sources.
     let access = sources_for_entries(tx, auth, &t.wordlist_ids, &entries).await?;
     let settings: LearningContext =
         serde_json::from_value(c.settings_snapshot.clone()).map_err(AppError::internal)?;
-    let sources = access.learning_sources()?;
-    let pool = if t.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE) {
-        crate::question_bank::learning::build_pool(tx, &sources, &settings).await?
-    } else {
-        build_candidates(&sources, &settings)?
-    };
+    let pool = service::candidates_for_sources(
+        tx,
+        &access,
+        &settings,
+        t.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE),
+        true,
+    )
+    .await?;
     let candidates: Vec<_> = pool
         .candidates
         .into_iter()
@@ -90,11 +109,14 @@ pub(super) async fn preview_in(
             preview: LearningPlanPreview {
                 entry_count: candidates
                     .iter()
-                    .map(|c| c.entry_id)
+                    .filter_map(|c| c.entry_id)
                     .collect::<HashSet<_>>()
                     .len() as i64,
                 eligible_count: count,
-                custom_word_count: 0,
+                custom_word_count: candidates
+                    .iter()
+                    .filter(|c| c.custom_item_id.is_some())
+                    .count() as i64,
                 exclusions: pool.exclusions,
                 settings,
                 estimated_learning_days: None,
@@ -145,6 +167,10 @@ pub(super) async fn apply(
             .bind(keep).bind(day).execute(&mut **tx).await.map_err(AppError::internal)?;
         refreshed.push(unit.question.id);
     }
+    // Refreshed units use the new projection; keep old runs/answers on their original versions.
+    sqlx::query("UPDATE learning_cycles c SET generation_version=$2,grading_version=CASE WHEN t.question_type='choice_zh_to_en' THEN $3 ELSE $4 END FROM learning_tasks t WHERE c.id=$1 AND t.id=c.task_id")
+        .bind(c.id).bind(WORDLIST_GENERATION_VERSION).bind(WORDLIST_GRADING_VERSION).bind(GRADING_VERSION)
+        .execute(&mut **tx).await.map_err(AppError::internal)?;
     // Existing questions/answers remain untouched; their original source and grading
     // snapshot must never be rewritten by a renewed access grant.
     sqlx::query("UPDATE learning_runs SET state='cancelled' WHERE cycle_id=$1 AND state='active'")

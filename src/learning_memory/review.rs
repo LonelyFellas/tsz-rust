@@ -41,6 +41,7 @@ struct ItemRow {
 impl ItemRow {
     fn question(&self) -> QuestionRow {
         QuestionRow {
+            custom_item_id: None,
             practice_kind: "new".into(),
             cycle_unit_id: None,
             id: self.id,
@@ -48,10 +49,10 @@ impl ItemRow {
             source_wordlist_id: self.source_wordlist_id,
             source_membership_id: self.source_membership_id,
             source_public_generation: self.source_public_generation,
-            entry_id: self.entry_id,
-            entry_archive_generation: self.entry_archive_generation,
-            pos_id: self.pos_id,
-            sense_id: self.sense_id,
+            entry_id: Some(self.entry_id),
+            entry_archive_generation: Some(self.entry_archive_generation),
+            pos_id: Some(self.pos_id),
+            sense_id: Some(self.sense_id),
             prompt_snapshot: self.prompt_snapshot.clone(),
             answer_snapshot: self.answer_snapshot.clone(),
         }
