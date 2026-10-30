@@ -1,5 +1,40 @@
 use sqlx::PgPool;
 #[sqlx::test]
+async fn wordlist_practice_migration_roundtrip_refuses_custom_fact_loss(pool: PgPool) {
+    let down = include_str!("../migrations/20261030040000_wordlist_practice.down.sql");
+    let up = include_str!("../migrations/20261030040000_wordlist_practice.up.sql");
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    let nullable: i64=sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_name IN ('learning_questions','learning_cycle_units') AND column_name='entry_id' AND is_nullable='YES'").fetch_one(&pool).await.unwrap();
+    assert_eq!(nullable, 2);
+    let user = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,display_name) VALUES($1,$2,'hash','schema')",
+    )
+    .bind(user)
+    .bind(format!("{user}@example.test"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let task = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,create_key,create_hash) VALUES($1,$2,'schema','longterm',ARRAY[$3]::uuid[],$4,'hash')").bind(task).bind(user).bind(uuid::Uuid::now_v7()).bind(uuid::Uuid::now_v7()).execute(&pool).await.unwrap();
+    let cycle = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO learning_cycles(id,task_id,user_id,cycle_number,state,total_count,settings_snapshot,generation_version,grading_version,earliest_day) VALUES($1,$2,$3,1,'active',1,'{}','wordlist_all_v1','spelling_exact_v1',CURRENT_DATE)").bind(cycle).bind(task).bind(user).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO learning_cycle_units(id,cycle_id,position,unit_key,source_wordlist_id,source_revision,source_membership_id,custom_item_id,form_ids,prompt_snapshot,answer_snapshot,fingerprint) VALUES($1,$2,0,'custom',$3,1,$4,$5,'{}','{}','{}','hash')").bind(uuid::Uuid::now_v7()).bind(cycle).bind(uuid::Uuid::now_v7()).bind(uuid::Uuid::now_v7()).bind(uuid::Uuid::now_v7()).execute(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    assert!(sqlx::raw_sql(down).execute(&mut *tx).await.is_err());
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM learning_cycle_units WHERE custom_item_id IS NOT NULL"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+}
+#[sqlx::test]
 async fn empty_down_up_roundtrip(pool: PgPool) {
     sqlx::raw_sql(include_str!(
         "../migrations/20261018130000_learning_coverage.down.sql"

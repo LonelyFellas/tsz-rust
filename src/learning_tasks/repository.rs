@@ -161,16 +161,17 @@ pub async fn run(tx: &mut Tx<'_>, auth: &AuthUser, id: Uuid) -> Result<RunRow, A
 }
 #[derive(sqlx::FromRow)]
 pub struct QuestionRow {
+    pub custom_item_id: Option<Uuid>,
     pub cycle_unit_id: Option<Uuid>,
     pub id: Uuid,
     pub position: i32,
     pub source_wordlist_id: Uuid,
     pub source_membership_id: Uuid,
     pub source_public_generation: Option<i64>,
-    pub entry_id: Uuid,
-    pub entry_archive_generation: i64,
-    pub pos_id: Uuid,
-    pub sense_id: Uuid,
+    pub entry_id: Option<Uuid>,
+    pub entry_archive_generation: Option<i64>,
+    pub pos_id: Option<Uuid>,
+    pub sense_id: Option<Uuid>,
     pub prompt_snapshot: serde_json::Value,
     pub answer_snapshot: serde_json::Value,
 }
@@ -197,7 +198,15 @@ pub async fn answers(tx: &mut Tx<'_>, id: Uuid) -> Result<HashMap<Uuid, AnswerRo
         .map_err(AppError::internal)?;
     Ok(rows.into_iter().map(|r| (r.question_id, r)).collect())
 }
+#[derive(sqlx::FromRow)]
+pub struct CustomSource {
+    pub wordlist_id: Uuid,
+    pub item_id: Uuid,
+    pub learning_membership_id: Uuid,
+    pub custom_word: sqlx::types::Json<crate::wordlists::dto::CustomWord>,
+}
 pub struct SourceAccess {
+    pub custom: Vec<CustomSource>,
     pub choice_fingerprints: std::collections::HashSet<String>,
     pub lists: HashMap<Uuid, (i64, Option<i64>)>,
     pub(crate) entries: HashMap<Uuid, CurrentPublication>,
@@ -224,7 +233,7 @@ pub async fn sources_for_questions(
     questions: &[QuestionRow],
 ) -> Result<SourceAccess, AppError> {
     let refs: Vec<_> = questions.iter().collect();
-    let entries: Vec<_> = questions.iter().map(|q| q.entry_id).collect();
+    let entries: Vec<_> = questions.iter().filter_map(|q| q.entry_id).collect();
     let mut access = source_access(tx, auth, ids, Some(&entries), Some(run)).await?;
     add_choice_sources(tx, &mut access, &refs).await?;
     Ok(access)
@@ -235,7 +244,7 @@ pub async fn sources_for_units(
     ids: &[Uuid],
     questions: &[&QuestionRow],
 ) -> Result<SourceAccess, AppError> {
-    let entries: Vec<_> = questions.iter().map(|q| q.entry_id).collect();
+    let entries: Vec<_> = questions.iter().filter_map(|q| q.entry_id).collect();
     let mut access = source_access(tx, auth, ids, Some(&entries), None).await?;
     add_choice_sources(tx, &mut access, questions).await?;
     Ok(access)
@@ -370,7 +379,10 @@ async fn source_access(
     grace.retain(|_, generations| !generations.is_empty());
     let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w LEFT JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND w.deleted_at IS NULL AND (w.owner_admin_id IS NOT NULL OR (u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())))").bind(&visible_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     lists.retain(|id, _| grace.contains_key(id) || visible.contains(id));
+    let custom = sqlx::query_as("SELECT wordlist_id,item_id,learning_membership_id,custom_word FROM wordlist_items WHERE wordlist_id=ANY($1) AND custom_word IS NOT NULL ORDER BY array_position($1,wordlist_id),position")
+        .bind(&visible_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     Ok(SourceAccess {
+        custom,
         choice_fingerprints: Default::default(),
         lists,
         entries,
@@ -381,6 +393,32 @@ async fn source_access(
 }
 impl SourceAccess {
     pub fn available(&self, q: &QuestionRow) -> bool {
+        if let Some(item) = q.custom_item_id {
+            let Ok(snapshot) = serde_json::from_value::<AnswerSnapshot>(q.answer_snapshot.clone())
+            else {
+                return false;
+            };
+            let Some(word) = snapshot.custom_word else {
+                return false;
+            };
+            if let Some(generations) = self.grace.get(&q.source_wordlist_id) {
+                return q
+                    .source_public_generation
+                    .is_none_or(|g| generations.contains_key(&g));
+            }
+            return self
+                .lists
+                .get(&q.source_wordlist_id)
+                .is_some_and(|(_, g)| *g == q.source_public_generation)
+                && self.custom.iter().any(|s| {
+                    s.wordlist_id == q.source_wordlist_id
+                        && s.item_id == item
+                        && s.learning_membership_id == q.source_membership_id
+                        && s.custom_word.word == word.word
+                        && s.custom_word.definition == word.definition
+                });
+        }
+
         if let Some(choice) = q.answer_snapshot.get("choice").filter(|c| !c.is_null()) {
             let Ok(choice) = serde_json::from_value::<crate::question_bank::learning::ChoiceSnapshot>(
                 choice.clone(),
@@ -401,10 +439,10 @@ impl SourceAccess {
                 return false;
             }
         }
-        let entry_available = self
-            .entries
-            .get(&q.entry_id)
-            .is_some_and(|p| p.archive_generation == q.entry_archive_generation);
+        let entry_available = q
+            .entry_id
+            .and_then(|id| self.entries.get(&id))
+            .is_some_and(|p| Some(p.archive_generation) == q.entry_archive_generation);
         if let Some(generations) = self.grace.get(&q.source_wordlist_id) {
             // The wordlist and its membership may already be gone. Frozen question
             // snapshots remain sufficient for the in-flight run, but a borrowed
@@ -417,7 +455,8 @@ impl SourceAccess {
         self.lists
             .get(&q.source_wordlist_id)
             .is_some_and(|(_, generation)| *generation == q.source_public_generation)
-            && self.members.get(&(q.source_wordlist_id, q.entry_id))
+            && q.entry_id
+                .and_then(|e| self.members.get(&(q.source_wordlist_id, e)))
                 == Some(&q.source_membership_id)
             && entry_available
     }

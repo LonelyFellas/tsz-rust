@@ -25,6 +25,8 @@ struct CycleRow {
     state: String,
     total_count: i32,
     settings_snapshot: serde_json::Value,
+    generation_version: String,
+    grading_version: String,
     earliest_day: NaiveDate,
     created_at: DateTime<Utc>,
     completed_at: Option<DateTime<Utc>>,
@@ -106,7 +108,7 @@ async fn preview_in(
     earliest: Option<NaiveDate>,
 ) -> Result<(LearningPlanPreview, Vec<Candidate>), AppError> {
     validate(input)?;
-    let (pool, entry_count, settings) = service::pool_for_type(
+    let (pool, entry_count, settings) = service::pool_for_plan(
         tx,
         auth,
         &input.wordlist_ids,
@@ -132,7 +134,7 @@ async fn preview_in(
             if input.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE) {
                 "所选词表、级别与英美档位没有足够的无释义重叠选项，暂不可出单选题"
             } else {
-                "没有可出题内容，请更换词表；自定义词暂不参与出题"
+                "词表中没有可出题内容，请先添加词条和释义"
             }
             .into(),
         );
@@ -192,10 +194,8 @@ async fn write_cycle(
     candidates: &[Candidate],
 ) -> Result<Uuid, AppError> {
     let id = Uuid::now_v7();
-    let choice = candidates
-        .first()
-        .is_some_and(|c| c.answer.choice.is_some());
-    sqlx::query("INSERT INTO learning_cycles(id,task_id,user_id,cycle_number,state,total_count,settings_snapshot,generation_version,grading_version,after_cycle_id,earliest_day) VALUES($1,$2,$3,$4,'active',$5,$6,$7,$8,$9,$10)").bind(id).bind(task_id).bind(auth.subject).bind(predecessor.map_or(1, |c| c.cycle_number+1)).bind(candidates.len() as i32).bind(serde_json::to_value(&preview.settings).map_err(AppError::internal)?).bind(if choice {"choice_algorithm_v1"} else {GENERATION_VERSION}).bind(if choice {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(predecessor.map(|c|c.id)).bind(earliest).execute(&mut **tx).await.map_err(AppError::internal)?;
+    let choice = candidates.iter().any(|c| c.answer.choice.is_some());
+    sqlx::query("INSERT INTO learning_cycles(id,task_id,user_id,cycle_number,state,total_count,settings_snapshot,generation_version,grading_version,after_cycle_id,earliest_day) VALUES($1,$2,$3,$4,'active',$5,$6,$7,$8,$9,$10)").bind(id).bind(task_id).bind(auth.subject).bind(predecessor.map_or(1, |c| c.cycle_number+1)).bind(candidates.len() as i32).bind(serde_json::to_value(&preview.settings).map_err(AppError::internal)?).bind(WORDLIST_GENERATION_VERSION).bind(if choice {WORDLIST_GRADING_VERSION} else {GRADING_VERSION}).bind(predecessor.map(|c|c.id)).bind(earliest).execute(&mut **tx).await.map_err(AppError::internal)?;
     for (position, c) in candidates.iter().enumerate() {
         let mut answer = c.answer.clone();
         if let Some(choice) = answer.choice.as_mut() {
@@ -204,8 +204,8 @@ async fn write_cycle(
             choice.content.correct_option_id.clear();
             choice.content.explanation.clear();
         }
-        sqlx::query("INSERT INTO learning_cycle_units(id,cycle_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
-   .bind(Uuid::now_v7()).bind(id).bind(position as i32).bind(c.source_wordlist_id).bind(c.source_revision).bind(c.source_membership_id).bind(c.source_public_generation).bind(c.entry_id).bind(c.entry_archive_generation).bind(c.publication_id).bind(c.pos_id).bind(c.sense_id).bind(c.definition_id).bind(&c.form_ids).bind(&c.unit_key).bind(serde_json::to_value(&c.prompt).map_err(AppError::internal)?).bind(serde_json::to_value(&answer).map_err(AppError::internal)?).bind(hash(c)?).execute(&mut **tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO learning_cycle_units(id,cycle_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint,custom_item_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)")
+   .bind(Uuid::now_v7()).bind(id).bind(position as i32).bind(c.source_wordlist_id).bind(c.source_revision).bind(c.source_membership_id).bind(c.source_public_generation).bind(c.entry_id).bind(c.entry_archive_generation).bind(c.publication_id).bind(c.pos_id).bind(c.sense_id).bind(c.definition_id).bind(&c.form_ids).bind(&c.unit_key).bind(serde_json::to_value(&c.prompt).map_err(AppError::internal)?).bind(serde_json::to_value(&answer).map_err(AppError::internal)?).bind(hash(c)?).bind(c.custom_item_id).execute(&mut **tx).await.map_err(AppError::internal)?;
     }
     Ok(id)
 }
@@ -709,14 +709,19 @@ pub async fn start(
                 .collect();
             let settings =
                 serde_json::from_value(c.settings_snapshot.clone()).map_err(AppError::internal)?;
-            crate::question_bank::learning::materialize(&mut tx, &selected_units, &settings)
-                .await?;
+            crate::question_bank::learning::materialize(
+                &mut tx,
+                &selected_units,
+                &settings,
+                c.generation_version == WORDLIST_GENERATION_VERSION,
+            )
+            .await?;
         }
         let run_id = Uuid::now_v7();
         let expires = daily.then(|| t.ends_at.map_or(window_end, |e| e.min(window_end)));
         sqlx::query("INSERT INTO learning_runs(id,task_id,user_id,task_revision,task_type,business_day,window_start,window_end,expires_at,settings_snapshot,seed,target_count,state,generation_version,grading_version,cycle_id,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active',$13,$14,$15,$16)")
-  .bind(run_id).bind(id).bind(auth.subject).bind(t.revision).bind(t.task_type).bind(daily.then_some(day)).bind(daily.then_some(window_start)).bind(daily.then_some(window_end)).bind(expires).bind(&c.settings_snapshot).bind(Uuid::now_v7()).bind(selected.len() as i32).bind(if t.question_type.is_some() {"choice_algorithm_v1"} else {GENERATION_VERSION}).bind(if t.question_type.as_deref()==Some(crate::question_bank::learning::CHOICE) {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(c.id).bind(t.question_type.as_deref().unwrap_or("spelling_zh_to_en")).execute(&mut *tx).await.map_err(AppError::internal)?;
-        sqlx::query("INSERT INTO learning_questions(id,run_id,cycle_id,cycle_unit_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint) SELECT gen_random_uuid(),$1,cycle_id,id,(row_number() OVER(ORDER BY position)-1)::integer,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint FROM learning_cycle_units WHERE id=ANY($2) ORDER BY position").bind(run_id).bind(&selected).execute(&mut *tx).await.map_err(AppError::internal)?;
+  .bind(run_id).bind(id).bind(auth.subject).bind(t.revision).bind(t.task_type).bind(daily.then_some(day)).bind(daily.then_some(window_start)).bind(daily.then_some(window_end)).bind(expires).bind(&c.settings_snapshot).bind(Uuid::now_v7()).bind(selected.len() as i32).bind(&c.generation_version).bind(if c.generation_version == WORDLIST_GENERATION_VERSION && t.question_type.as_deref()==Some(crate::question_bank::learning::CHOICE) {WORDLIST_GRADING_VERSION} else {&c.grading_version}).bind(c.id).bind(t.question_type.as_deref().unwrap_or("spelling_zh_to_en")).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO learning_questions(id,run_id,cycle_id,cycle_unit_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint,custom_item_id) SELECT gen_random_uuid(),$1,cycle_id,id,(row_number() OVER(ORDER BY position)-1)::integer,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint,custom_item_id FROM learning_cycle_units WHERE id=ANY($2) ORDER BY position").bind(run_id).bind(&selected).execute(&mut *tx).await.map_err(AppError::internal)?;
         run_id
     };
     let row = run(&mut tx, auth, run_id).await?;

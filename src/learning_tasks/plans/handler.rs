@@ -36,6 +36,10 @@ pub async fn preview(
     ApiJson(input): ApiJson<PreviewLearningPlan>,
 ) -> Result<Json<LearningPlanPreview>, AppError> {
     crate::question_bank::learning::require_capability(&headers, input.question_type.as_deref())?;
+    crate::question_bank::learning::require_wordlist_capability(
+        &headers,
+        input.question_type.as_deref(),
+    )?;
     Ok(Json(super::preview(&state.pool, &auth, input).await?))
 }
 #[utoipa::path(post,path="/api/v1/me/learning-plans",tag="learning_plans",security(("bearer_auth"=[])),request_body=CreateLearningPlan,responses((status=200,description="学习计划",body=LearningPlan),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="需要学生资格"),(status=404,description="资源不存在"),(status=409,description="版本、来源、预览或请求键冲突"),(status=422,description="JSON不符合契约")))]
@@ -46,6 +50,10 @@ pub async fn create(
     ApiJson(input): ApiJson<CreateLearningPlan>,
 ) -> Result<Json<LearningPlan>, AppError> {
     crate::question_bank::learning::require_capability(&headers, input.question_type.as_deref())?;
+    crate::question_bank::learning::require_wordlist_capability(
+        &headers,
+        input.question_type.as_deref(),
+    )?;
     Ok(Json(super::create(&state.pool, &auth, input).await?))
 }
 #[utoipa::path(get,path="/api/v1/me/learning-plans",tag="learning_plans",security(("bearer_auth"=[])),params(LearningPageQuery),responses((status=200,description="学习计划",body=LearningPlanPage),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="需要学生资格"),(status=404,description="资源不存在"),(status=409,description="版本、来源、预览或请求键冲突"),(status=422,description="JSON不符合契约")))]

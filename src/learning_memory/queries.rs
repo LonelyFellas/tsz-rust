@@ -204,16 +204,17 @@ pub(super) struct Selected {
 impl Selected {
     pub fn question(&self) -> QuestionRow {
         QuestionRow {
+            custom_item_id: None,
             cycle_unit_id: None,
             id: self.id,
             position: 0,
             source_wordlist_id: self.wordlist_id,
             source_membership_id: self.membership_id,
             source_public_generation: self.public_generation,
-            entry_id: self.entry_id,
-            entry_archive_generation: self.entry_archive_generation,
-            pos_id: self.pos_id,
-            sense_id: self.sense_id,
+            entry_id: Some(self.entry_id),
+            entry_archive_generation: Some(self.entry_archive_generation),
+            pos_id: Some(self.pos_id),
+            sense_id: Some(self.sense_id),
             prompt_snapshot: serde_json::Value::Null,
             answer_snapshot: serde_json::Value::Null,
         }
@@ -239,7 +240,7 @@ impl Selected {
         Ok(build_candidates(&[source], context)?
             .candidates
             .into_iter()
-            .find(|c| c.pos_id == self.pos_id && c.sense_id == self.sense_id))
+            .find(|c| c.pos_id == Some(self.pos_id) && c.sense_id == Some(self.sense_id)))
     }
 }
 pub(super) async fn selected(

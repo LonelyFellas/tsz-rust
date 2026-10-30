@@ -46,6 +46,15 @@ async fn fixture(pool: &PgPool) -> Fixture {
     }
 }
 async fn call(f: &Fixture, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+    call_with_capabilities(f, method, path, body, "choice-v1,wordlist-spelling-v1").await
+}
+async fn call_with_capabilities(
+    f: &Fixture,
+    method: &str,
+    path: &str,
+    body: Value,
+    capabilities: &str,
+) -> (StatusCode, Value) {
     let token = f
         .state
         .token_manager
@@ -58,7 +67,7 @@ async fn call(f: &Fixture, method: &str, path: &str, body: Value) -> (StatusCode
                 .uri(path)
                 .header("Authorization", format!("Bearer {token}"))
                 .header("Content-Type", "application/json")
-                .header("X-TSZ-Learning-Capabilities", "choice-v1")
+                .header("X-TSZ-Learning-Capabilities", capabilities)
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -104,6 +113,128 @@ async fn questions(f: &Fixture, r: &Value) -> Value {
     .await;
     assert_eq!(r.0, 200, "{}", r.1);
     r.1
+}
+#[sqlx::test]
+async fn legacy_platform_learning_facts_survive_migration_roundtrip(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let task = learning_tasks_support::create(&f.state, &f.auth, f.list, "longterm").await;
+    let run = learning_tasks_support::start(&f.state, &f.auth, &task).await;
+    let before = questions(&f, &run).await;
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261030040000_wordlist_practice.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261030040000_wordlist_practice.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(questions(&f, &run).await, before);
+    let q = &before["items"][0];
+    let answered = call(
+        &f,
+        "POST",
+        &learning_tasks_support::answer_path(&run),
+        learning_tasks_support::answer_body(q, "apple"),
+    )
+    .await;
+    assert_eq!(answered.0, 200, "{}", answered.1);
+    assert_eq!(answered.1["is_correct"], true);
+}
+#[sqlx::test]
+async fn platform_only_new_learning_facts_block_incompatible_rollback(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let p = plan(&f).await;
+    let down = include_str!("../migrations/20261030040000_wordlist_practice.down.sql");
+    let mut tx = pool.begin().await.unwrap();
+    let result = sqlx::raw_sql(down).execute(&mut *tx).await;
+    tx.rollback().await.unwrap();
+    assert!(
+        result.is_err(),
+        "new platform-only cycle must block rollback before a run exists"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("new learning generation facts exist")
+    );
+
+    let run = open(&f, &p).await;
+    let custom_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM learning_questions WHERE custom_item_id IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(custom_count, 0);
+    // Isolate the run guard from the cycle guard, then restore both with the transaction.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE learning_cycles SET generation_version='choice_algorithm_v1',grading_version='choice_id_v1'")
+        .execute(&mut *tx).await.unwrap();
+    let result = sqlx::raw_sql(down).execute(&mut *tx).await;
+    tx.rollback().await.unwrap();
+    assert!(
+        result.is_err(),
+        "new platform-only run must independently block rollback"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("new learning generation facts exist")
+    );
+    let page = questions(&f, &run).await;
+    let q = &page["items"][0];
+    let option = q["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["spelling"] == "apple")
+        .unwrap()["option_id"]
+        .as_str()
+        .unwrap();
+    let answered = call(
+        &f,
+        "POST",
+        &learning_tasks_support::answer_path(&run),
+        learning_tasks_support::answer_body(q, option),
+    )
+    .await;
+    assert_eq!(answered.0, 200, "{}", answered.1);
+    assert_eq!(answered.1["is_correct"], true);
+}
+#[sqlx::test]
+async fn old_choice_client_gets_an_explicit_update_requirement_for_spelling_fallback(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let rejected = call_with_capabilities(
+        &f,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        preview(&f),
+        "choice-v1",
+    )
+    .await;
+    assert_eq!(rejected.0, 409);
+    assert!(rejected.1.to_string().contains("更新"));
+    let plan = plan(&f).await;
+    let run = open(&f, &plan).await;
+    let path = format!(
+        "/api/v1/me/learning-runs/{}/questions",
+        run["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        call_with_capabilities(&f, "GET", &path, Value::Null, "choice-v1")
+            .await
+            .0,
+        409
+    );
+    assert_eq!(call(&f, "GET", &path, Value::Null).await.0, 200);
 }
 #[sqlx::test]
 async fn empty_bank_generates_only_when_run_opens_and_restores_grading_snapshots(pool: PgPool) {
@@ -177,7 +308,7 @@ async fn empty_bank_generates_only_when_run_opens_and_restores_grading_snapshots
     );
 }
 #[sqlx::test]
-async fn insufficient_distractors_exclude_targets_without_bank_fallback(pool: PgPool) {
+async fn insufficient_distractors_fall_back_to_spelling_without_bank_fallback(pool: PgPool) {
     let f = fixture(&pool).await;
     sqlx::query("UPDATE lexicon.entries SET teaching_eligible=false WHERE id=ANY($1)")
         .bind(&f.entries[2..])
@@ -186,14 +317,91 @@ async fn insufficient_distractors_exclude_targets_without_bank_fallback(pool: Pg
         .unwrap();
     let p = call(&f, "POST", "/api/v1/me/learning-plans/preview", preview(&f)).await;
     assert_eq!(p.0, 200);
-    assert_eq!(p.1["can_create"], false);
-    assert!(
-        p.1["reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|s| s.as_str().unwrap().contains("选项"))
-    );
+    assert_eq!(p.1["can_create"], true);
+    let p = plan(&f).await;
+    let run = open(&f, &p).await;
+    let qs = questions(&f, &run).await;
+    assert!(qs["items"][0].get("options").is_none());
+    let answer = call(
+        &f,
+        "POST",
+        &learning_tasks_support::answer_path(&run),
+        learning_tasks_support::answer_body(&qs["items"][0], "apple"),
+    )
+    .await;
+    assert_eq!(answer.0, 200, "{}", answer.1);
+    assert_eq!(answer.1["is_correct"], true);
+}
+#[sqlx::test]
+async fn choice_plan_keeps_platform_options_and_custom_spelling_with_persistent_progress(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    sqlx::query(
+        "INSERT INTO wordlist_items(wordlist_id,item_id,custom_word,position) VALUES($1,$2,$3,1)",
+    )
+    .bind(f.list)
+    .bind(Uuid::now_v7())
+    .bind(json!({"word":"starlight","definition":"星光"}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut body = preview(&f);
+    body["task_type"] = json!("longterm");
+    body["daily_question_count"] = Value::Null;
+    let preview = call(
+        &f,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(preview.0, 200, "{}", preview.1);
+    assert_eq!(preview.1["eligible_count"], 3);
+    body["name"] = json!("混合练习");
+    body["preview_fingerprint"] = preview.1["preview_fingerprint"].clone();
+    body["idempotency_key"] = json!(Uuid::now_v7());
+    let plan = call(&f, "POST", "/api/v1/me/learning-plans", body).await;
+    assert_eq!(plan.0, 200, "{}", plan.1);
+    let run = open(&f, &plan.1).await;
+    let qs = questions(&f, &run).await;
+    for q in qs["items"].as_array().unwrap() {
+        let answer = if let Some(options) = q["options"].as_array() {
+            assert_eq!(options.len(), 4);
+            options.iter().find(|o| o["spelling"] == "apple").unwrap()["option_id"]
+                .as_str()
+                .unwrap()
+        } else {
+            if q["prompt"]["definition"] == "星光" {
+                "starlight"
+            } else {
+                "apple"
+            }
+        };
+        let result = call(
+            &f,
+            "POST",
+            &learning_tasks_support::answer_path(&run),
+            learning_tasks_support::answer_body(q, answer),
+        )
+        .await;
+        assert_eq!(result.0, 200, "{}", result.1);
+        assert_eq!(result.1["is_correct"], true);
+    }
+    let refreshed = call(
+        &f,
+        "GET",
+        &format!(
+            "/api/v1/me/learning-plans/{}",
+            plan.1["task"]["id"].as_str().unwrap()
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(refreshed.1["current_cycle"]["covered_count"], 3);
+    assert_eq!(refreshed.1["current_run"]["state"], "completed");
+    let invalid:i64=sqlx::query_scalar("SELECT count(*) FROM learning_questions WHERE custom_item_id IS NOT NULL AND (entry_id IS NOT NULL OR pos_id IS NOT NULL)").fetch_one(&pool).await.unwrap();
+    assert_eq!(invalid, 0);
 }
 #[sqlx::test]
 async fn partial_definition_overlap_is_not_a_valid_fourth_option(pool: PgPool) {
@@ -201,7 +409,14 @@ async fn partial_definition_overlap_is_not_a_valid_fourth_option(pool: PgPool) {
     sqlx::query("UPDATE lexicon.entry_publications SET snapshot=jsonb_set(snapshot,'{meanings,pos,0,senses,0,definitions,0,content,text}',to_jsonb('苹果的果实'::text)) WHERE id=(SELECT current_publication_id FROM lexicon.entries WHERE id=$1)").bind(f.entries[1]).execute(&pool).await.unwrap();
     let p = call(&f, "POST", "/api/v1/me/learning-plans/preview", preview(&f)).await;
     assert_eq!(p.0, 200);
-    assert_eq!(p.1["can_create"], false);
+    assert_eq!(p.1["can_create"], true);
+    let p = plan(&f).await;
+    let run = open(&f, &p).await;
+    assert!(
+        questions(&f, &run).await["items"][0]
+            .get("options")
+            .is_none()
+    );
 }
 #[sqlx::test]
 async fn source_withdrawal_hides_unanswered_choice_and_blocks_answers(pool: PgPool) {
@@ -270,10 +485,17 @@ async fn published_incoming_synonym_links_are_excluded_even_with_different_gloss
     sqlx::query("UPDATE lexicon.entry_publications SET snapshot=jsonb_set(snapshot,'{meanings,pos,0,senses,0,relations}',$2) WHERE id=(SELECT current_publication_id FROM lexicon.entries WHERE id=$1)").bind(f.entries[1]).bind(relation).execute(&pool).await.unwrap();
     let p = call(&f, "POST", "/api/v1/me/learning-plans/preview", preview(&f)).await;
     assert_eq!(p.0, 200, "{}", p.1);
-    assert_eq!(p.1["can_create"], false);
+    assert_eq!(p.1["can_create"], true);
+    let p = plan(&f).await;
+    let run = open(&f, &p).await;
+    assert!(
+        questions(&f, &run).await["items"][0]
+            .get("options")
+            .is_none()
+    );
 }
 #[sqlx::test]
-async fn losing_distractors_before_open_does_not_commit_a_partial_run(pool: PgPool) {
+async fn losing_distractors_before_open_falls_back_to_spelling(pool: PgPool) {
     let f = fixture(&pool).await;
     let p = plan(&f).await;
     sqlx::query("UPDATE lexicon.entries SET teaching_eligible=false WHERE id=$1")
@@ -281,36 +503,20 @@ async fn losing_distractors_before_open_does_not_commit_a_partial_run(pool: PgPo
         .execute(&pool)
         .await
         .unwrap();
-    let r = call(
+    let run = open(&f, &p).await;
+    let q = questions(&f, &run).await;
+    assert_eq!(q["items"][0]["content_available"], true);
+    assert!(q["items"][0].get("options").is_none());
+    assert_eq!(open(&f, &p).await["id"], run["id"]);
+    let answer = call(
         &f,
         "POST",
-        &format!(
-            "/api/v1/me/learning-plans/{}/runs",
-            p["task"]["id"].as_str().unwrap()
-        ),
-        learning_tasks_support::start_body(None),
+        &learning_tasks_support::answer_path(&run),
+        learning_tasks_support::answer_body(&q["items"][0], "apple"),
     )
     .await;
-    assert_eq!(r.0, 409, "{}", r.1);
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM learning_runs")
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-        0
-    );
-    sqlx::query("UPDATE lexicon.entries SET teaching_eligible=true WHERE id=$1")
-        .bind(f.entries[1])
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        questions(&f, &open(&f, &p).await).await["items"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(answer.0, 200, "{}", answer.1);
+    assert_eq!(answer.1["is_correct"], true);
 }
 #[sqlx::test]
 async fn retirement_preserves_old_facts_and_refuses_rollback_after_on_demand_cycles(pool: PgPool) {
@@ -399,7 +605,7 @@ async fn longterm_source_loss_cannot_copy_deferred_empty_questions_into_a_run(po
         input.clone(),
     )
     .await;
-    assert_eq!(previewed.1["eligible_count"], 2);
+    assert_eq!(previewed.1["eligible_count"], 4);
     input["preview_fingerprint"] = previewed.1["preview_fingerprint"].clone();
     input["name"] = json!("长任务按需");
     input["idempotency_key"] = json!(Uuid::now_v7());
@@ -430,14 +636,11 @@ async fn longterm_source_loss_cannot_copy_deferred_empty_questions_into_a_run(po
         .unwrap();
     let run = open(&f, &p.1).await;
     let qs = questions(&f, &run).await;
-    assert_eq!(qs["items"].as_array().unwrap().len(), 2);
-    assert!(
-        qs["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|q| q["options"].as_array().unwrap().len() == 4)
-    );
+    assert_eq!(qs["items"].as_array().unwrap().len(), 4);
+    assert!(qs["items"].as_array().unwrap().iter().all(|q| {
+        q.get("options")
+            .is_none_or(|o| o.as_array().is_some_and(|options| options.len() == 4))
+    }));
 }
 
 // Real publication/index triggers stay enabled; these are owned synthetic corpus rows.
