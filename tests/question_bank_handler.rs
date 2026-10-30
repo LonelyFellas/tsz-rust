@@ -1968,6 +1968,27 @@ async fn migration_disables_existing_ai_questions_and_prevents_reapproval(pool: 
     )
     .await;
     assert_eq!(disabled.1["state"], "disabled");
+    let options: Vec<_> = disabled.1["content"]["options"].as_array().unwrap().iter().map(|o| json!({"candidate_ref":o["candidate"]["candidate_ref"],"source":o["candidate"]["source"],"answer_profile":o["candidate"]["answer_profile"]})).collect();
+    let explanations: Vec<_> = disabled.1["content"]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["explanation"].clone())
+        .collect();
+    let edited = wordlists_support::admin_call(&f.state,f.admin,"PATCH",&format!("{BANK}/questions/{id}"),json!({"expected_revision":disabled.1["revision"],"prompt":disabled.1["content"]["prompt"],"options":options,"option_explanations":explanations,"explanation":"修改解析不能复用旧 AI 题"})).await;
+    assert_eq!(edited.0, 409);
+    let preview = batch_preview(
+        &f,
+        json!({"question_levels":["A1"],"answer_profiles":["BrE"]}),
+    )
+    .await;
+    assert!(
+        preview["coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["covered"] == 0)
+    );
     let attempt = wordlists_support::admin_call(&f.state, f.admin, "POST", &format!("{BANK}/questions/{id}/review"), json!({"expected_revision":disabled.1["revision"],"decision":"approve","reason_codes":[],"comment":""})).await;
     assert_eq!(attempt.0, 409);
 }

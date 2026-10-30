@@ -474,6 +474,15 @@ pub async fn edit(
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     let row = question(&mut tx, id).await?;
     authorize(&mut tx, auth, "words.edit", Some(row.created_by)).await?;
+    let method: String =
+        sqlx::query_scalar("SELECT generation_method FROM question_generations WHERE id=$1")
+            .bind(row.generation_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+    if method != "algorithm" {
+        return Err(conflict("AI 生成的题目已停用，请使用算法重新命题"));
+    }
     if row.revision != input.expected_revision
         || !["draft", "rejected", "disabled"].contains(&row.state.as_str())
     {
