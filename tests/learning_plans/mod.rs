@@ -4,6 +4,77 @@ use sqlx::PgPool;
 use tsz_rust::{auth::extract::AuthUser, state::AppState};
 use uuid::Uuid;
 #[sqlx::test]
+async fn mixed_custom_questions_are_included_in_platform_archive_impact(pool: PgPool) {
+    use crate::wordlists_support::{admin, admin_call};
+    let (state, auth, list) = fixture(&pool, 1).await;
+    let state = state
+        .with_smart_lexicon_v3_flags_for_test(tsz_rust::config::SmartLexiconV3Flags::all_enabled());
+    let entry: Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(list)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let item = Uuid::now_v7();
+    let content = json!({"word":"starlight","definition":"星光"});
+    sqlx::query(
+        "INSERT INTO wordlist_items(wordlist_id,item_id,custom_word,position) VALUES($1,$2,$3,1)",
+    )
+    .bind(list)
+    .bind(item)
+    .bind(&content)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let membership: Uuid = sqlx::query_scalar(
+        "SELECT learning_membership_id FROM wordlist_items WHERE wordlist_id=$1 AND item_id=$2",
+    )
+    .bind(list)
+    .bind(item)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (plan, _) = create_plan(&state, &auth, list, None).await;
+    let run = open(&state, &auth, &plan).await;
+    let page = questions(&state, &auth, &run).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["content_available"] == true)
+    );
+    let actor = admin(&pool).await;
+    let path = "/api/v1/admin/lexicon/entries/archive-impact";
+    let body = json!({"entries":[{"id":entry,"base_revision":1,"base_lifecycle_revision":1}]});
+    let impact = admin_call(&state, actor, "POST", path, body.clone()).await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(impact.1, json!({"wordlist_count":1,"active_run_count":1}));
+    for (current_item, current_membership, current_content, expected_count) in [
+        (Uuid::now_v7(), membership, content.clone(), 0),
+        (item, Uuid::now_v7(), content.clone(), 0),
+        (
+            item,
+            membership,
+            json!({"word":"moonlight","definition":"月光"}),
+            0,
+        ),
+        (item, membership, content.clone(), 1),
+    ] {
+        sqlx::query("DELETE FROM wordlist_items WHERE wordlist_id=$1 AND entry_id IS NULL")
+            .bind(list)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO wordlist_items(wordlist_id,item_id,learning_membership_id,custom_word,position) VALUES($1,$2,$3,$4,1)")
+            .bind(list).bind(current_item).bind(current_membership).bind(current_content).execute(&pool).await.unwrap();
+        let impact = admin_call(&state, actor, "POST", path, body.clone()).await;
+        assert_eq!(impact.0, 200, "{}", impact.1);
+        assert_eq!(impact.1["active_run_count"], expected_count);
+    }
+}
+#[sqlx::test]
 async fn saved_custom_whitespace_does_not_block_other_learning_sources(pool: PgPool) {
     let (state, auth, original) = fixture(&pool, 1).await;
     let entry: Uuid =
