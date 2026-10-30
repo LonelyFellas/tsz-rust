@@ -2,6 +2,7 @@
 mod audio;
 pub(crate) mod publication;
 pub(crate) mod reading;
+pub(crate) mod trash;
 pub(crate) mod visibility;
 
 use crate::lexicon::sentence_formatting::{self, response as formatting_response};
@@ -210,6 +211,8 @@ pub struct SentenceReadQuery {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct SentenceListQuery {
+    /// Only recoverable, never-published drafts. Published view cannot query trash.
+    pub trash: Option<bool>,
     #[serde(default)]
     #[param(inline)]
     pub view: SentenceView,
@@ -502,8 +505,16 @@ pub(crate) async fn read_on(
     snapshot: &mut PgConnection,
     id: Uuid,
 ) -> Result<SharedSentence, AppError> {
-    let row = sqlx::query("SELECT s.*,a.display_name AS created_by FROM lexicon.shared_sentences s JOIN admins a ON a.id=s.created_by_admin_id WHERE s.id=$1 AND s.deleted_at IS NULL")
-        .bind(id).fetch_optional(&mut *snapshot).await.map_err(AppError::internal)?.ok_or_else(missing)?;
+    read_on_with_trash(snapshot, id, false).await
+}
+
+async fn read_on_with_trash(
+    snapshot: &mut PgConnection,
+    id: Uuid,
+    trash: bool,
+) -> Result<SharedSentence, AppError> {
+    let row = sqlx::query("SELECT s.*,a.display_name AS created_by FROM lexicon.shared_sentences s JOIN admins a ON a.id=s.created_by_admin_id WHERE s.id=$1 AND (($2 AND s.in_trash) OR (NOT $2 AND s.deleted_at IS NULL))")
+        .bind(id).bind(trash).fetch_optional(&mut *snapshot).await.map_err(AppError::internal)?.ok_or_else(missing)?;
     let ann = sqlx::query("SELECT * FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 ORDER BY source_dialect, source_segments->0->>'start',id").bind(id).fetch_all(&mut *snapshot).await.map_err(AppError::internal)?;
     let annotations = ann
         .into_iter()
@@ -648,6 +659,12 @@ pub async fn list(
     if q.view != SentenceView::Published || !authorization.has("sentences.read_published") {
         authorization.require("sentences.access")?;
     }
+    if q.trash == Some(true) {
+        authorization.require("sentences.access")?;
+        if q.view == SentenceView::Published {
+            return Err(invalid("垃圾桶只支持草稿视图"));
+        }
+    }
     let page = q.page.unwrap_or(1);
     let size = q.page_size.unwrap_or(10);
     if (q.sense_id.is_some() && q.entry_id.is_none())
@@ -698,7 +715,7 @@ pub async fn list(
         None
     };
     macro_rules! sentence_filter { () => { r#" FROM lexicon.shared_sentences s JOIN admins creator ON creator.id=s.created_by_admin_id
-        WHERE s.deleted_at IS NULL
+        WHERE (($9::boolean AND s.in_trash) OR (NOT $9 AND s.deleted_at IS NULL))
         AND ($1::text IS NULL OR s.id::text ILIKE '%'||$1||'%' OR s.content::text ILIKE '%'||$1||'%' OR creator.display_name ILIKE '%'||$1||'%')
         AND ($2::text IS NULL OR s.content->>'level'=$2)
         AND ($3::timestamptz IS NULL OR s.created_at >= $3) AND ($4::timestamptz IS NULL OR s.created_at <= $4)
@@ -722,13 +739,14 @@ pub async fn list(
         .bind(q.sense_id)
         .bind(association_status)
         .bind(&pending_forms)
+        .bind(q.trash.unwrap_or(false))
         .fetch_one(&mut *snapshot)
         .await
         .map_err(AppError::internal)?;
     let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
         "SELECT s.id ",
         sentence_filter!(),
-        " ORDER BY CASE WHEN $9 THEN s.updated_at ELSE s.created_at END DESC,s.id LIMIT $10 OFFSET $11"
+        " ORDER BY CASE WHEN $10 THEN s.updated_at ELSE s.created_at END DESC,s.id LIMIT $11 OFFSET $12"
     ))
     .bind(&q.q)
     .bind(&q.level)
@@ -738,6 +756,7 @@ pub async fn list(
     .bind(q.sense_id)
         .bind(association_status)
         .bind(&pending_forms)
+    .bind(q.trash.unwrap_or(false))
     .bind(matches!(q.sort, Some(SentenceListSort::UpdatedAtDesc)))
     .bind(size)
     .bind((page - 1) * size)
@@ -746,7 +765,7 @@ pub async fn list(
     .map_err(AppError::internal)?;
     let mut items = Vec::new();
     for id in ids {
-        match read_on(&mut snapshot, id).await {
+        match read_on_with_trash(&mut snapshot, id, q.trash.unwrap_or(false)).await {
             Ok(item) => items.push(item),
             Err(e) => return Err(e),
         }
@@ -1030,6 +1049,8 @@ pub async fn delete(
         ));
     }
     lock_targets(&mut tx, None, None, Some(id)).await?;
+    sqlx::query("UPDATE lexicon.shared_sentences SET deleted_at=NULL,in_trash=false WHERE id=$1 AND in_trash AND revision=$2")
+        .bind(id).bind(input.base_revision).execute(&mut *tx).await.map_err(AppError::internal)?;
     lock(&mut tx, id, input.base_revision).await?;
     writable_sentence(&mut tx, id, &authorization, true).await?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_audio_asset_references WHERE sentence_id=$1 AND scope='draft'")

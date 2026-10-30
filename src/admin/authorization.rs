@@ -733,6 +733,16 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         "/lexicon/sentences/{id}",
         RoutePolicy::Any(&["sentences.edit", "sentences.associate"]),
     ),
+    (
+        "POST",
+        "/lexicon/sentences/{id}/trash",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "POST",
+        "/lexicon/sentences/{id}/untrash",
+        RoutePolicy::SuperAdmin,
+    ),
     ("DELETE", "/lexicon/sentences/{id}", RoutePolicy::SuperAdmin),
     (
         "POST",

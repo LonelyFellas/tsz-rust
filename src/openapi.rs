@@ -215,6 +215,8 @@ use utoipa::{
         crate::lexicon::shared_sentences::create,
         crate::lexicon::shared_sentences::update,
         crate::lexicon::shared_sentences::delete,
+        crate::lexicon::shared_sentences::trash::archive,
+        crate::lexicon::shared_sentences::trash::restore,
         crate::lexicon::shared_sentences::targets,
         crate::lexicon::shared_sentences::publication::publish,
         crate::lexicon::shared_sentences::publication::rollback,

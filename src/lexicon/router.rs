@@ -17,6 +17,14 @@ pub fn router() -> Router<AppState> {
                 .put(super::shared_sentences::update)
                 .delete(super::shared_sentences::delete),
         )
+        .route(
+            "/sentences/{id}/trash",
+            axum::routing::post(super::shared_sentences::trash::archive),
+        )
+        .route(
+            "/sentences/{id}/untrash",
+            axum::routing::post(super::shared_sentences::trash::restore),
+        )
         .route("/sentences/targets", get(super::shared_sentences::targets))
         .route(
             "/sentences/{id}/publication-audio/check",
