@@ -474,6 +474,15 @@ pub async fn edit(
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     let row = question(&mut tx, id).await?;
     authorize(&mut tx, auth, "words.edit", Some(row.created_by)).await?;
+    let method: String =
+        sqlx::query_scalar("SELECT generation_method FROM question_generations WHERE id=$1")
+            .bind(row.generation_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+    if method != "algorithm" {
+        return Err(conflict("AI 生成的题目已停用，请使用算法重新命题"));
+    }
     if row.revision != input.expected_revision
         || !["draft", "rejected", "disabled"].contains(&row.state.as_str())
     {
@@ -546,6 +555,15 @@ pub async fn review(
         _ => return Err(conflict("当前状态不允许此审核操作")),
     };
     if state == "approved" {
+        let method: String =
+            sqlx::query_scalar("SELECT generation_method FROM question_generations WHERE id=$1")
+                .bind(row.generation_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(AppError::internal)?;
+        if method != "algorithm" {
+            return Err(conflict("AI 生成的题目已停用，请使用算法重新命题"));
+        }
         if row.semantic_review_current()
             && row
                 .semantic_review
@@ -558,43 +576,46 @@ pub async fn review(
         }
         source::validate_question(&mut tx, &row.content).await?;
     }
-    let run: Uuid = sqlx::query_scalar("SELECT agent_run_id FROM question_generations WHERE id=$1")
-        .bind(row.generation_id)
-        .fetch_one(&mut *tx)
+    let run: Option<Uuid> =
+        sqlx::query_scalar("SELECT agent_run_id FROM question_generations WHERE id=$1")
+            .bind(row.generation_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+    if let Some(run) = run {
+        let event_id = Uuid::now_v7();
+        let decision = match state {
+            "approved" => "edited_and_approved",
+            "rejected" => "rejected",
+            _ => "revoked",
+        };
+        let lesson = if state == "rejected" {
+            if input.comment.trim().is_empty() {
+                input.reason_codes.join("; ")
+            } else {
+                input.comment.trim().to_owned()
+            }
+        } else {
+            row.content.explanation.clone()
+        };
+        let example = if state == "approved" || state == "rejected" {
+            Some(
+                serde_json::json!({"target":row.content.target,"question_level":row.content.question_level,"prompt":row.content.prompt,"distractors":row.content.options.iter().filter(|o|o.option_id!=row.content.correct_option_id).map(|o|&o.candidate).collect::<Vec<_>>(),"lesson":lesson}),
+            )
+        } else {
+            None
+        };
+        let payload = serde_json::json!({"contract_version":1,"event_id":event_id,"review_id":row.review_id,"review_revision":row.revision+1,"source_run_id":run,"question_revision_id":row.question_revision_id,"capability":"vocabulary_mcq_zh_en","decision":decision,"reason_codes":input.reason_codes,"comment":input.comment,"example":example});
+        sqlx::query(
+            "INSERT INTO question_review_deliveries(event_id,question_id,payload) VALUES($1,$2,$3)",
+        )
+        .bind(event_id)
+        .bind(id)
+        .bind(payload)
+        .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let event_id = Uuid::now_v7();
-    let decision = match state {
-        "approved" => "edited_and_approved",
-        "rejected" => "rejected",
-        _ => "revoked",
-    };
-    let lesson = if state == "rejected" {
-        if input.comment.trim().is_empty() {
-            input.reason_codes.join("; ")
-        } else {
-            input.comment.trim().to_owned()
-        }
-    } else {
-        row.content.explanation.clone()
-    };
-    let example = if state == "approved" || state == "rejected" {
-        Some(
-            serde_json::json!({"target":row.content.target,"question_level":row.content.question_level,"prompt":row.content.prompt,"distractors":row.content.options.iter().filter(|o|o.option_id!=row.content.correct_option_id).map(|o|&o.candidate).collect::<Vec<_>>(),"lesson":lesson}),
-        )
-    } else {
-        None
-    };
-    let payload = serde_json::json!({"contract_version":1,"event_id":event_id,"review_id":row.review_id,"review_revision":row.revision+1,"source_run_id":run,"question_revision_id":row.question_revision_id,"capability":"vocabulary_mcq_zh_en","decision":decision,"reason_codes":input.reason_codes,"comment":input.comment,"example":example});
-    sqlx::query(
-        "INSERT INTO question_review_deliveries(event_id,question_id,payload) VALUES($1,$2,$3)",
-    )
-    .bind(event_id)
-    .bind(id)
-    .bind(payload)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::internal)?;
+    }
     sqlx::query("UPDATE question_bank SET state=$2,revision=revision+1,reviewed_by=$3,review_comment=$4,updated_at=now() WHERE id=$1").bind(id).bind(state).bind(auth.subject).bind(input.comment).execute(&mut *tx).await.map_err(AppError::internal)?;
     let row = question(&mut tx, id).await?;
     tx.commit().await.map_err(AppError::internal)?;

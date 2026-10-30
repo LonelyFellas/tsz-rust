@@ -114,12 +114,6 @@ pub async fn create_generation(
     auth: AdminAuth,
     ApiJson(input): ApiJson<CreateQuestionGeneration>,
 ) -> Result<Json<QuestionGeneration>, AppError> {
-    if state.vocabulary_agent.is_none() {
-        return Err(AppError::unavailable(
-            crate::error::ErrorCode::ServiceUnavailable,
-            "生成服务尚未配置",
-        ));
-    }
     Ok(Json(service::create(&state.pool, &auth, input).await?))
 }
 #[utoipa::path(get,path="/api/v1/admin/question-bank/generations/{id}",tag="question_bank",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,description="题库操作结果",body=QuestionGeneration),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="无操作权限"),(status=404,description="不存在"),(status=409,description="版本或来源冲突"),(status=422,description="格式无效"),(status=503,description="生成服务不可用")))]
@@ -323,12 +317,6 @@ pub async fn create_batch(
     auth: AdminAuth,
     ApiJson(input): ApiJson<CreateQuestionBatch>,
 ) -> Result<Json<QuestionBatch>, AppError> {
-    if state.vocabulary_agent.is_none() {
-        return Err(AppError::unavailable(
-            crate::error::ErrorCode::ServiceUnavailable,
-            "生成服务尚未配置",
-        ));
-    }
     Ok(Json(batch::create(&state.pool, &auth, input).await?))
 }
 
