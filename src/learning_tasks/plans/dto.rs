@@ -16,6 +16,9 @@ pub struct LearningSchedule {
 pub struct PreviewLearningPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub practice_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub question_type: Option<String>,
     pub task_type: LearningTaskType,
     pub wordlist_ids: Vec<Uuid>,
@@ -27,6 +30,9 @@ pub struct PreviewLearningPlan {
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLearningPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub practice_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub question_type: Option<String>,
@@ -43,6 +49,7 @@ pub struct CreateLearningPlan {
 impl CreateLearningPlan {
     pub fn preview(&self) -> PreviewLearningPlan {
         PreviewLearningPlan {
+            practice_mode: self.practice_mode.clone(),
             question_type: self.question_type.clone(),
             task_type: self.task_type,
             wordlist_ids: self.wordlist_ids.clone(),
@@ -75,6 +82,7 @@ pub struct LearningPlanPreview {
 pub enum CycleOperation {
     Next,
     RestartBlocked,
+    RefreshSources,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -95,11 +103,21 @@ pub struct CreateLearningCycle {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningCyclePreview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub source_refresh: Option<SourceRefreshPreview>,
     pub preview: LearningPlanPreview,
     pub earliest_day: NaiveDate,
     pub previous_covered_count: i64,
     pub previous_total_count: i32,
     pub previous_blocked_count: i64,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRefreshPreview {
+    pub refreshed_count: i64,
+    pub changed_content_count: i64,
+    pub unavailable_count: i64,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -137,6 +155,9 @@ pub struct LearningPlanSource {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningPlan {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub mastery: Option<super::super::mastery::MasterySummary>,
     pub task: LearningTask,
     #[schema(value_type=LearningPlanMode)]
     pub mode: String,
@@ -195,6 +216,7 @@ pub struct LearningPlanRunPage {
 pub enum LearningPlanMode {
     LegacyV1,
     CoverageV1,
+    MasteryV1,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -206,6 +228,7 @@ pub enum LearningPlanStatus {
     TodayCompleted,
     SourceBlocked,
     Ready,
+    ReviewWaiting,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]

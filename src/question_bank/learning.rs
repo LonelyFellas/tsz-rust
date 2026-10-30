@@ -56,37 +56,57 @@ pub async fn capability_guard(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    if capable(request.headers()) {
-        return Ok(next.run(request).await);
+    let choice_capable = capable(request.headers());
+    let mastery_capable = crate::learning_tasks::mastery::capable(request.headers());
+    if choice_capable && mastery_capable {
+        return Ok(run_with_vary(request, next).await);
     }
     let path = request.uri().path();
     let mut parts = path.trim_start_matches('/').split('/');
     if parts.next() != Some("api") || parts.next() != Some("v1") || parts.next() != Some("me") {
-        return Ok(next.run(request).await);
+        return Ok(run_with_vary(request, next).await);
     }
     let resource = parts.next().unwrap_or("");
     let id = parts.next().and_then(|s| s.parse::<Uuid>().ok());
     if !["learning-plans", "learning-tasks", "learning-runs"].contains(&resource) || id.is_none() {
-        return Ok(next.run(request).await);
+        return Ok(run_with_vary(request, next).await);
     }
     let is_run = resource == "learning-runs";
     let (mut request_parts, body) = request.into_parts();
     let auth = AuthUser::from_request_parts(&mut request_parts, &state).await?;
     let sql = if is_run {
-        "SELECT question_type FROM learning_runs WHERE id=$1 AND user_id=$2"
+        "SELECT r.question_type,t.generation_policy FROM learning_runs r JOIN learning_tasks t ON t.id=r.task_id WHERE r.id=$1 AND r.user_id=$2"
     } else {
-        "SELECT question_type FROM learning_tasks WHERE id=$1 AND user_id=$2"
+        "SELECT question_type,generation_policy FROM learning_tasks WHERE id=$1 AND user_id=$2"
     };
-    let kind: Option<String> = sqlx::query_scalar(sql)
+    let kind: Option<(String, String)> = sqlx::query_as(sql)
         .bind(id)
         .bind(auth.subject)
         .fetch_optional(&state.pool)
         .await
         .map_err(AppError::internal)?;
-    if kind.as_deref() == Some(CHOICE) {
+    if kind.as_ref().is_some_and(|(kind, _)| kind == CHOICE) && !choice_capable {
         return Err(super::conflict("此客户端不支持单选题，请更新后继续"));
     }
-    Ok(next.run(Request::from_parts(request_parts, body)).await)
+    if kind
+        .as_ref()
+        .is_some_and(|(_, mode)| mode == crate::learning_tasks::mastery::MODE)
+        && !mastery_capable
+    {
+        return Err(super::conflict("请更新客户端后使用按掌握情况练习"));
+    }
+    Ok(run_with_vary(Request::from_parts(request_parts, body), next).await)
+}
+async fn run_with_vary(request: Request, next: Next) -> Response {
+    let learning = request.uri().path().starts_with("/api/v1/me/learning-");
+    let mut response = next.run(request).await;
+    if learning {
+        response.headers_mut().append(
+            axum::http::header::VARY,
+            axum::http::HeaderValue::from_static("X-TSZ-Learning-Capabilities"),
+        );
+    }
+    response
 }
 pub async fn fingerprints(tx: &mut Tx<'_>, entries: &[Uuid]) -> Result<HashSet<String>, AppError> {
     let mut result = HashSet::new();
@@ -197,7 +217,9 @@ pub async fn materialize(
         let content = algorithm
             .content(tx, &c.content.target, &settings.cefr_level)
             .await?
-            .ok_or_else(|| super::conflict("当前词库没有足够的无释义重叠选项，请检查来源后重试"))?;
+            .ok_or_else(|| {
+                super::conflict("当前词库没有足够可靠且不含已知歧义的干扰项，请检查来源后重试")
+            })?;
         source::validate_question(tx, &content).await?;
         c.options = content
             .options

@@ -6,3 +6,5 @@ mod rewards;
 pub mod service;
 
 pub mod plans;
+
+pub(crate) mod mastery;

@@ -2,6 +2,7 @@ mod algorithm;
 pub mod dto;
 pub mod handler;
 pub(crate) mod learning;
+mod semantics;
 mod source;
 pub mod worker;
 

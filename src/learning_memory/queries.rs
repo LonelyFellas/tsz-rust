@@ -204,6 +204,7 @@ pub(super) struct Selected {
 impl Selected {
     pub fn question(&self) -> QuestionRow {
         QuestionRow {
+            practice_kind: "new".into(),
             cycle_unit_id: None,
             id: self.id,
             position: 0,
