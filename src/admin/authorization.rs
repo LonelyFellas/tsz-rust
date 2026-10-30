@@ -88,21 +88,6 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         "/chatgpt/accounts/{client_id}",
         RoutePolicy::SuperAdmin,
     ),
-    (
-        "GET",
-        "/question-bank/questions/workbench",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "GET",
-        "/question-bank/questions/{id}/inspection",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "POST",
-        "/question-bank/candidate-search",
-        RoutePolicy::All(&["words.access"]),
-    ),
     ("GET", "/opencode/probes", RoutePolicy::SuperAdmin),
     ("POST", "/opencode/probes", RoutePolicy::SuperAdmin),
     ("GET", "/opencode/models", RoutePolicy::SuperAdmin),
@@ -136,86 +121,6 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ("GET", "/ai-ledger", RoutePolicy::SuperAdmin),
     ("GET", "/ai-ledger/costs", RoutePolicy::SuperAdmin),
     ("GET", "/ai-ledger/cost-overview", RoutePolicy::SuperAdmin),
-    (
-        "GET",
-        "/question-bank/candidate-page",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "POST",
-        "/question-bank/batches/preview",
-        RoutePolicy::All(&["words.edit"]),
-    ),
-    (
-        "GET",
-        "/question-bank/batches",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "POST",
-        "/question-bank/batches",
-        RoutePolicy::All(&["words.edit"]),
-    ),
-    (
-        "GET",
-        "/question-bank/batches/{id}",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "GET",
-        "/question-bank/batches/{id}/items",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "POST",
-        "/question-bank/batches/{id}/cancel",
-        RoutePolicy::All(&["words.edit"]),
-    ),
-    (
-        "GET",
-        "/question-bank/candidates",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "GET",
-        "/question-bank/generations",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "POST",
-        "/question-bank/generations",
-        RoutePolicy::All(&["words.edit"]),
-    ),
-    (
-        "GET",
-        "/question-bank/generations/{id}",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "POST",
-        "/question-bank/generations/{id}/cancel",
-        RoutePolicy::All(&["words.edit"]),
-    ),
-    (
-        "GET",
-        "/question-bank/questions",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "GET",
-        "/question-bank/questions/{id}",
-        RoutePolicy::All(&["words.access"]),
-    ),
-    (
-        "PATCH",
-        "/question-bank/questions/{id}",
-        RoutePolicy::All(&["words.edit"]),
-    ),
-    (
-        "POST",
-        "/question-bank/questions/{id}/review",
-        RoutePolicy::All(&["words.publish"]),
-    ),
     (
         "GET",
         "/lexicon/entries/related-suggestions",
