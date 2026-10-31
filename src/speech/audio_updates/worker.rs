@@ -76,7 +76,7 @@ async fn claim(pool: &PgPool) -> Result<Option<Claim>, AppError> {
         None
     };
     // The last crashed attempt must become terminal instead of remaining leased forever.
-    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state='failed',error_code='lease_expired',lease_token=NULL,lease_until=NULL WHERE state='running' AND attempts>=3 AND lease_until<=now()")
+    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state='failed',applied=false,error_code='lease_expired',lease_token=NULL,lease_until=NULL WHERE state='running' AND attempts>=3 AND lease_until<=now()")
         .execute(&mut *tx).await.map_err(AppError::internal)?;
     settle(&mut tx).await?;
     tx.commit().await.map_err(AppError::internal)?;
@@ -314,7 +314,7 @@ async fn run(
                         .unwrap_or_default();
                     // A partially applied predecessor must be restored even when
                     // the batch's original default equals the latest default.
-                    let applied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets WHERE update_id=ANY($1) AND owner_kind=$2 AND owner_id=$3 AND target_id=$4 AND target_path=$5 AND state='completed')")
+                    let applied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets WHERE update_id=ANY($1) AND owner_kind=$2 AND owner_id=$3 AND target_id=$4 AND target_path=$5 AND (applied IS TRUE OR (applied IS NULL AND state IN ('completed','skipped'))))")
                         .bind(predecessors).bind(&claim.kind).bind(claim.owner).bind(claim.target).bind(&claim.path)
                         .fetch_one(&mut *conn).await.map_err(AppError::internal)?;
                     if !applied {
@@ -456,8 +456,8 @@ async fn run(
             .await?;
         }
     }
-    let completed=sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state=$3,error_code=NULL,lease_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 AND lease_token=$2 AND lease_until>clock_timestamp()")
-        .bind(claim.id).bind(claim.token).bind(if generated { "completed" } else { "skipped" }).execute(&mut *tx).await.map_err(AppError::internal)?;
+    let completed=sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state=$3,applied=$4,error_code=NULL,lease_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 AND lease_token=$2 AND lease_until>clock_timestamp()")
+        .bind(claim.id).bind(claim.token).bind(if generated { "completed" } else { "skipped" }).bind(changed).execute(&mut *tx).await.map_err(AppError::internal)?;
     if completed.rows_affected() != 1 {
         return Err(stale());
     }
@@ -489,7 +489,7 @@ async fn finish(
         }
     };
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
-    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state=CASE WHEN $5 AND attempts<3 THEN 'pending' ELSE $3 END,error_code=$4,lease_token=NULL,lease_until=NULL,retry_at=now()+interval '30 seconds',updated_at=now() WHERE id=$1 AND lease_token=$2 AND state='running'")
+    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state=CASE WHEN $5 AND attempts<3 THEN 'pending' ELSE $3 END,applied=false,error_code=$4,lease_token=NULL,lease_until=NULL,retry_at=now()+interval '30 seconds',updated_at=now() WHERE id=$1 AND lease_token=$2 AND state='running'")
         .bind(claim.id).bind(claim.token).bind(state).bind(code).bind(retry).execute(&mut *tx).await.map_err(AppError::internal)?;
     settle(&mut tx).await?;
     tx.commit().await.map_err(AppError::internal)

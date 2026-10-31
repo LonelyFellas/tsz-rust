@@ -1250,6 +1250,25 @@ async fn baseline_migration_preserves_legacy_jobs_and_rejects_lossy_rollback(poo
     sqlx::raw_sql(down).execute(&pool).await.unwrap();
     let (actor, a, version, _, _) = setup(&pool).await;
     seed_historical_group_and_job(&pool, actor, group(a, version, 0)).await;
+    let owner = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
+    let job = audio_updates::list(&pool, a)
+        .await
+        .unwrap()
+        .updates
+        .remove(0)
+        .id;
+    sqlx::query("INSERT INTO speech.dubbing_audio_update_targets(id,update_id,owner_kind,owner_id,target_id,target_path,state) SELECT $1,$2,owner_kind,owner_id,target_id,target_path,'skipped' FROM speech.dubbing_dependencies WHERE owner_id=$3").bind(Uuid::now_v7()).bind(job).bind(owner).execute(&pool).await.unwrap();
+    let old_targets: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(t)) FROM speech.dubbing_audio_update_targets t",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let before: Value =
         sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(j)) FROM speech.dubbing_audio_updates j")
             .fetch_one(&pool)
@@ -1272,6 +1291,32 @@ async fn baseline_migration_preserves_legacy_jobs_and_rejects_lossy_rollback(poo
         baseline,
         json!({}),
         "old tasks must not infer a pre-submit configuration"
+    );
+    let targets: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(t)-'applied') FROM speech.dubbing_audio_update_targets t",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(targets, old_targets);
+    let unknown: Option<bool> =
+        sqlx::query_scalar("SELECT applied FROM speech.dubbing_audio_update_targets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        unknown, None,
+        "historical skipped is not proof that no profile was written"
+    );
+    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET applied=false")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = sqlx::raw_sql(down).execute(&pool).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Cannot discard saved dubbing update baselines")
     );
     save(&pool, actor, group(a, version, -27), 1).await;
     let snapshot: Value = sqlx::query_scalar(
@@ -1493,4 +1538,195 @@ async fn cancelled_changes_are_not_revived_by_names_when_old_audio_still_exists(
         "a rename cannot revive a cancelled real change"
     );
     assert_eq!(current(&pool, owner).await, original);
+}
+
+async fn legacy_profile_with_two_assets(
+    actor: Uuid,
+    service: &GeneratedAudioService,
+    a: Uuid,
+    b: Uuid,
+) -> Value {
+    let mut voices = vec![];
+    for (version, rate) in [(a, 0), (b, -27)] {
+        let mut request = input(Uuid::now_v7(), version, "Hello");
+        request.setting.rate_percent = rate;
+        let mut setting = request.setting.clone();
+        setting.audio_asset_id = Some(service.generate(actor, 0, request).await.unwrap().asset.id);
+        voices.push(setting);
+    }
+    json!({"voices":voices,"dubbing":{"mode":"inherit","area":"example"}})
+}
+
+async fn link_legacy_profile_assets(pool: &PgPool, owner: Uuid, profile: &Value) {
+    for setting in profile["voices"].as_array().unwrap() {
+        let asset = Uuid::parse_str(setting["audio_asset_id"].as_str().unwrap()).unwrap();
+        sqlx::query("INSERT INTO lexicon.shared_sentence_audio_asset_references(asset_id,sentence_id,scope,variant_id) SELECT $1,$2,'draft',target_id FROM speech.dubbing_dependencies WHERE owner_kind='sentence' AND owner_id=$2 ON CONFLICT DO NOTHING").bind(asset).bind(owner).execute(pool).await.unwrap();
+    }
+}
+
+#[sqlx::test]
+async fn reused_assets_are_application_facts_when_a_partially_applied_batch_reverts(pool: PgPool) {
+    let (actor, a, version, provider, storage) = setup(&pool).await;
+    let second = Uuid::now_v7();
+    let mut values = group(a, version, 0);
+    let mut extra = values.uk[0].clone();
+    extra.id = second;
+    extra.name = "second".into();
+    extra.parameters.rate_percent = -27;
+    values.uk.push(extra);
+    save(&pool, actor, values.clone(), 0).await;
+    sqlx::query("UPDATE speech.dubbing_audio_updates SET state='cancelled' WHERE state='pending'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let service =
+        GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(storage.clone()));
+    let mut owners = vec![];
+    for _ in 0..9 {
+        let profile = legacy_profile_with_two_assets(actor, &service, version, second).await;
+        let owner = sentence(&pool, actor, profile.clone()).await;
+        link_legacy_profile_assets(&pool, owner, &profile).await;
+        owners.push(owner);
+    }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    values.uk.swap(0, 1);
+    save(&pool, actor, values.clone(), 1).await;
+    due(&pool).await;
+    assert_eq!(
+        audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+            .await
+            .unwrap(),
+        8
+    );
+    let partial = audio_updates::list(&pool, a)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(
+        (
+            partial.state.as_str(),
+            partial.skipped,
+            partial.completed,
+            partial.total
+        ),
+        ("running", 8, 0, 9),
+        "generation counters keep their old semantics even though eight profiles changed"
+    );
+    values.uk.swap(0, 1);
+    save(&pool, actor, values, 2).await;
+    due(&pool).await;
+    while audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap()
+        > 0
+    {}
+    for owner in owners {
+        assert_eq!(
+            current(&pool, owner).await["voices"][0]["rate_percent"],
+            0,
+            "asset reuse must not hide a committed switch to the other default"
+        );
+    }
+    let writes: i64 = sqlx::query_scalar("SELECT count(*) FROM speech.dubbing_audio_update_targets WHERE update_id=$1 AND applied IS TRUE").bind(partial.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        writes, 8,
+        "reusing assets still records each actual profile write"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+#[sqlx::test]
+async fn retry_cannot_cross_a_successor_that_applied_reused_audio(pool: PgPool) {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+    let (actor, a, version, provider, storage) = setup(&pool).await;
+    let second = Uuid::now_v7();
+    let mut values = group(a, version, 0);
+    let mut extra = values.uk[0].clone();
+    extra.id = second;
+    extra.name = "second".into();
+    extra.parameters.rate_percent = -27;
+    values.uk.push(extra);
+    save(&pool, actor, values.clone(), 0).await;
+    sqlx::query("UPDATE speech.dubbing_audio_updates SET state='cancelled' WHERE state='pending'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let owner = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
+    values.uk.swap(0, 1);
+    save(&pool, actor, values.clone(), 1).await;
+    due(&pool).await;
+    for _ in 0..3 {
+        sqlx::query("UPDATE speech.dubbing_audio_update_targets SET retry_at=now()-interval '1 second' WHERE state='pending'").execute(&pool).await.unwrap();
+        audio_updates::sweep(&pool, None, Some(storage.clone()))
+            .await
+            .unwrap();
+    }
+    let failed = audio_updates::list(&pool, a)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(failed.state, "failed");
+    let service =
+        GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(storage.clone()));
+    let profile = legacy_profile_with_two_assets(actor, &service, version, second).await;
+    sqlx::query("UPDATE lexicon.shared_sentences SET content=jsonb_set(content,'{en_text,uk,variant,voice_profile}',$2) WHERE id=$1").bind(owner).bind(&profile).execute(&pool).await.unwrap();
+    link_legacy_profile_assets(&pool, owner, &profile).await;
+    values.name = "reuse saved versions".into();
+    save(&pool, actor, values, 2).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider), Some(storage))
+        .await
+        .unwrap();
+    let later = audio_updates::list(&pool, a)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(
+        (later.state.as_str(), later.skipped, later.completed),
+        ("completed", 1, 0)
+    );
+    assert_eq!(
+        current(&pool, owner).await["voices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        current(&pool, owner).await["voices"][0]["version_id"],
+        json!(second)
+    );
+    let state = tsz_rust::state::AppState::for_test(pool.clone());
+    let token = state.admin_token_manager.generate(actor, "admin").unwrap();
+    let response = tsz_rust::router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/admin/speech/audio-updates/{}/retry",
+                    failed.id
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "a reused asset was actually applied, so the older failure is obsolete"
+    );
 }

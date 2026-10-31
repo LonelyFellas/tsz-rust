@@ -154,7 +154,7 @@ pub(crate) async fn enqueue_areas(
             }
         }
     }
-    // Keep only predecessor batches that actually switched a target. Pending
+    // Preserve actual writes and unknown historical terminal outcomes. Pending
     // and cancelled updates must not turn a later rename into an implicit retry.
     let mut predecessors = merged.clone();
     for row in active
@@ -168,7 +168,7 @@ pub(crate) async fn enqueue_areas(
             );
         }
     }
-    let applied: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT update_id FROM speech.dubbing_audio_update_targets WHERE update_id=ANY($1) AND state='completed' ORDER BY update_id")
+    let applied: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT update_id FROM speech.dubbing_audio_update_targets WHERE update_id=ANY($1) AND (applied IS TRUE OR (applied IS NULL AND state IN ('completed','skipped'))) ORDER BY update_id")
         .bind(predecessors.into_iter().collect::<Vec<_>>()).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
     if !applied.is_empty() {
         baseline.insert(
@@ -377,8 +377,9 @@ pub async fn change(
                          AND (failed.owner_kind,failed.owner_id,failed.target_id,failed.target_path)=
                              (changed.owner_kind,changed.owner_id,changed.target_id,changed.target_path)
                         WHERE changed.update_id=newer.id
-                          AND (changed.state='completed' OR (newer.state='completed'
-                            AND (changed.state<>'skipped' OR changed.error_code IS NOT NULL)))
+                          AND (changed.applied IS TRUE
+                            OR (changed.applied IS NULL AND changed.state IN ('completed','skipped'))
+                            OR (newer.state='completed' AND changed.error_code IS NOT NULL))
                       )
                     )
                   ))
