@@ -154,6 +154,28 @@ pub(crate) async fn enqueue_areas(
             }
         }
     }
+    // Keep only predecessor batches that actually switched a target. Pending
+    // and cancelled updates must not turn a later rename into an implicit retry.
+    let mut predecessors = merged.clone();
+    for row in active
+        .iter()
+        .filter(|row| merged.contains(&row.get::<Uuid, _>("id")))
+    {
+        let saved: serde_json::Value = row.get("baseline_groups");
+        if let Some(value) = saved.get("_applied_updates") {
+            predecessors.extend(
+                serde_json::from_value::<Vec<Uuid>>(value.clone()).map_err(AppError::internal)?,
+            );
+        }
+    }
+    let applied: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT update_id FROM speech.dubbing_audio_update_targets WHERE update_id=ANY($1) AND state='completed' ORDER BY update_id")
+        .bind(predecessors.into_iter().collect::<Vec<_>>()).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
+    if !applied.is_empty() {
+        baseline.insert(
+            "_applied_updates".into(),
+            serde_json::to_value(applied).map_err(AppError::internal)?,
+        );
+    }
     for area in &areas {
         if !baseline.contains_key(area) {
             let groups = previous

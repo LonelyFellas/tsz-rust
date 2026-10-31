@@ -272,22 +272,9 @@ async fn run(
             }
         }
     }
-    // Baseline equality cannot undo an effect already committed by a superseded
-    // batch. Only genuinely missing audio with no contradictory active asset skips.
-    let current_audio_matches = profile
-        .voices
+    if hashes
         .iter()
-        .filter(|setting| setting.enabled)
-        .filter_map(|setting| setting.audio_asset_id)
-        .all(|asset| {
-            old.iter()
-                .find(|(_, saved)| *saved == asset)
-                .is_some_and(|(hash, _)| hashes.contains(hash))
-        });
-    if current_audio_matches
-        && hashes
-            .iter()
-            .any(|hash| !old.iter().any(|(saved, _)| saved == hash))
+        .any(|hash| !old.iter().any(|(saved, _)| saved == hash))
         && let Some(baseline) = profile
             .area()
             .and_then(|area| claim.baseline_groups.get(area.as_str()))
@@ -316,7 +303,23 @@ async fn run(
                     );
                 }
                 if previous_hashes == hashes {
-                    return Ok(false);
+                    let predecessors = claim
+                        .baseline_groups
+                        .get("_applied_updates")
+                        .map(|value| {
+                            serde_json::from_value::<Vec<Uuid>>(value.clone())
+                                .map_err(AppError::internal)
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+                    // A partially applied predecessor must be restored even when
+                    // the batch's original default equals the latest default.
+                    let applied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets WHERE update_id=ANY($1) AND owner_kind=$2 AND owner_id=$3 AND target_id=$4 AND target_path=$5 AND state='completed')")
+                        .bind(predecessors).bind(&claim.kind).bind(claim.owner).bind(claim.target).bind(&claim.path)
+                        .fetch_one(&mut *conn).await.map_err(AppError::internal)?;
+                    if !applied {
+                        return Ok(false);
+                    }
                 }
             }
             Err(error) if error.code() == ErrorCode::InvalidSpeechPreview => {}

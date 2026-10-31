@@ -1459,3 +1459,38 @@ async fn baseline_noop_jobs_keep_failed_updates_explicitly_retryable(pool: PgPoo
         StatusCode::CONFLICT
     );
 }
+
+#[sqlx::test]
+async fn cancelled_changes_are_not_revived_by_names_when_old_audio_still_exists(pool: PgPool) {
+    let (actor, a, version, provider, storage) = setup(&pool).await;
+    let owner = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
+    save(&pool, actor, group(a, version, 0), 0).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    let original = current(&pool, owner).await;
+    save(&pool, actor, group(a, version, -27), 1).await;
+    sqlx::query("UPDATE speech.dubbing_audio_updates SET state='cancelled' WHERE state='pending'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut renamed = group(a, version, -27);
+    renamed.name = "name after cancellation".into();
+    save(&pool, actor, renamed, 2).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "a rename cannot revive a cancelled real change"
+    );
+    assert_eq!(current(&pool, owner).await, original);
+}
