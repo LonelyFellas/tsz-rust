@@ -36,3 +36,5 @@ pub use ssml::build_ssml;
 mod generated_source_tests;
 #[cfg(test)]
 mod tests;
+
+pub mod playback;
