@@ -123,8 +123,9 @@ pub(super) async fn read(conn: &mut PgConnection) -> Result<DubbingGroupsV3Respo
     // One statement gives side settings and pairing metadata the same MVCC snapshot.
     let row = sqlx::query("SELECT groups,revision,order_revision,COALESCE((SELECT jsonb_object_agg(group_id::text,pairs) FROM speech.dubbing_group_pairings),'{}'::jsonb) AS pairings FROM speech.dubbing_groups WHERE singleton")
         .fetch_one(conn).await.map_err(AppError::internal)?;
-    let groups: Vec<DubbingGroup> =
+    let mut groups: Vec<DubbingGroup> =
         serde_json::from_value(row.get("groups")).map_err(AppError::internal)?;
+    groups.sort_by_key(|group| group.is_global);
     let pairings: serde_json::Value = row.get("pairings");
     let groups = groups
         .into_iter()

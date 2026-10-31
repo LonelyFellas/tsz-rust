@@ -696,6 +696,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "PUT",
+        "/speech/groups/order",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "PUT",
         "/speech/groups/{id}",
         RoutePolicy::All(&["speech.global_dubbing"]),
     ),

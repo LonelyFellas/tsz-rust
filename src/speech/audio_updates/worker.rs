@@ -25,6 +25,7 @@ struct Claim {
     owner: Uuid,
     target: Uuid,
     path: String,
+    baseline_groups: Value,
     token: Uuid,
 }
 
@@ -52,7 +53,7 @@ async fn claim(pool: &PgPool) -> Result<Option<Claim>, AppError> {
         sqlx::query("UPDATE speech.dubbing_audio_updates SET state=CASE WHEN EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets WHERE update_id=$1) THEN 'running' ELSE 'completed' END,updated_at=now() WHERE id=$1")
             .bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     }
-    let row=sqlx::query("SELECT t.id,t.update_id,t.owner_kind,t.owner_id,t.target_id,t.target_path,j.created_by_admin_id,j.security_version,j.test_run FROM speech.dubbing_audio_update_targets t JOIN speech.dubbing_audio_updates j ON j.id=t.update_id WHERE j.state='running' AND ((t.state='pending' AND t.retry_at<=now()) OR (t.state='running' AND t.lease_until<=now())) AND t.attempts<3 AND NOT EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets busy JOIN speech.dubbing_audio_updates active ON active.id=busy.update_id WHERE busy.id<>t.id AND busy.owner_kind=t.owner_kind AND busy.owner_id=t.owner_id AND busy.state='running' AND busy.lease_until>now() AND active.state='running') ORDER BY j.due_at,t.id LIMIT 1 FOR UPDATE OF t SKIP LOCKED")
+    let row=sqlx::query("SELECT t.id,t.update_id,t.owner_kind,t.owner_id,t.target_id,t.target_path,j.created_by_admin_id,j.security_version,j.test_run,j.baseline_groups FROM speech.dubbing_audio_update_targets t JOIN speech.dubbing_audio_updates j ON j.id=t.update_id WHERE j.state='running' AND ((t.state='pending' AND t.retry_at<=now()) OR (t.state='running' AND t.lease_until<=now())) AND t.attempts<3 AND NOT EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets busy JOIN speech.dubbing_audio_updates active ON active.id=busy.update_id WHERE busy.id<>t.id AND busy.owner_kind=t.owner_kind AND busy.owner_id=t.owner_id AND busy.state='running' AND busy.lease_until>now() AND active.state='running') ORDER BY j.due_at,t.id LIMIT 1 FOR UPDATE OF t SKIP LOCKED")
         .fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
     let result = if let Some(row) = row {
         let id = row.get("id");
@@ -69,12 +70,13 @@ async fn claim(pool: &PgPool) -> Result<Option<Claim>, AppError> {
             owner: row.get("owner_id"),
             target: row.get("target_id"),
             path: row.get("target_path"),
+            baseline_groups: row.get("baseline_groups"),
         })
     } else {
         None
     };
     // The last crashed attempt must become terminal instead of remaining leased forever.
-    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state='failed',error_code='lease_expired',lease_token=NULL,lease_until=NULL WHERE state='running' AND attempts>=3 AND lease_until<=now()")
+    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state='failed',applied=false,error_code='lease_expired',lease_token=NULL,lease_until=NULL WHERE state='running' AND attempts>=3 AND lease_until<=now()")
         .execute(&mut *tx).await.map_err(AppError::internal)?;
     settle(&mut tx).await?;
     tx.commit().await.map_err(AppError::internal)?;
@@ -157,6 +159,7 @@ async fn effective(
     source: &GeneratedSpeechSource,
     path: &str,
     dialect: Option<&str>,
+    groups: Option<&[super::super::library::dto::DubbingGroup]>,
 ) -> Result<Vec<VoiceSettingV3>, AppError> {
     let side = match source {
         GeneratedSpeechSource::Phoneme {
@@ -188,9 +191,17 @@ async fn effective(
         let locale = if accent == "gb" { "en-GB" } else { "en-US" };
         let content = source.resolve(conn, locale).await?;
         let native = matches!(source, GeneratedSpeechSource::Phoneme { .. }).then_some(locale);
-        result.extend(
-            super::super::dubbing::resolve_in(conn, profile, accent, &content, native).await?,
-        );
+        result.extend(match groups {
+            Some(groups) => {
+                super::super::dubbing::resolve_in_groups(
+                    conn, profile, accent, &content, native, groups,
+                )
+                .await?
+            }
+            None => {
+                super::super::dubbing::resolve_in(conn, profile, accent, &content, native).await?
+            }
+        });
     }
     Ok(result)
 }
@@ -240,6 +251,7 @@ async fn run(
         &source,
         &claim.path,
         target.get("dialect").and_then(Value::as_str),
+        None,
     )
     .await?;
     let mut hashes = vec![];
@@ -258,6 +270,60 @@ async fn run(
                     old.push((hash, asset));
                 }
             }
+        }
+    }
+    if hashes
+        .iter()
+        .any(|hash| !old.iter().any(|(saved, _)| saved == hash))
+        && let Some(baseline) = profile
+            .area()
+            .and_then(|area| claim.baseline_groups.get(area.as_str()))
+            .filter(|value| !value.is_null())
+    {
+        let groups = serde_json::from_value::<Vec<super::super::library::dto::DubbingGroup>>(
+            baseline.clone(),
+        )
+        .map_err(AppError::internal)?;
+        match effective(
+            &mut conn,
+            &profile,
+            &source,
+            &claim.path,
+            target.get("dialect").and_then(Value::as_str),
+            Some(&groups),
+        )
+        .await
+        {
+            Ok(before) => {
+                let mut previous_hashes = vec![];
+                for setting in &before {
+                    previous_hashes.push(
+                        super::super::generated::prepare_effect(&mut conn, &source, setting)
+                            .await?,
+                    );
+                }
+                if previous_hashes == hashes {
+                    let predecessors = claim
+                        .baseline_groups
+                        .get("_applied_updates")
+                        .map(|value| {
+                            serde_json::from_value::<Vec<Uuid>>(value.clone())
+                                .map_err(AppError::internal)
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+                    // A partially applied predecessor must be restored even when
+                    // the batch's original default equals the latest default.
+                    let applied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets WHERE update_id=ANY($1) AND owner_kind=$2 AND owner_id=$3 AND target_id=$4 AND target_path=$5 AND (applied IS TRUE OR (applied IS NULL AND state IN ('completed','skipped'))))")
+                        .bind(predecessors).bind(&claim.kind).bind(claim.owner).bind(claim.target).bind(&claim.path)
+                        .fetch_one(&mut *conn).await.map_err(AppError::internal)?;
+                    if !applied {
+                        return Ok(false);
+                    }
+                }
+            }
+            Err(error) if error.code() == ErrorCode::InvalidSpeechPreview => {}
+            Err(error) => return Err(error),
         }
     }
     drop(conn);
@@ -330,6 +396,7 @@ async fn run(
             .pointer(&claim.path)
             .and_then(|target| target.get("dialect"))
             .and_then(Value::as_str),
+        None,
     )
     .await?;
     if latest.len() != settings.len() {
@@ -389,8 +456,8 @@ async fn run(
             .await?;
         }
     }
-    let completed=sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state=$3,error_code=NULL,lease_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 AND lease_token=$2 AND lease_until>clock_timestamp()")
-        .bind(claim.id).bind(claim.token).bind(if generated { "completed" } else { "skipped" }).execute(&mut *tx).await.map_err(AppError::internal)?;
+    let completed=sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state=$3,applied=$4,error_code=NULL,lease_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 AND lease_token=$2 AND lease_until>clock_timestamp()")
+        .bind(claim.id).bind(claim.token).bind(if generated { "completed" } else { "skipped" }).bind(changed).execute(&mut *tx).await.map_err(AppError::internal)?;
     if completed.rows_affected() != 1 {
         return Err(stale());
     }
@@ -422,7 +489,7 @@ async fn finish(
         }
     };
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
-    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state=CASE WHEN $5 AND attempts<3 THEN 'pending' ELSE $3 END,error_code=$4,lease_token=NULL,lease_until=NULL,retry_at=now()+interval '30 seconds',updated_at=now() WHERE id=$1 AND lease_token=$2 AND state='running'")
+    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state=CASE WHEN $5 AND attempts<3 THEN 'pending' ELSE $3 END,applied=false,error_code=$4,lease_token=NULL,lease_until=NULL,retry_at=now()+interval '30 seconds',updated_at=now() WHERE id=$1 AND lease_token=$2 AND state='running'")
         .bind(claim.id).bind(claim.token).bind(state).bind(code).bind(retry).execute(&mut *tx).await.map_err(AppError::internal)?;
     settle(&mut tx).await?;
     tx.commit().await.map_err(AppError::internal)

@@ -100,27 +100,19 @@ pub fn resolve_profile(
         return local;
     }
     let from_group = |group: &DubbingGroup| {
-        let mut items = (if accent == "gb" { &group.uk } else { &group.us })
+        (if accent == "gb" { &group.uk } else { &group.us })
             .iter()
             .filter(|item| item.selected)
-            .collect::<Vec<_>>();
-        items.sort_by_key(|item| {
-            profile
-                .recommendation_order()
-                .iter()
-                .position(|id| id == &item.id)
-                .unwrap_or(usize::MAX)
-        });
-        items
-            .into_iter()
             .map(setting)
-            .filter(|voice| eligible(voice))
+            .find(|voice| eligible(voice))
+            .into_iter()
             .collect::<Vec<_>>()
     };
-    if let Some(group) = groups.iter().find(|group| {
-        profile
-            .area()
-            .is_some_and(|area| group.areas.iter().any(|value| value == area.as_str()))
+    for group in groups.iter().filter(|group| {
+        !group.is_global
+            && profile
+                .area()
+                .is_some_and(|area| group.areas.iter().any(|value| value == area.as_str()))
     }) {
         let values = from_group(group);
         if !values.is_empty() {
@@ -162,18 +154,29 @@ pub async fn resolve_in(
     content: &crate::lexicon::dto::RichTextV2,
     native_locale: Option<&str>,
 ) -> Result<Vec<VoiceSettingV3>, AppError> {
-    let phoneme = content.annotations.iter().any(|mark| {
-        matches!(
-            mark,
-            crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
-        )
-    });
     let groups: Value =
         sqlx::query_scalar("SELECT groups FROM speech.dubbing_groups WHERE singleton")
             .fetch_one(&mut *conn)
             .await
             .map_err(AppError::internal)?;
     let groups: Vec<DubbingGroup> = serde_json::from_value(groups).map_err(AppError::internal)?;
+    resolve_in_groups(conn, profile, accent, content, native_locale, &groups).await
+}
+
+pub(crate) async fn resolve_in_groups(
+    conn: &mut PgConnection,
+    profile: &VoiceProfileV3,
+    accent: &str,
+    content: &crate::lexicon::dto::RichTextV2,
+    native_locale: Option<&str>,
+    groups: &[DubbingGroup],
+) -> Result<Vec<VoiceSettingV3>, AppError> {
+    let phoneme = content.annotations.iter().any(|mark| {
+        matches!(
+            mark,
+            crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
+        )
+    });
     let rows=sqlx::query("SELECT id,alias,provider_voice_id,locale,accent,styles,min_rate_percent,max_rate_percent,min_pitch_semitones,max_pitch_semitones FROM speech.voices WHERE enabled AND provider='azure' ORDER BY alias").fetch_all(&mut *conn).await.map_err(AppError::internal)?;
     let eligible = |setting: &VoiceSettingV3| {
         rows.iter()
@@ -255,8 +258,9 @@ pub async fn resolve_in(
     {
         return Err(unavailable());
     }
-    let mut resolved = resolve_profile(profile, &groups, accent, eligible);
-    if resolved.is_empty() && profile.mode().is_some() {
+    let mut resolved = resolve_profile(profile, groups, accent, eligible);
+    // Retain the historical local-empty behavior until the explicit pool migration.
+    if resolved.is_empty() && profile.mode() == Some(VoiceProfileModeV3::Local) {
         for row in &rows {
             let candidate = VoiceSettingV3 {
                 output_format: None,
@@ -562,7 +566,7 @@ mod tests {
                 .iter()
                 .map(|v| v.voice_id.as_str())
                 .collect::<Vec<_>>(),
-            ["second", "first"]
+            ["first"]
         );
         let local = profile(
             Some("local"),
@@ -584,6 +588,43 @@ mod tests {
         let old = profile(None, json!([]), vec![]);
         assert!(resolve_profile(&old, &groups, "gb", |_| true).is_empty());
     }
+    #[test]
+    fn priority_skips_empty_invalid_and_unselected_groups_before_global() {
+        let first = Uuid::now_v7();
+        let later = Uuid::now_v7();
+        let inherited = profile(Some("inherit"), json!([]), vec![first]);
+        let mut groups = vec![
+            group(
+                false,
+                vec![
+                    recommendation(first, "invalid", true),
+                    recommendation(Uuid::now_v7(), "unselected", false),
+                ],
+            ),
+            group(false, vec![]),
+            group(
+                false,
+                vec![
+                    recommendation(later, "later", true),
+                    recommendation(Uuid::now_v7(), "other", true),
+                ],
+            ),
+            group(true, vec![recommendation(Uuid::now_v7(), "global", true)]),
+        ];
+        let eligible = |voice: &VoiceSettingV3| voice.voice_id != "invalid";
+        let voices = resolve_profile(&inherited, &groups, "gb", eligible);
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].version_id, Some(later));
+        groups[2].uk[0].selected = false;
+        groups[2].uk[1].selected = false;
+        assert_eq!(
+            resolve_profile(&inherited, &groups, "gb", eligible)[0].voice_id,
+            "global"
+        );
+        groups[3].uk.clear();
+        assert!(resolve_profile(&inherited, &groups, "gb", eligible).is_empty());
+    }
+
     #[test]
     fn dependencies_only_include_explicit_inheritance_and_exclude_uploaded_audio() {
         let id = Uuid::now_v7();

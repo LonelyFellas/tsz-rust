@@ -94,6 +94,27 @@ pub async fn save_groups(
 }
 
 #[utoipa::path(
+    put, path = "/api/v1/admin/speech/groups/order", tag = "admin-speech", security(("bearer_auth"=[])),
+    request_body = SaveDubbingGroupOrderRequest,
+    responses((status=200,body=DubbingGroupsV3Response),(status=400),(status=401),(status=403),(status=409),(status=422))
+)]
+pub async fn save_order(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    headers: HeaderMap,
+    ApiJson(request): ApiJson<SaveDubbingGroupOrderRequest>,
+) -> Result<Json<DubbingGroupsV3Response>, AppError> {
+    require_active_admin(&state, &auth).await?;
+    let (_, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    Ok(Json(
+        VoiceLibraryRepository::new(state.pool)
+            .with_test_run(run)
+            .save_order(auth.subject, auth.security_version, request)
+            .await?,
+    ))
+}
+
+#[utoipa::path(
     post, path = "/api/v1/admin/speech/groups", tag = "admin-speech", security(("bearer_auth"=[])),
     request_body = DubbingGroupWriteRequest,
     params(("X-TSZ-Dubbing-Groups"=Option<String>,Header,description="v3 用于配对推荐")),

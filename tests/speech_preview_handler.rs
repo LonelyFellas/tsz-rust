@@ -75,7 +75,7 @@ async fn single_group_routes_protect_legacy_writes_and_project_unselected_candid
     let new: Value =
         serde_json::from_slice(&new.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(new["groups"].as_array().unwrap().len(), 2);
-    assert_eq!(new["groups"][1]["uk"][0]["selected"], false);
+    assert_eq!(new["groups"][0]["uk"][0]["selected"], false);
     let legacy = call(
         &state,
         Method::PUT,
@@ -131,6 +131,10 @@ async fn dubbing_resolve_uses_real_routes_without_generating_and_respects_permis
         .admin_token_manager
         .generate(actor, "super_admin")
         .unwrap();
+    // Inheritance can only use a selected recommendation, never an arbitrary catalog voice.
+    sqlx::query("UPDATE speech.dubbing_groups SET groups=jsonb_set(groups,'{0,uk}',$1) WHERE singleton")
+        .bind(json!([{"id":Uuid::now_v7(),"name":"global","voice_alias":"en-gb-sonianeural","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}]))
+        .execute(&pool).await.unwrap();
     let input = json!({"profile":{"voices":[],"dubbing":{"mode":"inherit","area":"word"}},"accent":"gb","source":{"kind":"text","content":{"version":2,"text":"123","annotations":[{"type":"say_as","start":0,"end":3,"interpret_as":"digits"}]}}});
     let resolved = call(
         &state,
@@ -702,7 +706,7 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
     assert_eq!(created.0, StatusCode::OK);
     assert_eq!(created.1["order_revision"], 1);
     assert_eq!(
-        created.1["groups"][1]["recommendations"]["pairs"],
+        created.1["groups"][0]["recommendations"]["pairs"],
         input["group"]["pairs"]
     );
     let read = paired_call(&base_url, Method::GET, path, Some(&token), None).await;
@@ -724,7 +728,8 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
         .await
         .unwrap()
         .groups
-        .pop()
+        .into_iter()
+        .rfind(|group| !group.is_global)
         .unwrap();
     assert_eq!(
         call(
@@ -801,5 +806,169 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
             .await
             .1,
         removed.1
+    );
+}
+
+#[sqlx::test]
+async fn priority_order_http_round_trip_and_qualification_keep_native_locale_and_phonemes(
+    pool: PgPool,
+) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool).await;
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let token = state
+        .admin_token_manager
+        .generate(actor, "super_admin")
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let mut server = tokio::task::JoinSet::new();
+    let app = tsz_rust::router(state.clone());
+    server.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    sqlx::query("UPDATE speech.voices SET accent='gb' WHERE alias='en-sg-lunaneural'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let path = "/api/v1/admin/speech/groups";
+    let order_path = format!("{path}/order");
+    let side = |alias| json!({"id":Uuid::now_v7(),"voice_alias":alias,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
+    let a = Uuid::now_v7();
+    let b = Uuid::now_v7();
+    let paired = json!({"base_revision":0,"group":{"id":a,"name":"native priority","is_global":false,"areas":["word"],"pairs":[{"id":Uuid::now_v7(),"name":"native","selected":true,"uk":side("en-sg-lunaneural"),"us":side("en-us-jennyneural")}]}});
+    assert_eq!(
+        paired_call(
+            &base,
+            Method::POST,
+            path,
+            Some(&token),
+            Some(paired.clone())
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    // An unconverted legacy group may share an area without conversion or loss of side IDs.
+    let rec = |alias| json!({"id":Uuid::now_v7(),"voice_alias":alias,"name":"legacy","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
+    let legacy = json!({"base_revision":0,"group":{"id":b,"name":"legacy second","is_global":false,"areas":["word"],"uk":[rec("en-gb-sonianeural")],"us":[]}});
+    assert_eq!(
+        call(
+            &state,
+            Method::POST,
+            path,
+            Some(&token),
+            Some(legacy.clone())
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let read = paired_call(&base, Method::GET, path, Some(&token), None)
+        .await
+        .1;
+    assert_eq!(read["groups"][0]["recommendations"]["format"], "paired");
+    assert_eq!(read["groups"][1]["recommendations"]["format"], "legacy");
+    assert_eq!(
+        read["groups"][1]["recommendations"]["uk"],
+        legacy["group"]["uk"]
+    );
+    let global = read["groups"][2]["id"].clone();
+    let mut request = json!({"profile":{"voices":[],"dubbing":{"mode":"inherit","area":"word"}},"accent":"gb","source":{"kind":"text","content":{"version":2,"text":"cat","annotations":[]}}});
+    let natural = paired_call(
+        &base,
+        Method::POST,
+        "/api/v1/admin/speech/resolve",
+        Some(&token),
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(natural.0, StatusCode::OK, "{}", natural.1);
+    assert_eq!(natural.1["voices"].as_array().unwrap().len(), 1);
+    assert_eq!(natural.1["voices"][0]["locale"], "en-SG");
+    request["source"]["content"]["annotations"] =
+        json!([{"type":"phoneme","start":0,"end":3,"alphabet":"ipa","phoneme":"kæt"}]);
+    let phoneme = paired_call(
+        &base,
+        Method::POST,
+        "/api/v1/admin/speech/resolve",
+        Some(&token),
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(phoneme.0, StatusCode::OK, "{}", phoneme.1);
+    assert_eq!(
+        phoneme.1["voices"][0]["voice_id"], "en-gb-sonianeural",
+        "native mismatch must skip to the next group without dropping phonemes"
+    );
+    let order = json!({"group_ids":[b,a,global],"base_revision":read["order_revision"]});
+    assert_eq!(
+        paired_call(&base, Method::PUT, &order_path, None, Some(order.clone()))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut draft = order.clone();
+    draft["groups"] = json!([legacy["group"]]);
+    assert_eq!(
+        paired_call(&base, Method::PUT, &order_path, Some(&token), Some(draft))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let sorted = paired_call(
+        &base,
+        Method::PUT,
+        &order_path,
+        Some(&token),
+        Some(order.clone()),
+    )
+    .await;
+    assert_eq!(sorted.0, StatusCode::OK, "{}", sorted.1);
+    assert_eq!(sorted.1["groups"][0], read["groups"][1]);
+    assert_eq!(sorted.1["groups"][1], read["groups"][0]);
+    assert_eq!(
+        paired_call(&base, Method::GET, path, Some(&token), None)
+            .await
+            .1,
+        sorted.1
+    );
+    assert_eq!(
+        paired_call(&base, Method::PUT, &order_path, Some(&token), Some(order))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    request["source"]["content"]["annotations"] = json!([]);
+    let resolved = paired_call(
+        &base,
+        Method::POST,
+        "/api/v1/admin/speech/resolve",
+        Some(&token),
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(resolved.1["voices"][0]["voice_id"], "en-gb-sonianeural");
+    // No selected eligible item and an empty global means unavailable, not a random voice.
+    sqlx::query("UPDATE speech.voices SET accent='none' WHERE alias IN ('en-gb-sonianeural','en-sg-lunaneural')").execute(&pool).await.unwrap();
+    assert_eq!(
+        paired_call(
+            &base,
+            Method::POST,
+            "/api/v1/admin/speech/resolve",
+            Some(&token),
+            Some(request)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM lexicon.audio_generations")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
     );
 }

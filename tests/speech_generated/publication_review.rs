@@ -403,44 +403,21 @@ async fn review_migration_roundtrip_preserves_audit_receipts(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn inherited_selection_reorder_and_addition_invalidate_review_but_rename_does_not(
+async fn inherited_first_choice_changes_invalidate_review_but_names_and_later_choices_do_not(
     pool: PgPool,
 ) {
     let (reviewer, entry, mut first, storage) = setup(&pool).await;
-    let service = GeneratedAudioService::new(
-        pool.clone(),
-        Some(Arc::new(Provider {
-            calls: AtomicUsize::new(0),
-            fail_first: false,
-        })),
-        Some(storage.clone()),
-    );
     let first_setting = first.setting.as_ref().unwrap().clone();
-    let mut request = input(Uuid::now_v7(), Uuid::now_v7(), "Hello");
-    request.setting.rate_percent = 10;
-    let mut second_setting = request.setting.clone();
-    second_setting.audio_asset_id = Some(
-        service
-            .generate(reviewer.actor_id, 0, request)
-            .await
-            .unwrap()
-            .asset
-            .id,
-    );
-    let mut second = first.clone();
-    second.target_id = Uuid::now_v7();
-    second.asset_id = second_setting.audio_asset_id;
-    second.setting = Some(second_setting.clone());
-    sqlx::query("INSERT INTO lexicon.v3_audio_asset_references(asset_id,entry_id,scope,variant_id) VALUES($1,$2,'draft',$3)")
-        .bind(second.asset_id).bind(entry).bind(second.target_id).execute(&pool).await.unwrap();
+    let mut second_setting = first_setting.clone();
+    second_setting.version_id = Some(Uuid::now_v7());
+    second_setting.rate_percent = 10;
     let profile: tsz_rust::lexicon::dto::VoiceProfileV3 = serde_json::from_value(json!({
-        "voices":[first_setting,second_setting],"dubbing":{"mode":"inherit","area":"word"}
+        "voices":[first_setting],"dubbing":{"mode":"inherit","area":"word"}
     }))
     .unwrap();
     first.source_path = "/content/uk".into();
-    second.source_path = first.source_path.clone();
+
     first.profile = Some(Arc::new(profile.clone()));
-    second.profile = Some(Arc::new(profile));
     let recommendation = |setting: &tsz_rust::lexicon::dto::VoiceSettingV3, name: &str| {
         json!({
             "id":setting.version_id,"name":name,"voice_alias":"sonia","selected":true,
@@ -448,9 +425,9 @@ async fn inherited_selection_reorder_and_addition_invalidate_review_but_rename_d
         })
     };
     let a = recommendation(first.setting.as_ref().unwrap(), "A");
-    let b = recommendation(second.setting.as_ref().unwrap(), "B");
+    let b = recommendation(&second_setting, "B");
     let groups = |items: serde_json::Value| json!([{"id":Uuid::now_v7(),"name":"word","areas":["word"],"uk":items,"us":[],"revision":1,"is_global":false}]);
-    let items = vec![first, second];
+    let items = vec![first];
     let probes = probe_assets(&pool, Owner::Entry(entry), &items, storage.as_ref())
         .await
         .unwrap();
@@ -494,7 +471,8 @@ async fn inherited_selection_reorder_and_addition_invalidate_review_but_rename_d
     for (selected, ready) in [
         (json!([renamed, b.clone()]), true),
         (json!([b.clone(), a.clone()]), false),
-        (json!([a, b, added]), false),
+        (json!([a.clone(), b.clone(), added.clone()]), true),
+        (json!([added, a, b]), false),
     ] {
         sqlx::query("UPDATE speech.dubbing_groups SET groups=$1 WHERE singleton")
             .bind(groups(selected))

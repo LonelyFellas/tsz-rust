@@ -51,6 +51,10 @@ pub fn router() -> Router<AppState> {
                 .post(crate::speech::library::handler::create_group),
         )
         .route(
+            "/groups/order",
+            axum::routing::put(crate::speech::library::handler::save_order),
+        )
+        .route(
             "/groups/{id}",
             axum::routing::put(crate::speech::library::handler::save_group)
                 .delete(crate::speech::library::handler::delete_group),
