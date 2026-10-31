@@ -593,3 +593,213 @@ async fn explicit_test_header_cannot_silently_generate_into_normal_storage(pool:
         0
     );
 }
+
+// Real loopback HTTP against the source-built router and the sqlx-isolated database.
+async fn paired_call(
+    base_url: &str,
+    method: Method,
+    path: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = reqwest::Client::new()
+        .request(method.clone(), format!("{base_url}{path}"))
+        .header("X-TSZ-Dubbing-Groups", "v3");
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    if let Some(body) = body {
+        request = request
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(&body).unwrap());
+    }
+    let response = request.send().await.unwrap();
+    let status = response.status();
+    if status == StatusCode::OK && method == Method::GET {
+        assert!(
+            response.headers()[header::VARY]
+                .to_str()
+                .unwrap()
+                .contains("x-tsz-dubbing-groups")
+        );
+    }
+    let value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    (status, value)
+}
+
+#[sqlx::test]
+async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let app = tsz_rust::router(state.clone());
+    let mut server = tokio::task::JoinSet::new();
+    server.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let actor = seed_admin(&pool).await;
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let token = state
+        .admin_token_manager
+        .generate(actor, "super_admin")
+        .unwrap();
+    let path = "/api/v1/admin/speech/groups";
+    assert_eq!(
+        paired_call(&base_url, Method::GET, path, None, None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let side = |alias| json!({"id":Uuid::now_v7(),"voice_alias":alias,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
+    let mut input = json!({"base_revision":0,"group":{"id":Uuid::now_v7(),"name":"paired HTTP","areas":["word"],"is_global":false,"pairs":[{"id":Uuid::now_v7(),"name":"complete","selected":true,"uk":side("en-gb-sonianeural"),"us":side("en-us-jennyneural")}]}});
+    // A new client must not silently send paired writes to an older representation.
+    assert_eq!(
+        call(
+            &state,
+            Method::POST,
+            path,
+            Some(&token),
+            Some(input.clone())
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut incomplete = input.clone();
+    incomplete["group"]["pairs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("us");
+    assert_eq!(
+        paired_call(
+            &base_url,
+            Method::POST,
+            path,
+            Some(&token),
+            Some(incomplete)
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut extra = input.clone();
+    extra["group"]["pairs"][0]["uk"]["extra"] = json!(true);
+    assert_eq!(
+        paired_call(&base_url, Method::POST, path, Some(&token), Some(extra))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let created = paired_call(
+        &base_url,
+        Method::POST,
+        path,
+        Some(&token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::OK);
+    assert_eq!(created.1["order_revision"], 1);
+    assert_eq!(
+        created.1["groups"][1]["recommendations"]["pairs"],
+        input["group"]["pairs"]
+    );
+    let read = paired_call(&base_url, Method::GET, path, Some(&token), None).await;
+    assert_eq!(
+        read.1, created.1,
+        "independent GET must read the saved representation"
+    );
+    let old = call(&state, Method::GET, path, Some(&token), None).await;
+    assert_eq!(old.0, StatusCode::OK);
+    assert_eq!(
+        old.1["groups"][0]["uk"][0]["id"],
+        input["group"]["pairs"][0]["uk"]["id"]
+    );
+    assert!(old.1.get("order_revision").is_none());
+    let id = input["group"]["id"].as_str().unwrap();
+    let edit_path = format!("{path}/{id}");
+    let old_group = tsz_rust::speech::library::VoiceLibraryRepository::new(pool.clone())
+        .groups(actor)
+        .await
+        .unwrap()
+        .groups
+        .pop()
+        .unwrap();
+    assert_eq!(
+        call(
+            &state,
+            Method::PUT,
+            &edit_path,
+            Some(&token),
+            Some(json!({"group":old_group,"base_revision":1}))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(
+            &state,
+            Method::DELETE,
+            &edit_path,
+            Some(&token),
+            Some(json!({"base_revision":1}))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    input["base_revision"] = json!(1);
+    input["group"]["pairs"][0]["uk"]["parameters"]["rate_percent"] = json!(-10);
+    assert_eq!(
+        paired_call(
+            &base_url,
+            Method::PUT,
+            &format!("{path}/{}", Uuid::now_v7()),
+            Some(&token),
+            Some(input.clone())
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let edited = paired_call(
+        &base_url,
+        Method::PUT,
+        &edit_path,
+        Some(&token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(edited.0, StatusCode::OK);
+    assert_eq!(edited.1["order_revision"], 1);
+    assert_eq!(
+        paired_call(
+            &base_url,
+            Method::PUT,
+            &edit_path,
+            Some(&token),
+            Some(input)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let removed = paired_call(
+        &base_url,
+        Method::DELETE,
+        &edit_path,
+        Some(&token),
+        Some(json!({"base_revision":2})),
+    )
+    .await;
+    assert_eq!(removed.0, StatusCode::OK);
+    assert_eq!(removed.1["order_revision"], 2);
+    assert_eq!(
+        paired_call(&base_url, Method::GET, path, Some(&token), None)
+            .await
+            .1,
+        removed.1
+    );
+}

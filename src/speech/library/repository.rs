@@ -8,8 +8,9 @@ use crate::{
 };
 
 use super::dto::{
-    DeleteDubbingGroupRequest, DubbingGroup, DubbingGroupsResponse, RestoreVoiceDescriptionRequest,
-    SaveDubbingGroupRequest, SaveDubbingGroupsRequest, SaveVoiceAccentRequest,
+    DeleteDubbingGroupRequest, DubbingGroup, DubbingGroupsReadResponse, DubbingGroupsResponse,
+    DubbingGroupsV3Response, RestoreVoiceDescriptionRequest, SaveDubbingGroupRequest,
+    SaveDubbingGroupsRequest, SavePairedDubbingGroupRequest, SaveVoiceAccentRequest,
     SaveVoiceDescriptionRequest, SaveVoiceSettingsRequest, VoiceLibraryItem, VoiceLibraryResponse,
     VoiceParameters,
 };
@@ -49,6 +50,14 @@ fn invalid() -> AppError {
     AppError::bad_request(
         ErrorCode::InvalidRequestBody,
         "invalid voice library settings",
+    )
+}
+
+fn paired_client_required() -> AppError {
+    AppError::conflict(
+        ErrorCode::RevisionConflict,
+        None,
+        "此组已采用英美配对，请更新客户端后编辑，原配置已保留",
     )
 }
 
@@ -182,6 +191,33 @@ impl VoiceLibraryRepository {
         Ok(result)
     }
 
+    pub async fn groups_v3(&self, actor: Uuid) -> Result<DubbingGroupsV3Response, AppError> {
+        let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+        authorize(&mut tx, actor, false).await?;
+        let result = super::pairs::read(&mut tx).await?;
+        tx.commit().await.map_err(AppError::internal)?;
+        Ok(result)
+    }
+
+    pub async fn save_paired_group(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        request: SavePairedDubbingGroupRequest,
+        create: bool,
+    ) -> Result<DubbingGroupsV3Response, AppError> {
+        let (request, links) = super::pairs::into_legacy(request)?;
+        match self
+            .save_group_inner(actor, security_version, request, create, Some(links))
+            .await?
+        {
+            DubbingGroupsReadResponse::Paired(result) => Ok(result),
+            DubbingGroupsReadResponse::Legacy(_) => {
+                unreachable!("paired write returns paired snapshot")
+            }
+        }
+    }
+
     pub async fn save_groups(
         &self,
         actor: Uuid,
@@ -201,9 +237,28 @@ impl VoiceLibraryRepository {
         &self,
         actor: Uuid,
         security_version: i64,
-        mut request: SaveDubbingGroupRequest,
+        request: SaveDubbingGroupRequest,
         create: bool,
     ) -> Result<DubbingGroupsResponse, AppError> {
+        match self
+            .save_group_inner(actor, security_version, request, create, None)
+            .await?
+        {
+            DubbingGroupsReadResponse::Legacy(result) => Ok(result),
+            DubbingGroupsReadResponse::Paired(_) => {
+                unreachable!("legacy write returns legacy snapshot")
+            }
+        }
+    }
+
+    async fn save_group_inner(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        mut request: SaveDubbingGroupRequest,
+        create: bool,
+        pairings: Option<Vec<super::pairs::PairLink>>,
+    ) -> Result<DubbingGroupsReadResponse, AppError> {
         let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
         authorize_write(&mut tx, actor, security_version, true).await?;
         let row = sqlx::query(
@@ -215,6 +270,40 @@ impl VoiceLibraryRepository {
         let mut groups: Vec<DubbingGroup> =
             serde_json::from_value(row.get("groups")).map_err(AppError::internal)?;
         let index = groups.iter().position(|group| group.id == request.group.id);
+        let paired: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM speech.dubbing_group_pairings WHERE group_id=$1)",
+        )
+        .bind(request.group.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+        if paired && pairings.is_none() {
+            return Err(paired_client_required());
+        }
+        if !paired
+            && pairings.is_some()
+            && let Some(index) = index
+        {
+            // Explicit conversion must retain every existing side identity, including unselected entries.
+            for (old, new) in [
+                (&groups[index].uk, &request.group.uk),
+                (&groups[index].us, &request.group.us),
+            ] {
+                if old
+                    .iter()
+                    .any(|item| !new.iter().any(|next| next.id == item.id))
+                {
+                    return Err(AppError::bad_request(
+                        ErrorCode::InvalidRequestBody,
+                        "转换配对须保留所有历史推荐身份，请明确补齐配对",
+                    ));
+                }
+            }
+        }
+
+        super::pairs::validate_identities(&mut tx, &groups, &request.group, pairings.as_deref())
+            .await?;
+
         if create
             && groups
                 .iter()
@@ -328,7 +417,22 @@ impl VoiceLibraryRepository {
                     validate_parameters(&voice, &item.parameters)?;
                 }
             }
-            items.sort_by_key(|item| !item.selected);
+            if pairings.is_none() {
+                items.sort_by_key(|item| !item.selected);
+            }
+        }
+        if let Some(links) = &pairings {
+            sqlx::query("INSERT INTO speech.dubbing_group_pairings(group_id,pairs) VALUES($1,$2) ON CONFLICT(group_id) DO UPDATE SET pairs=EXCLUDED.pairs")
+                .bind(request.group.id).bind(serde_json::to_value(links).map_err(AppError::internal)?)
+                .execute(&mut *tx).await.map_err(AppError::internal)?;
+        }
+        if create {
+            sqlx::query(
+                "UPDATE speech.dubbing_groups SET order_revision=order_revision+1 WHERE singleton",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
         }
         request.group.revision = index.map_or(1, |i| groups[i].revision + 1);
         request.group.name = request.group.name.trim().into();
@@ -348,11 +452,16 @@ impl VoiceLibraryRepository {
             groups.push(request.group);
         }
         write_groups(&mut tx, actor, &groups).await?;
+        let result = if pairings.is_some() {
+            DubbingGroupsReadResponse::Paired(super::pairs::read(&mut tx).await?)
+        } else {
+            DubbingGroupsReadResponse::Legacy(DubbingGroupsResponse {
+                groups,
+                revision: row.get::<i64, _>("revision") + 1,
+            })
+        };
         tx.commit().await.map_err(AppError::internal)?;
-        Ok(DubbingGroupsResponse {
-            groups,
-            revision: row.get::<i64, _>("revision") + 1,
-        })
+        Ok(result)
     }
 
     pub async fn delete_group(
@@ -362,6 +471,43 @@ impl VoiceLibraryRepository {
         id: Uuid,
         request: DeleteDubbingGroupRequest,
     ) -> Result<DubbingGroupsResponse, AppError> {
+        match self
+            .delete_group_inner(actor, security_version, id, request, false)
+            .await?
+        {
+            DubbingGroupsReadResponse::Legacy(result) => Ok(result),
+            DubbingGroupsReadResponse::Paired(_) => {
+                unreachable!("legacy delete returns legacy snapshot")
+            }
+        }
+    }
+
+    pub async fn delete_paired_group(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        id: Uuid,
+        request: DeleteDubbingGroupRequest,
+    ) -> Result<DubbingGroupsV3Response, AppError> {
+        match self
+            .delete_group_inner(actor, security_version, id, request, true)
+            .await?
+        {
+            DubbingGroupsReadResponse::Paired(result) => Ok(result),
+            DubbingGroupsReadResponse::Legacy(_) => {
+                unreachable!("paired delete returns paired snapshot")
+            }
+        }
+    }
+
+    async fn delete_group_inner(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        id: Uuid,
+        request: DeleteDubbingGroupRequest,
+        allow_paired: bool,
+    ) -> Result<DubbingGroupsReadResponse, AppError> {
         let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
         authorize_write(&mut tx, actor, security_version, true).await?;
         let row = sqlx::query(
@@ -376,6 +522,17 @@ impl VoiceLibraryRepository {
             .iter()
             .position(|group| group.id == id)
             .ok_or_else(|| AppError::not_found("分组不存在"))?;
+        if !allow_paired
+            && sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM speech.dubbing_group_pairings WHERE group_id=$1)",
+            )
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::internal)?
+        {
+            return Err(paired_client_required());
+        }
         if groups[index].is_global {
             return Err(invalid());
         }
@@ -396,13 +553,29 @@ impl VoiceLibraryRepository {
             self.test_run.as_deref(),
         )
         .await?;
+        sqlx::query("DELETE FROM speech.dubbing_group_pairings WHERE group_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+        sqlx::query(
+            "UPDATE speech.dubbing_groups SET order_revision=order_revision+1 WHERE singleton",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
         groups.remove(index);
         write_groups(&mut tx, actor, &groups).await?;
+        let result = if allow_paired {
+            DubbingGroupsReadResponse::Paired(super::pairs::read(&mut tx).await?)
+        } else {
+            DubbingGroupsReadResponse::Legacy(DubbingGroupsResponse {
+                groups,
+                revision: row.get::<i64, _>("revision") + 1,
+            })
+        };
         tx.commit().await.map_err(AppError::internal)?;
-        Ok(DubbingGroupsResponse {
-            groups,
-            revision: row.get::<i64, _>("revision") + 1,
-        })
+        Ok(result)
     }
 
     pub fn new(pool: PgPool) -> Self {

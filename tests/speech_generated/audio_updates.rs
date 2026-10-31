@@ -361,6 +361,21 @@ async fn delayed_updates_recheck_permissions_and_exclude_independent_targets(poo
     assert_eq!(job.error_codes, vec!["forbidden"]);
 }
 
+// Migration tests prepare the data that existed before pairing support. Calling the
+// current repository here would require tables newer than the schema under test.
+async fn seed_historical_group_and_job(pool: &PgPool, actor: Uuid, mut group: DubbingGroup) {
+    group.revision = 1;
+    let mut tx = pool.begin().await.unwrap();
+    let updated = sqlx::query("UPDATE speech.dubbing_groups SET groups=groups || $1::jsonb,revision=revision+1,updated_by=$2,updated_at=now() WHERE singleton")
+        .bind(json!([&group])).bind(actor).execute(&mut *tx).await.unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+    let inserted = sqlx::query("INSERT INTO speech.dubbing_audio_updates(id,group_id,group_name,group_revision,areas,created_by_admin_id,security_version,due_at) SELECT $1,$2,$3,$4,$5,$6,0,now()+make_interval(secs=>wait_seconds) FROM speech.dubbing_update_settings WHERE singleton")
+        .bind(Uuid::now_v7()).bind(group.id).bind(&group.name).bind(group.revision)
+        .bind(&group.areas).bind(actor).execute(&mut *tx).await.unwrap();
+    assert_eq!(inserted.rows_affected(), 1);
+    tx.commit().await.unwrap();
+}
+
 #[sqlx::test(migrations = false)]
 async fn delayed_updates_migration_is_reversible_until_queue_data_is_written(pool: PgPool) {
     sqlx::migrate!("./migrations")
@@ -372,7 +387,7 @@ async fn delayed_updates_migration_is_reversible_until_queue_data_is_written(poo
     sqlx::raw_sql(down).execute(&pool).await.unwrap();
     sqlx::raw_sql(up).execute(&pool).await.unwrap();
     let (actor, id, version, _, _) = setup(&pool).await;
-    save(&pool, actor, group(id, version, 0), 0).await;
+    seed_historical_group_and_job(&pool, actor, group(id, version, 0)).await;
     let error = sqlx::raw_sql(down).execute(&pool).await.unwrap_err();
     assert!(
         error
@@ -402,7 +417,7 @@ async fn automatic_updates_migration_preserves_settings_and_pending_jobs(pool: P
         json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
     )
     .await;
-    save(&pool, actor, group(id, version, 0), 0).await;
+    seed_historical_group_and_job(&pool, actor, group(id, version, 0)).await;
     let job = audio_updates::list(&pool, id)
         .await
         .unwrap()
