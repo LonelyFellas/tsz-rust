@@ -206,6 +206,83 @@ pub(crate) async fn validate_pool_identities(
     Ok(())
 }
 
+/// One catalog snapshot and eligibility rule for recommendation resolution and publication playback.
+pub(crate) async fn playback_catalog(
+    conn: &mut PgConnection,
+) -> Result<Vec<sqlx::postgres::PgRow>, AppError> {
+    sqlx::query("SELECT id,alias,provider_voice_id,locale,accent,styles,min_rate_percent,max_rate_percent,min_pitch_semitones,max_pitch_semitones FROM speech.voices WHERE enabled AND provider='azure' ORDER BY alias").fetch_all(&mut *conn).await.map_err(AppError::internal)
+}
+pub(crate) fn setting_available(
+    rows: &[sqlx::postgres::PgRow],
+    setting: &VoiceSettingV3,
+    accent: &str,
+    content: &crate::lexicon::dto::RichTextV2,
+    native_locale: Option<&str>,
+) -> bool {
+    let phoneme = content.annotations.iter().any(|mark| {
+        matches!(
+            mark,
+            crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
+        )
+    });
+    rows.iter()
+        .find(|row| row.get::<String, _>("alias") == setting.voice_id)
+        .is_some_and(|row| {
+            let locale = row.get::<String, _>("locale");
+            let id = row.get::<String, _>("provider_voice_id");
+            if row.get::<String, _>("accent") != accent
+                || !super::capabilities::synthesis_available(&id, &locale)
+                || native_locale.is_some_and(|required| locale != required)
+                || (phoneme && locale != if accent == "gb" { "en-GB" } else { "en-US" })
+            {
+                return false;
+            }
+            let Ok(styles) = serde_json::from_value::<Vec<String>>(row.get("styles")) else {
+                return false;
+            };
+            let Ok(voice) = Voice::new("azure", id, &locale, styles) else {
+                return false;
+            };
+            let effective = super::generated::effective_setting_with_limits(
+                setting,
+                &voice,
+                (row.get("min_rate_percent"), row.get("max_rate_percent")),
+                (
+                    row.get("min_pitch_semitones"),
+                    row.get("max_pitch_semitones"),
+                ),
+            );
+            let setting = &effective;
+            if setting.locale.is_some_and(|value| value.as_str() != locale)
+                || setting.rate_percent < row.get("min_rate_percent")
+                || setting.rate_percent > row.get("max_rate_percent")
+                || i16::from(setting.pitch_semitones.unwrap_or(0)) < row.get("min_pitch_semitones")
+                || i16::from(setting.pitch_semitones.unwrap_or(0)) > row.get("max_pitch_semitones")
+            {
+                return false;
+            }
+            SpeechOptions::new(
+                &voice,
+                setting.style.clone(),
+                setting.rate_percent,
+                setting.pitch_semitones.unwrap_or(0),
+                setting.volume_percent.unwrap_or(100),
+            )
+            .and_then(|options| {
+                options.with_expression(
+                    &voice,
+                    setting
+                        .style_degree
+                        .as_ref()
+                        .and_then(serde_json::Number::as_f64),
+                    setting.role.clone(),
+                )
+            })
+            .and_then(|options| super::SynthesisRequest::new(voice, options, content.clone()))
+            .is_ok()
+        })
+}
+
 pub(crate) async fn resolve_in_groups(
     conn: &mut PgConnection,
     profile: &VoiceProfileV3,
@@ -215,72 +292,9 @@ pub(crate) async fn resolve_in_groups(
     groups: &[DubbingGroup],
 ) -> Result<Vec<VoiceSettingV3>, AppError> {
     validate_pool_identities(conn, profile).await?;
-    let phoneme = content.annotations.iter().any(|mark| {
-        matches!(
-            mark,
-            crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
-        )
-    });
-    let rows=sqlx::query("SELECT id,alias,provider_voice_id,locale,accent,styles,min_rate_percent,max_rate_percent,min_pitch_semitones,max_pitch_semitones FROM speech.voices WHERE enabled AND provider='azure' ORDER BY alias").fetch_all(&mut *conn).await.map_err(AppError::internal)?;
+    let rows = playback_catalog(conn).await?;
     let eligible = |setting: &VoiceSettingV3| {
-        rows.iter()
-            .find(|row| row.get::<String, _>("alias") == setting.voice_id)
-            .is_some_and(|row| {
-                let locale = row.get::<String, _>("locale");
-                let id = row.get::<String, _>("provider_voice_id");
-                if row.get::<String, _>("accent") != accent
-                    || !super::capabilities::synthesis_available(&id, &locale)
-                    || native_locale.is_some_and(|required| locale != required)
-                    || (phoneme && locale != if accent == "gb" { "en-GB" } else { "en-US" })
-                {
-                    return false;
-                }
-                let Ok(styles) = serde_json::from_value::<Vec<String>>(row.get("styles")) else {
-                    return false;
-                };
-                let Ok(voice) = Voice::new("azure", id, &locale, styles) else {
-                    return false;
-                };
-                let effective = super::generated::effective_setting_with_limits(
-                    setting,
-                    &voice,
-                    (row.get("min_rate_percent"), row.get("max_rate_percent")),
-                    (
-                        row.get("min_pitch_semitones"),
-                        row.get("max_pitch_semitones"),
-                    ),
-                );
-                let setting = &effective;
-                if setting.locale.is_some_and(|value| value.as_str() != locale)
-                    || setting.rate_percent < row.get("min_rate_percent")
-                    || setting.rate_percent > row.get("max_rate_percent")
-                    || i16::from(setting.pitch_semitones.unwrap_or(0))
-                        < row.get("min_pitch_semitones")
-                    || i16::from(setting.pitch_semitones.unwrap_or(0))
-                        > row.get("max_pitch_semitones")
-                {
-                    return false;
-                }
-                SpeechOptions::new(
-                    &voice,
-                    setting.style.clone(),
-                    setting.rate_percent,
-                    setting.pitch_semitones.unwrap_or(0),
-                    setting.volume_percent.unwrap_or(100),
-                )
-                .and_then(|options| {
-                    options.with_expression(
-                        &voice,
-                        setting
-                            .style_degree
-                            .as_ref()
-                            .and_then(serde_json::Number::as_f64),
-                        setting.role.clone(),
-                    )
-                })
-                .and_then(|options| super::SynthesisRequest::new(voice, options, content.clone()))
-                .is_ok()
-            })
+        setting_available(&rows, setting, accent, content, native_locale)
     };
     let local_selected = profile.mode() != Some(VoiceProfileModeV3::Inherit)
         && profile.voices.iter().any(|setting| {

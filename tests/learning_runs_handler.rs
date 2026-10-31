@@ -574,3 +574,212 @@ async fn source_owner_expiring_while_read_waits_hides_questions_and_receipts(poo
 }
 
 mod learning_plans;
+
+#[sqlx::test]
+async fn answer_audio_is_private_fixed_and_uses_question_publication(pool: PgPool) {
+    use std::{sync::Arc, time::Duration};
+    use tsz_rust::platform::storage::{
+        MemoryAdapter, ObjectContentType, ObjectKey, PutOptions, StoragePolicy, StoragePrivacy,
+        StorageRegistry, StorageSpace,
+    };
+    use uuid::Uuid;
+    let (mut state, auth, list) = setup(&pool).await;
+    // Empty migration round trip. Populated facts must later block down.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261031120000_learning_audio.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261031120000_learning_audio.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    let store = MemoryAdapter::object_store(
+        StorageSpace::parse("audio").unwrap(),
+        StoragePolicy::new(StoragePrivacy::Private, 1024, Duration::from_secs(60), None).unwrap(),
+    );
+    state.object_storage = StorageRegistry::from_stores([Arc::clone(&store)]).unwrap();
+    let (entry, publication, mut snapshot, actor): (Uuid, Uuid, Value, Uuid) = sqlx::query_as("SELECT e.id,p.id,p.snapshot,p.published_by_admin_id FROM wordlist_items i JOIN lexicon.entries e ON e.id=i.entry_id JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE i.wordlist_id=$1")
+        .bind(list).fetch_one(&pool).await.unwrap();
+    let mut assets = Vec::new();
+    for index in 0..2 {
+        let asset = Uuid::now_v7();
+        let key = format!("fixtures/learning/{asset}.mp3");
+        store
+            .put(
+                &ObjectKey::parse(&key).unwrap(),
+                b"ID3".to_vec(),
+                PutOptions::new(Some(ObjectContentType::parse("audio/mpeg").unwrap())),
+            )
+            .await
+            .unwrap();
+        let value: Value = sqlx::query_scalar("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id,created_at) VALUES($1,$2,$2,'audio/mpeg',3,'en-GB','female','fixture.mp3',$3,now()-interval '30 days') RETURNING jsonb_build_object('id',id,'content_type',content_type,'size_bytes',size_bytes,'locale',locale,'gender',gender,'original_name',original_name,'duration_ms',duration_ms,'created_at',created_at)")
+            .bind(asset).bind(key).bind(actor).fetch_one(&pool).await.unwrap();
+        if index == 0 {
+            assets.push(value);
+        } else {
+            assets.insert(0, value);
+        }
+    }
+    snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"] =
+        serde_json::json!(assets);
+    snapshot["forms"]["pos"][0]["forms"][1]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"] =
+        serde_json::json!(assets);
+    let base_form = Uuid::parse_str(
+        snapshot["forms"]["pos"][0]["forms"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let alternate_form = Uuid::parse_str(
+        snapshot["forms"]["pos"][0]["forms"][1]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut another_sense = snapshot["meanings"]["pos"][0]["senses"][0].clone();
+    another_sense["id"] = serde_json::json!(Uuid::now_v7());
+    another_sense["definitions"][0]["id"] = serde_json::json!(Uuid::now_v7());
+    another_sense["definitions"][0]["content_id"] = serde_json::json!(Uuid::now_v7());
+    snapshot["meanings"]["pos"][0]["senses"] =
+        serde_json::json!([snapshot["meanings"]["pos"][0]["senses"][0], another_sense]);
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+        .bind(publication)
+        .bind(&snapshot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let task = create(&state, &auth, list, "longterm").await;
+    let run = start(&state, &auth, &task).await;
+    let qs = questions(&state, &auth, &run).await;
+    let first = &qs["items"][0];
+    // Different senses may retain disjoint form links; their vocabulary occurrence is shared.
+    for (question, form) in [
+        (&qs["items"][0], base_form),
+        (&qs["items"][1], alternate_form),
+    ] {
+        sqlx::query("UPDATE learning_questions SET form_ids=$2 WHERE id=$1")
+            .bind(Uuid::parse_str(question["id"].as_str().unwrap()).unwrap())
+            .bind(vec![form])
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let path = format!(
+        "/api/v1/me/learning-runs/{}/questions/{}/audio?accent=uk",
+        run["id"].as_str().unwrap(),
+        first["id"].as_str().unwrap()
+    );
+    let denied = call(&state, &auth, "GET", &path, Value::Null).await;
+    assert_eq!(denied.0, 403, "{}", denied.1);
+    assert!(!denied.1.to_string().contains("asset_id"));
+    assert!(!denied.1.to_string().contains("apple"));
+    let (_, stranger) = account_deletion_support::setup_bound(&pool).await;
+    assert_eq!(
+        call(&state, &stranger, "GET", &path, Value::Null).await.0,
+        404
+    );
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            &answer_path(&run),
+            answer_body(first, "apple")
+        )
+        .await
+        .0,
+        200
+    );
+    let (a, b) = tokio::join!(
+        call(&state, &auth, "GET", &path, Value::Null),
+        call(&state, &auth, "GET", &path, Value::Null)
+    );
+    assert_eq!(a.0, 200, "{}", a.1);
+    assert_eq!(b.0, 200, "{}", b.1);
+    assert_eq!(a.1["audio"]["asset_id"], assets[0]["id"]);
+    assert_eq!(a.1["audio"]["asset_id"], b.1["audio"]["asset_id"]);
+    assert_eq!(a.1["occurrence"], 1);
+    assert_eq!(a.1["audio"]["effective_rank"], 1);
+    assert_eq!(a.1["policy_version"], "harmonic_v1");
+    let facts: i64 = sqlx::query_scalar("SELECT count(*) FROM learning_question_audio")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(facts, 1);
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261031120000_learning_audio.down.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    );
+    tx.rollback().await.unwrap();
+    // A later publication does not replace the frozen question source.
+    let newer = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entry_publications(id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id) VALUES($1,$2,99,99,3,$3,$4,$5)")
+        .bind(newer).bind(entry).bind(&snapshot).bind(newer.as_bytes().to_vec()).bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=$2 WHERE id=$1")
+        .bind(entry)
+        .bind(newer)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let replay = call(&state, &auth, "GET", &path, Value::Null).await;
+    assert_eq!(replay.0, 200, "{}", replay.1);
+    assert_eq!(replay.1["audio"]["publication_id"], publication.to_string());
+    // A different sense of the same word has a new question ID, never a new first occurrence.
+    let second = &qs["items"][1];
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            &answer_path(&run),
+            answer_body(second, "apple")
+        )
+        .await
+        .0,
+        200
+    );
+    let second_path = format!(
+        "/api/v1/me/learning-runs/{}/questions/{}/audio?accent=uk",
+        run["id"].as_str().unwrap(),
+        second["id"].as_str().unwrap()
+    );
+    let selected = call(&state, &auth, "GET", &second_path, Value::Null).await;
+    assert_eq!(selected.0, 200, "{}", selected.1);
+    assert_eq!(selected.1["occurrence"], 2);
+    let repeat = call(&state, &auth, "GET", &second_path, Value::Null).await;
+    assert_eq!(
+        repeat.1["audio"]["asset_id"],
+        selected.1["audio"]["asset_id"]
+    );
+    // Facts, even without publication reference rows in this synthetic fixture, protect assets.
+    tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
+        .await
+        .unwrap();
+    let retained: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.audio_assets WHERE id=$1)")
+            .bind(Uuid::parse_str(a.1["audio"]["asset_id"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(retained);
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=NULL WHERE id=$1")
+        .bind(entry)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(call(&state, &auth, "GET", &path, Value::Null).await.0, 404);
+    let history = questions(&state, &auth, &run).await;
+    assert_eq!(history["items"][0]["answered"], true);
+}

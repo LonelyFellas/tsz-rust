@@ -183,6 +183,7 @@ async fn dictionary_audio_signs_only_current_published_references(pool: PgPool) 
     let asset = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,'audio/mpeg',10,'en-GB','female','sound.mp3',$4)").bind(asset).bind(format!("assets/{asset}.mp3")).bind(format!("uploads/{asset}.mp3")).bind(manager).execute(&pool).await.unwrap();
     let (publication, mut snapshot): (Uuid,Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    formal_audio_fixture(&pool, id, asset, "sonia", "en-GB", true).await;
     let unselected = Uuid::now_v7();
     snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["voice_profile"] = json!({"voices":[
         {"voice_id":"sonia","enabled":false,"rate_percent":-25,"version_id":Uuid::now_v7(),"version_name":"备选","locale":"en-GB","audio_asset_id":unselected},
@@ -239,8 +240,11 @@ async fn dictionary_v3_keeps_native_regions_and_supplements_without_legacy_fallb
     let (state, auth) = setup_bound(&pool).await;
     let id = full_entry(&pool, "regions").await;
     let (publication, mut snapshot): (Uuid,Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
-    let version = |locale, enabled| json!({"voice_id":locale,"enabled":enabled,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"自然","locale":locale,"audio_asset_id":Uuid::now_v7()});
+    let version = |locale: &str, enabled| json!({"voice_id":locale.to_ascii_lowercase(),"enabled":enabled,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"自然","locale":locale,"audio_asset_id":Uuid::now_v7()});
     snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["voice_profile"] = json!({"voices":[version("en-AU",true),version("en-CA",true),version("en-IN",true),version("en-IE",true),version("en-GB",false)]});
+    for setting in snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["voice_profile"]["voices"].as_array().unwrap() {
+        formal_audio_fixture(&pool,id,Uuid::parse_str(setting["audio_asset_id"].as_str().unwrap()).unwrap(),setting["voice_id"].as_str().unwrap(),setting["locale"].as_str().unwrap(),true).await;
+    }
     sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
         .bind(publication)
         .bind(snapshot)
@@ -281,11 +285,43 @@ async fn dictionary_v3_keeps_native_regions_and_supplements_without_legacy_fallb
                 .any(|item| item["locale"] == locale && item["accent_group"] == group)
         );
     }
+    // A model whose current capability is unavailable is filtered individually.
+    sqlx::query(
+        "UPDATE speech.voices SET provider_voice_id='en-AU-UnverifiedNeural' WHERE alias='en-au'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("X-TSZ-Voice-Versions", "v2")
+                .header("X-TSZ-Voice-Locales", "v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let filtered: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(filtered["audio"].as_array().unwrap().len(), 3);
     let old = call(&state, &auth, "GET", &path, Value::Null).await;
     assert_eq!(old.0, StatusCode::OK);
     assert_eq!(old.1["audio"], json!([]));
     let mut flash = version("en-US", true);
     flash["voice_id"] = json!("azure-hd-flash-test");
+    formal_audio_fixture(
+        &pool,
+        id,
+        Uuid::parse_str(flash["audio_asset_id"].as_str().unwrap()).unwrap(),
+        "azure-hd-flash-test",
+        "en-US",
+        true,
+    )
+    .await;
     let mut snapshot: Value =
         sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=$1")
             .bind(publication)
@@ -428,6 +464,8 @@ async fn dictionary_audio_keeps_source_text_dialect_separate_from_voice_locale(p
     for (variant, asset) in [(&mut uk, uk_asset), (&mut us, us_asset)] {
         variant["voice_profile"] = json!({"voices":[{"voice_id":"neerja","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"印度补充","locale":"en-IN","audio_asset_id":asset}]});
     }
+    formal_audio_fixture(&pool, id, uk_asset, "neerja", "en-IN", true).await;
+    formal_audio_fixture(&pool, id, us_asset, "neerja", "en-IN", true).await;
     grammar["variants"] = json!([uk, us]);
     sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
         .bind(publication)
@@ -487,10 +525,12 @@ async fn dictionary_prefers_active_speech_and_spelling_recordings_before_legacy_
     let (publication, original): (Uuid, Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1")
         .bind(id).fetch_one(&pool).await.unwrap();
     let legacy = Uuid::now_v7();
-    let active = Uuid::now_v7();
     let inactive = Uuid::now_v7();
     let profile = |asset| json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"saved","locale":"en-GB","audio_asset_id":asset}]});
+    formal_audio_fixture(&pool, id, legacy, "sonia", "en-GB", true).await;
     for spelling in [false, true] {
+        let active = Uuid::now_v7();
+        formal_audio_fixture(&pool, id, active, "sonia", "en-GB", !spelling).await;
         let mut snapshot = original.clone();
         let variant = &mut snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"];
         let text = variant["spelling"].clone();
@@ -528,5 +568,47 @@ async fn dictionary_prefers_active_speech_and_spelling_recordings_before_legacy_
         assert_eq!(audio[0]["asset_id"], json!(active), "{body}");
         assert!(audio.iter().any(|item| item["asset_id"] == json!(legacy)));
         assert!(audio.iter().all(|item| item["asset_id"] != json!(inactive)));
+    }
+}
+
+// Explicit formal-asset prerequisites for publication fixtures. Read APIs never repair data.
+async fn formal_audio_fixture(
+    pool: &PgPool,
+    entry: Uuid,
+    asset: Uuid,
+    alias: &str,
+    locale: &str,
+    generated: bool,
+) {
+    let actor: Uuid =
+        sqlx::query_scalar("SELECT created_by_admin_id FROM lexicon.entries WHERE id=$1")
+            .bind(entry)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$2,'audio/mpeg',3,$3,'female','fixture.mp3',$4) ON CONFLICT(id) DO NOTHING")
+        .bind(asset).bind(format!("fixtures/{asset}.mp3")).bind(locale).bind(actor).execute(pool).await.unwrap();
+    if generated {
+        let provider = if alias.starts_with("azure-hd-flash-") {
+            "en-US-Tiana:DragonHDFlashLatestNeural"
+        } else {
+            match locale {
+                "en-GB" => "en-GB-SoniaNeural",
+                "en-AU" => "en-AU-NatashaNeural",
+                "en-CA" => "en-CA-ClaraNeural",
+                "en-IE" => "en-IE-EmilyNeural",
+                _ => "en-IN-NeerjaNeural",
+            }
+        };
+        let accent = match locale {
+            "en-GB" | "en-AU" => "gb",
+            "en-US" | "en-CA" => "us",
+            _ => "none",
+        };
+        sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,accent,gender,styles,provider_version) VALUES($1,$2,'azure',$3,$4,$5,'female','[]','v1') ON CONFLICT(alias) DO UPDATE SET enabled=true")
+            .bind(Uuid::now_v7()).bind(alias).bind(provider).bind(locale).bind(accent).execute(pool).await.unwrap();
+        let content = json!({"version":2,"text":"fixture","annotations":[]});
+        sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state) VALUES($1,$2,$3,$4,$5,'{}',$6,'ready')")
+            .bind(asset).bind(Uuid::now_v7()).bind(actor).bind(vec![0u8;32]).bind(json!({"kind":"text","content":content,"form_links":[]})).bind(content).execute(pool).await.unwrap();
     }
 }
