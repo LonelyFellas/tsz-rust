@@ -73,15 +73,16 @@ pub(super) async fn pool_for_type(
     ids: &[Uuid],
     choice: bool,
 ) -> Result<(CandidatePool, i64, LearningContext), AppError> {
-    pool_for_policy(tx, auth, ids, choice, false).await
+    pool_for_policy(tx, auth, ids, choice, false, false).await
 }
 pub(super) async fn pool_for_plan(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     ids: &[Uuid],
     choice: bool,
+    strict: bool,
 ) -> Result<(CandidatePool, i64, LearningContext), AppError> {
-    pool_for_policy(tx, auth, ids, choice, true).await
+    pool_for_policy(tx, auth, ids, choice, true, strict).await
 }
 async fn pool_for_policy(
     tx: &mut Tx<'_>,
@@ -89,6 +90,7 @@ async fn pool_for_policy(
     ids: &[Uuid],
     choice: bool,
     wordlist: bool,
+    strict: bool,
 ) -> Result<(CandidatePool, i64, LearningContext), AppError> {
     let context = learner(tx, auth).await?;
     let access = sources(tx, auth, ids).await?;
@@ -99,7 +101,8 @@ async fn pool_for_policy(
     if entries.len() > 1000 {
         return Err(invalid("来源超过 1000 个词条，请拆分任务"));
     }
-    let candidates = candidates_for_sources(tx, &access, &context, choice, wordlist).await?;
+    let candidates =
+        candidates_for_sources(tx, &access, &context, choice, wordlist, strict).await?;
     if candidates.candidates.len() > 2000 {
         return Err(invalid("候选超过 2000 题，请拆分任务"));
     }
@@ -111,10 +114,12 @@ pub(super) async fn candidates_for_sources(
     context: &LearningContext,
     choice: bool,
     wordlist: bool,
+    strict: bool,
 ) -> Result<CandidatePool, AppError> {
     let entries: HashSet<_> = access.ordered.iter().map(|(_, e)| e).collect();
     let mut candidates = if choice {
-        crate::question_bank::learning::build_pool(tx, &access.learning_sources()?, context).await?
+        crate::question_bank::learning::build_pool(tx, &access.learning_sources()?, context, strict)
+            .await?
     } else if wordlist {
         build_wordlist_candidates(&access.learning_sources()?, context)?
     } else {
@@ -124,6 +129,10 @@ pub(super) async fn candidates_for_sources(
         .iter()
         .filter(|e| !access.entries.contains_key(e))
         .count() as i64;
+    if strict {
+        strict_choice_preview(&mut candidates, access, context)?;
+        return Ok(candidates);
+    }
     if wordlist && choice {
         let mut spelling = build_wordlist_candidates(&access.learning_sources()?, context)?;
         spelling.candidates.retain(|candidate| {
@@ -151,6 +160,68 @@ pub(super) async fn candidates_for_sources(
         }
     }
     Ok(candidates)
+}
+
+fn strict_choice_preview(
+    pool: &mut CandidatePool,
+    access: &SourceAccess,
+    context: &LearningContext,
+) -> Result<(), AppError> {
+    use super::plans::dto::{
+        ChoicePlanPreview, ChoiceUnavailableItem, ChoiceUnavailableReason as Reason,
+    };
+    let mut base = build_wordlist_candidates(&access.learning_sources()?, context)?;
+    for source in &access.custom {
+        if let Some((revision, generation)) = access.lists.get(&source.wordlist_id)
+            && let Some(candidate) = custom_candidate(source, *revision, *generation)
+        {
+            base.candidates.push(candidate);
+        }
+    }
+    let selected: HashSet<_> = pool
+        .candidates
+        .iter()
+        .map(|c| c.unit_key.as_str())
+        .collect();
+    let total = base.candidates.len() as i64;
+    let mut unavailable = Vec::new();
+    for c in base
+        .candidates
+        .iter()
+        .filter(|c| !selected.contains(c.unit_key.as_str()))
+    {
+        let reason = if c.custom_item_id.is_some() {
+            Reason::CustomSourceUnsupported
+        } else {
+            match pool.choice_failures.get(&c.unit_key).map(String::as_str) {
+                Some("evidence_incomplete") => Reason::EvidenceIncomplete,
+                Some("target_unaligned") => Reason::TargetUnaligned,
+                Some("insufficient_distractors") => Reason::InsufficientDistractors,
+                _ => Reason::TargetIneligible,
+            }
+        };
+        unavailable.push(ChoiceUnavailableItem {
+            unit_key: c.unit_key.clone(),
+            source_wordlist_id: c.source_wordlist_id,
+            entry_id: c.entry_id,
+            item_id: c.custom_item_id,
+            spelling: c.answer.answers.first().cloned().unwrap_or_default(),
+            definition: c.prompt.definition.clone(),
+            reason,
+        });
+    }
+    let count = unavailable.len();
+    unavailable.truncate(100);
+    let unavailable_entries = pool.exclusions.unavailable_entries;
+    pool.exclusions = base.exclusions;
+    pool.exclusions.unavailable_entries = unavailable_entries;
+    pool.choice_preview = Some(ChoicePlanPreview {
+        total_count: total,
+        unavailable_count: count as i64,
+        unavailable_truncated: count > 100,
+        unavailable_items: unavailable,
+    });
+    Ok(())
 }
 
 pub async fn preview(

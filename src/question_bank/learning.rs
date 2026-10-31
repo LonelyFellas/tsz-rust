@@ -19,6 +19,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use uuid::Uuid;
+pub const STRICT_POLICY: &str = "strict_tiered_v1";
+pub const STRATEGY_VERSION: &str = "tiered_v1";
+pub fn strict_capable(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-tsz-learning-capabilities")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|s| s.trim() == "strict-choice-v1"))
+}
+pub fn require_strict(headers: &HeaderMap, policy: Option<&str>) -> Result<(), AppError> {
+    if policy.is_some_and(|p| p != STRICT_POLICY) {
+        return Err(super::invalid("单选策略无效"));
+    }
+    if policy.is_some() && !strict_capable(headers) {
+        return Err(super::conflict("请更新客户端后使用严格单选任务"));
+    }
+    Ok(())
+}
 pub const CHOICE: &str = "choice_zh_to_en";
 pub const GRADING: &str = "choice_id_v1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +47,10 @@ pub struct ChoiceSnapshot {
     pub content: BankQuestionContent,
     pub options: Vec<LearningOption>,
     pub correct_option_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supplemental_entries: Vec<Uuid>,
 }
 pub fn capable(headers: &HeaderMap) -> bool {
     headers
@@ -74,7 +95,8 @@ pub async fn capability_guard(
     let choice_capable = capable(request.headers());
     let mastery_capable = crate::learning_tasks::mastery::capable(request.headers());
     let spelling_capable = wordlist_capable(request.headers());
-    if choice_capable && mastery_capable && spelling_capable {
+    let strict = strict_capable(request.headers());
+    if choice_capable && mastery_capable && spelling_capable && strict {
         return Ok(run_with_vary(request, next).await);
     }
     let path = request.uri().path();
@@ -91,6 +113,20 @@ pub async fn capability_guard(
     let creates_cycle = path.contains("/cycles");
     let (mut request_parts, body) = request.into_parts();
     let auth = AuthUser::from_request_parts(&mut request_parts, &state).await?;
+    if creates_cycle && !strict {
+        let policy: Option<String> = sqlx::query_scalar(
+            "SELECT choice_policy FROM learning_tasks WHERE id=$1 AND user_id=$2",
+        )
+        .bind(id)
+        .bind(auth.subject)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::internal)?
+        .flatten();
+        if policy.is_some() {
+            return Err(super::conflict("请更新客户端后管理严格单选任务"));
+        }
+    }
     let sql = if is_run {
         "SELECT r.question_type,t.generation_policy,r.generation_version='wordlist_all_v1' FROM learning_runs r JOIN learning_tasks t ON t.id=r.task_id WHERE r.id=$1 AND r.user_id=$2"
     } else {
@@ -149,6 +185,7 @@ pub async fn build_pool(
     tx: &mut Tx<'_>,
     sources: &[LearningSource],
     settings: &LearningContext,
+    strict: bool,
 ) -> Result<CandidatePool, AppError> {
     let mut pool = crate::learning_tasks::question::build_candidates(sources, settings)?;
     let mut ids: Vec<_> = sources.iter().map(|s| s.entry_id).collect();
@@ -171,9 +208,21 @@ pub async fn build_pool(
                 && Some(t.source.definition_id) == candidate.definition_id
                 && candidate.form_ids.contains(&t.source.form_id)
         }) else {
+            pool.choice_failures
+                .insert(candidate.unit_key.clone(), "target_ineligible".into());
             continue;
         };
-        let Some(content) = algorithm.content(tx, target, &settings.cefr_level).await? else {
+        let Some(content) = algorithm
+            .content(tx, target, &settings.cefr_level, strict)
+            .await?
+        else {
+            pool.choice_failures.insert(
+                candidate.unit_key.clone(),
+                algorithm
+                    .failure_reason
+                    .unwrap_or("insufficient_distractors")
+                    .into(),
+            );
             continue;
         };
         if content.prompt.chars().count() > 2000 || content.explanation.chars().count() > 2000 {
@@ -198,6 +247,8 @@ pub async fn build_pool(
             content,
             options: vec![],
             correct_option_id: String::new(),
+            strategy_version: strict.then(|| STRATEGY_VERSION.into()),
+            supplemental_entries: algorithm.supplemental_entries.clone(),
         });
         eligible.push(candidate);
     }
@@ -219,6 +270,15 @@ pub async fn materialize(
             has_deferred |= c.deferred;
         }
     }
+    if !spelling_fallback
+        && units.iter().any(|u| {
+            u.answer_snapshot
+                .get("choice")
+                .is_none_or(serde_json::Value::is_null)
+        })
+    {
+        return Err(super::conflict("单选选项已失效，请重新检查来源后继续"));
+    }
     if !has_deferred {
         return Ok(());
     }
@@ -231,7 +291,12 @@ pub async fn materialize(
             continue;
         };
         let content = algorithm
-            .content(tx, &c.content.target, &settings.cefr_level)
+            .content(
+                tx,
+                &c.content.target,
+                &settings.cefr_level,
+                c.strategy_version.is_some(),
+            )
             .await?;
         let Some(content) = content else {
             if !spelling_fallback {
@@ -260,6 +325,7 @@ pub async fn materialize(
             .collect();
         c.correct_option_id = content.correct_option_id.clone();
         c.content = content;
+        c.supplemental_entries = algorithm.supplemental_entries.clone();
         c.deferred = false;
         shuffle_answer(&mut answer);
         sqlx::query("UPDATE learning_cycle_units SET answer_snapshot=$2 WHERE id=$1")

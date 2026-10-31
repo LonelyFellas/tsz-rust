@@ -74,6 +74,7 @@ pub(super) async fn preview_in(
         &settings,
         t.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE),
         true,
+        m.choice_policy.is_some(),
     )
     .await?;
     let candidates: Vec<_> = pool
@@ -107,6 +108,7 @@ pub(super) async fn preview_in(
                 unavailable_count: rows.len() as i64 - count,
             }),
             preview: LearningPlanPreview {
+                choice: None,
                 entry_count: candidates
                     .iter()
                     .filter_map(|c| c.entry_id)

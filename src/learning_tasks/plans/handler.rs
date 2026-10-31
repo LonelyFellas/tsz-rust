@@ -35,6 +35,7 @@ pub async fn preview(
     headers: HeaderMap,
     ApiJson(input): ApiJson<PreviewLearningPlan>,
 ) -> Result<Json<LearningPlanPreview>, AppError> {
+    crate::question_bank::learning::require_strict(&headers, input.choice_policy.as_deref())?;
     crate::question_bank::learning::require_capability(&headers, input.question_type.as_deref())?;
     crate::question_bank::learning::require_wordlist_capability(
         &headers,
@@ -50,6 +51,7 @@ pub async fn create(
     headers: HeaderMap,
     ApiJson(input): ApiJson<CreateLearningPlan>,
 ) -> Result<Json<LearningPlan>, AppError> {
+    crate::question_bank::learning::require_strict(&headers, input.choice_policy.as_deref())?;
     crate::question_bank::learning::require_capability(&headers, input.question_type.as_deref())?;
     crate::question_bank::learning::require_wordlist_capability(
         &headers,

@@ -157,6 +157,442 @@ async fn assert_spelling_fallback(f: &Fixture) {
     );
 }
 #[sqlx::test]
+async fn choice_projection_accepts_identified_note_only_translations(pool: PgPool) {
+    let note = json!({"glosses":["a cry of distress"],"translations":[
+        {"code":"nan-hbl","lang":"Chinese","note":"救我 (kiù góa, literally rescue me)","tags":["Hokkien"],"sense":"cry of distress"}
+    ]});
+    let supported: bool = sqlx::query_scalar("SELECT dictionary.choice_supported($1)")
+        .bind(note)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        supported,
+        "recognized non-lexical translation notes must not invalidate every sense"
+    );
+    let unknown: bool = sqlx::query_scalar("SELECT dictionary.choice_supported($1)")
+        .bind(json!({"glosses":["unknown"],"translations":[{"code":"zh","unexpected":"帮助"}]}))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !unknown,
+        "unknown lexical structures must still fail closed"
+    );
+    let chinese_note: bool = sqlx::query_scalar("SELECT dictionary.choice_supported($1)")
+        .bind(json!({"glosses":["assistance"],"translations":[{"code":"zh","note":"帮助"}]}))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !chinese_note,
+        "Chinese lexical information must not be discarded as a note"
+    );
+}
+
+async fn strict_call(f: &Fixture, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+    call_with_capabilities(
+        f,
+        method,
+        path,
+        body,
+        "choice-v1,mastery-v1,wordlist-spelling-v1,strict-choice-v1",
+    )
+    .await
+}
+async fn strict_plan(f: &Fixture) -> Value {
+    let mut body = preview(f);
+    body["choice_policy"] = json!("strict_tiered_v1");
+    let p = strict_call(f, "POST", "/api/v1/me/learning-plans/preview", body.clone()).await;
+    assert_eq!(p.0, 200, "{}", p.1);
+    assert_eq!(p.1["eligible_count"], 1, "{}", p.1);
+    assert_eq!(p.1["choice"]["unavailable_count"], 0, "{}", p.1);
+    body["name"] = json!("严格单选");
+    body["idempotency_key"] = json!(Uuid::now_v7());
+    body["preview_fingerprint"] = p.1["preview_fingerprint"].clone();
+    let p = strict_call(f, "POST", "/api/v1/me/learning-plans", body).await;
+    assert_eq!(p.0, 200, "{}", p.1);
+    p.1
+}
+#[sqlx::test]
+async fn strict_choice_supplements_unrelated_safe_words_without_spelling(pool: PgPool) {
+    let f = fixture(&pool).await;
+    sqlx::query("UPDATE dictionary.entry_contents SET senses=(SELECT jsonb_agg(s-'hypernyms') FROM jsonb_array_elements(senses)s)")
+        .execute(&pool).await.unwrap();
+    let p = strict_plan(&f).await;
+    let r = open(&f, &p).await;
+    let qs = questions(&f, &r).await;
+    assert_eq!(qs["items"][0]["options"].as_array().unwrap().len(), 4);
+    assert_eq!(questions(&f, &r).await, qs);
+    let metadata: Value = sqlx::query_scalar("SELECT answer_snapshot->'choice' FROM learning_questions WHERE run_id=$1 ORDER BY position LIMIT 1")
+        .bind(Uuid::parse_str(r["id"].as_str().unwrap()).unwrap()).fetch_one(&pool).await.unwrap();
+    assert_eq!(metadata["strategy_version"], "tiered_v1");
+    assert_eq!(
+        metadata["supplemental_entries"].as_array().unwrap().len(),
+        3
+    );
+    assert!(qs["items"][0].get("strategy_version").is_none());
+    assert!(qs["items"][0].get("correct_option_id").is_none());
+}
+#[sqlx::test]
+async fn strict_choice_keeps_semantic_priority_and_atomically_rejects_lost_options(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let p = strict_plan(&f).await;
+    let task = Uuid::parse_str(p["task"]["id"].as_str().unwrap()).unwrap();
+    let metadata: Value = sqlx::query_scalar("SELECT answer_snapshot->'choice' FROM learning_cycle_units WHERE cycle_id=(SELECT id FROM learning_cycles WHERE task_id=$1)")
+        .bind(task).fetch_one(&pool).await.unwrap();
+    assert!(metadata.get("supplemental_entries").is_none());
+    sqlx::query("UPDATE lexicon.entries SET teaching_eligible=false WHERE id=$1")
+        .bind(f.entries[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let r = strict_call(
+        &f,
+        "POST",
+        &format!("/api/v1/me/learning-plans/{task}/runs"),
+        json!({"idempotency_key":Uuid::now_v7(),"expected_revision":1,"after_run_id":null}),
+    )
+    .await;
+    assert_eq!(r.0, 409, "{}", r.1);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM learning_runs WHERE task_id=$1")
+        .bind(task)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn strict_choice_partial_scope_requires_confirmation_and_preserves_legacy_shapes(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let item = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO wordlist_items(wordlist_id,item_id,custom_word,position) VALUES($1,$2,$3,1)",
+    )
+    .bind(f.list)
+    .bind(item)
+    .bind(json!({"word":"starlight","definition":"星光"}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut body = preview(&f);
+    body["choice_policy"] = json!("strict_tiered_v1");
+    let old_client = call(
+        &f,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(old_client.0, 409);
+    let p = strict_call(
+        &f,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(p.0, 200, "{}", p.1);
+    assert_eq!(p.1["choice"]["total_count"], 2);
+    assert_eq!(p.1["eligible_count"], 1);
+    assert_eq!(
+        p.1["choice"]["unavailable_items"][0]["reason"],
+        "custom_source_unsupported"
+    );
+    assert_eq!(
+        p.1["choice"]["unavailable_items"][0]["item_id"],
+        item.to_string()
+    );
+    body["name"] = json!("范围确认");
+    body["idempotency_key"] = json!(Uuid::now_v7());
+    body["preview_fingerprint"] = p.1["preview_fingerprint"].clone();
+    let rejected = strict_call(&f, "POST", "/api/v1/me/learning-plans", body.clone()).await;
+    assert_eq!(rejected.0, 400, "{}", rejected.1);
+    body["accept_partial_choice"] = json!(true);
+    let created = strict_call(&f, "POST", "/api/v1/me/learning-plans", body.clone()).await;
+    assert_eq!(created.0, 200, "{}", created.1);
+    assert_eq!(created.1["current_cycle"]["total_count"], 1);
+    assert_eq!(
+        strict_call(&f, "POST", "/api/v1/me/learning-plans", body)
+            .await
+            .1["task"],
+        created.1["task"]
+    );
+    let legacy = call(&f, "POST", "/api/v1/me/learning-plans/preview", preview(&f)).await;
+    assert_eq!(legacy.0, 200, "{}", legacy.1);
+    assert!(legacy.1.get("choice").is_none());
+    assert_eq!(legacy.1["eligible_count"], 2);
+    let run = open(&f, &created.1).await;
+    let qs = questions(&f, &run).await;
+    let correct:String=sqlx::query_scalar("SELECT answer_snapshot->'choice'->>'correct_option_id' FROM learning_questions WHERE run_id=$1")
+        .bind(Uuid::parse_str(run["id"].as_str().unwrap()).unwrap()).fetch_one(&pool).await.unwrap();
+    let answer = strict_call(
+        &f,
+        "POST",
+        &learning_tasks_support::answer_path(&run),
+        learning_tasks_support::answer_body(&qs["items"][0], &correct),
+    )
+    .await;
+    assert_eq!(answer.0, 200, "{}", answer.1);
+    let path = format!(
+        "/api/v1/me/learning-plans/{}/cycles",
+        created.1["task"]["id"].as_str().unwrap()
+    );
+    let mut cycle = json!({"operation":"next","after_cycle_id":created.1["current_cycle"]["id"],"expected_revision":1});
+    assert_eq!(
+        call(&f, "POST", &format!("{path}/preview"), cycle.clone())
+            .await
+            .0,
+        409
+    );
+    let next = strict_call(&f, "POST", &format!("{path}/preview"), cycle.clone()).await;
+    assert_eq!(next.0, 200, "{}", next.1);
+    assert_eq!(next.1["preview"]["choice"]["unavailable_count"], 1);
+    cycle["preview_fingerprint"] = next.1["preview"]["preview_fingerprint"].clone();
+    cycle["idempotency_key"] = json!(Uuid::now_v7());
+    assert_eq!(strict_call(&f, "POST", &path, cycle.clone()).await.0, 400);
+    cycle["accept_partial_choice"] = json!(true);
+    let next = strict_call(&f, "POST", &path, cycle).await;
+    assert_eq!(next.0, 200, "{}", next.1);
+    assert_eq!(next.1["total_count"], 1);
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261031110000_strict_tiered_choice.down.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[sqlx::test]
+async fn strict_choice_semantics_migration_roundtrip_retains_original_records(pool: PgPool) {
+    let _f = fixture(&pool).await;
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM dictionary.entry_contents")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261031110000_strict_tiered_choice.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261031110000_strict_tiered_choice.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM dictionary.entry_contents")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+/// Manual natural-corpus evaluation. Input is a task-owned copy of published content;
+/// never point this test at a shared database. Raw samples are not committed.
+#[sqlx::test]
+#[ignore]
+async fn strict_choice_natural_corpus_audit(pool: PgPool) {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .try_init();
+    let sample: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("CHOICE_NATURAL_SAMPLE").expect("owned sample path")).unwrap(),
+    )
+    .unwrap();
+    let (state, auth, _) = learning_tasks_support::setup(&pool).await;
+    sqlx::query("UPDATE student_profiles SET english_variant='AmE' WHERE user_id=$1")
+        .bind(auth.subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut entries = Vec::new();
+    let mut remap = std::collections::HashMap::new();
+    for row in sample["entries"].as_array().unwrap() {
+        let id = wordlists_support::full_entry(&pool, row["word"].as_str().unwrap()).await;
+        remap.insert(
+            row["snapshot"]["id"].as_str().unwrap().to_owned(),
+            id.to_string(),
+        );
+        entries.push(id);
+    }
+    fn rebind(value: &mut Value, ids: &std::collections::HashMap<String, String>) {
+        match value {
+            Value::String(s) => {
+                if let Some(new) = ids.get(s) {
+                    *s = new.clone();
+                }
+            }
+            Value::Array(xs) => {
+                for x in xs {
+                    rebind(x, ids);
+                }
+            }
+            Value::Object(xs) => {
+                for x in xs.values_mut() {
+                    rebind(x, ids);
+                }
+            }
+            _ => {}
+        }
+    }
+    for (row, id) in sample["entries"].as_array().unwrap().iter().zip(&entries) {
+        let mut snapshot = row["snapshot"].clone();
+        rebind(&mut snapshot, &remap);
+        sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=(SELECT current_publication_id FROM lexicon.entries WHERE id=$1)")
+            .bind(id).bind(snapshot).execute(&pool).await.unwrap();
+    }
+    let dataset:i64=sqlx::query_scalar("INSERT INTO dictionary.datasets(version,source_name,source_version,rules_version,terms_sha256,regions_sha256,status) VALUES('natural-choice-owned','Kaikki','owned-sample','owned','hash','hash','active') RETURNING id").fetch_one(&pool).await.unwrap();
+    for row in sample["dictionary"].as_array().unwrap() {
+        sqlx::query("INSERT INTO dictionary.entry_contents(dataset_id,source_key,normalized_term,pos,senses,source_locator) VALUES($1,$2,$3,$4,$5,'owned-natural-sample')")
+            .bind(dataset).bind(row["source_key"].as_str().unwrap()).bind(row["normalized_term"].as_str().unwrap()).bind(row["pos"].as_str().unwrap()).bind(&row["senses"]).execute(&pool).await.unwrap();
+    }
+    let f = Fixture {
+        state,
+        auth,
+        list: Uuid::nil(),
+        entries: entries.clone(),
+    };
+    let list = call(
+        &f,
+        "POST",
+        "/api/v1/me/wordlists",
+        wordlists_support::create_body(&entries),
+    )
+    .await;
+    assert_eq!(list.0, 200, "{}", list.1);
+    let f = Fixture {
+        list: Uuid::parse_str(list.1["id"].as_str().unwrap()).unwrap(),
+        ..f
+    };
+    let mut input = preview(&f);
+    input["task_type"] = json!("longterm");
+    input["daily_question_count"] = Value::Null;
+    let start = std::time::Instant::now();
+    if let Err(e) = tsz_rust::learning_tasks::plans::preview(
+        &pool,
+        &f.auth,
+        serde_json::from_value(input.clone()).unwrap(),
+    )
+    .await
+    {
+        use std::error::Error;
+        panic!("natural preview cause: {:?}", e.source());
+    }
+    let legacy = call(
+        &f,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        input.clone(),
+    )
+    .await;
+    assert_eq!(legacy.0, 200, "{}", legacy.1);
+    let mut old = input.clone();
+    old["idempotency_key"] = json!(Uuid::now_v7());
+    old["name"] = json!("audit legacy");
+    old["preview_fingerprint"] = legacy.1["preview_fingerprint"].clone();
+    let p = call(&f, "POST", "/api/v1/me/learning-plans", old).await;
+    assert_eq!(p.0, 200, "{}", p.1);
+    let old_choices:i64=sqlx::query_scalar("SELECT count(*) FROM learning_cycle_units u JOIN learning_cycles c ON c.id=u.cycle_id WHERE c.task_id=$1 AND u.answer_snapshot->'choice' IS NOT NULL")
+        .bind(Uuid::parse_str(p.1["task"]["id"].as_str().unwrap()).unwrap()).fetch_one(&pool).await.unwrap();
+    input["choice_policy"] = json!("strict_tiered_v1");
+    let result = strict_call(
+        &f,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        input.clone(),
+    )
+    .await;
+    assert_eq!(result.0, 200, "{}", result.1);
+    println!(
+        "NATURAL_AUDIT {}",
+        json!({"semantic_only_after_projection_fix":old_choices,"strict_preview":result.1,"elapsed_ms":start.elapsed().as_millis()})
+    );
+    input["idempotency_key"] = json!(Uuid::now_v7());
+    input["name"] = json!("audit strict");
+    input["accept_partial_choice"] = json!(true);
+    input["preview_fingerprint"] = result.1["preview_fingerprint"].clone();
+    let p = strict_call(&f, "POST", "/api/v1/me/learning-plans", input).await;
+    assert_eq!(p.0, 200, "{}", p.1);
+    let run = open(&f, &p.1).await;
+    let run_id = Uuid::parse_str(run["id"].as_str().unwrap()).unwrap();
+    let help:Option<Value>=sqlx::query_scalar("SELECT answer_snapshot FROM learning_questions WHERE run_id=$1 AND answer_snapshot->'keys' @> '[\"help\"]'")
+        .bind(run_id).fetch_optional(&pool).await.unwrap();
+    // Daily runs are bounded; verify the complete persisted target set for help.
+    let help_unit:Value=sqlx::query_scalar("SELECT answer_snapshot FROM learning_cycle_units u JOIN learning_cycles c ON c.id=u.cycle_id WHERE c.task_id=$1 AND u.answer_snapshot->'keys' @> '[\"help\"]' LIMIT 1")
+        .bind(Uuid::parse_str(p.1["task"]["id"].as_str().unwrap()).unwrap()).fetch_one(&pool).await.expect("help must be eligible");
+    assert!(help_unit["choice"].is_object());
+    if let Some(help) = help {
+        assert_eq!(help["choice"]["options"].as_array().unwrap().len(), 4);
+        println!("HELP_AUDIT {}", help["choice"]["content"]);
+    }
+    let qs = questions(&f, &run).await;
+    assert!(
+        qs["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["options"].as_array().is_some_and(|o| o.len() == 4))
+    );
+    if let Ok(port) = std::env::var("CHOICE_ACCEPTANCE_PORT") {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let help_index = sample["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|r| r["word"] == "help")
+            .unwrap();
+        let list=call(&f,"POST","/api/v1/me/wordlists",json!({
+            "idempotency_key":Uuid::now_v7(),"name":"单选验收：帮助与自定义词",
+            "items":[{"entry_id":entries[help_index],"private_note":""},{"item_id":Uuid::now_v7(),"custom_word":{"word":"starlight","definition":"星光"},"private_note":""}]
+        })).await;
+        assert_eq!(list.0, 200, "{}", list.1);
+        let password = format!("Owned-choice-{}", Uuid::now_v7());
+        let hash = tsz_rust::platform::Password::parse(&password)
+            .unwrap()
+            .hash()
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET password_hash=$2,display_name='单选隔离验收' WHERE id=$1")
+            .bind(f.auth.subject)
+            .bind(hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let phone: String = sqlx::query_scalar("SELECT phone FROM users WHERE id=$1")
+            .bind(f.auth.subject)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(std::env::var("CHOICE_ACCEPTANCE_FILE").expect("owned fixture file"))
+            .unwrap();
+        write!(file,"{}",json!({"phone":phone,"password":password,"wordlist_id":list.1["id"],"api_port":port,"user_id":f.auth.subject})).unwrap();
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        println!("ACCEPTANCE_READY isolated router listening on {port}");
+        axum::serve(listener, tsz_rust::router(f.state))
+            .await
+            .unwrap();
+    }
+}
+#[sqlx::test]
 async fn legacy_platform_learning_facts_survive_migration_roundtrip(pool: PgPool) {
     let f = fixture(&pool).await;
     let task = learning_tasks_support::create(&f.state, &f.auth, f.list, "longterm").await;
@@ -838,6 +1274,21 @@ async fn on_demand_scale_50k_candidates_1000_targets(pool: PgPool) {
     eprintln!(
         "50k published distractors, 1000 target units: preview {:?}",
         elapsed
+    );
+    // Keep candidate evidence intact but remove target relations to exercise the
+    // supplemental path against the same large, indexed, task-owned corpus.
+    sqlx::query("UPDATE dictionary.entry_contents SET senses=(SELECT jsonb_agg(s-'hypernyms') FROM jsonb_array_elements(senses)s) WHERE source_locator='owned-scale-fixture' AND senses @> '[{\"translations\":[{\"code\":\"zh\",\"word\":\"目标\"}]}]'")
+        .execute(&pool).await.unwrap();
+    let mut strict = preview(&f);
+    strict["choice_policy"] = json!("strict_tiered_v1");
+    let started = std::time::Instant::now();
+    let p = strict_call(&f, "POST", "/api/v1/me/learning-plans/preview", strict).await;
+    assert_eq!(p.0, 200, "{}", p.1);
+    assert_eq!(p.1["eligible_count"], 1000);
+    assert_eq!(p.1["choice"]["unavailable_count"], 0);
+    eprintln!(
+        "50k supplemental candidates, 1000 targets: preview {:?}",
+        started.elapsed()
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM question_bank")

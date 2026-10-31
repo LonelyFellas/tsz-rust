@@ -4,6 +4,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -14,6 +17,9 @@ pub struct LearningSchedule {
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewLearningPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub choice_policy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub practice_mode: Option<String>,
@@ -30,6 +36,11 @@ pub struct PreviewLearningPlan {
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLearningPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub choice_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub accept_partial_choice: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub practice_mode: Option<String>,
@@ -49,6 +60,7 @@ pub struct CreateLearningPlan {
 impl CreateLearningPlan {
     pub fn preview(&self) -> PreviewLearningPlan {
         PreviewLearningPlan {
+            choice_policy: self.choice_policy.clone(),
             practice_mode: self.practice_mode.clone(),
             question_type: self.question_type.clone(),
             task_type: self.task_type,
@@ -58,9 +70,44 @@ impl CreateLearningPlan {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChoiceUnavailableReason {
+    TargetIneligible,
+    EvidenceIncomplete,
+    TargetUnaligned,
+    InsufficientDistractors,
+    CustomSourceUnsupported,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceUnavailableItem {
+    pub unit_key: String,
+    pub source_wordlist_id: Uuid,
+    #[schema(required = true)]
+    pub entry_id: Option<Uuid>,
+    #[schema(required = true)]
+    pub item_id: Option<Uuid>,
+    pub spelling: String,
+    pub definition: String,
+    pub reason: ChoiceUnavailableReason,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChoicePlanPreview {
+    pub total_count: i64,
+    pub unavailable_count: i64,
+    pub unavailable_items: Vec<ChoiceUnavailableItem>,
+    pub unavailable_truncated: bool,
+}
+
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningPlanPreview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub choice: Option<ChoicePlanPreview>,
     pub entry_count: i64,
     pub eligible_count: i64,
     pub custom_word_count: i64,
@@ -94,6 +141,8 @@ pub struct PreviewLearningCycle {
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLearningCycle {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub accept_partial_choice: bool,
     pub operation: CycleOperation,
     pub after_cycle_id: Uuid,
     pub expected_revision: i64,
