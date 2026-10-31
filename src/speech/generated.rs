@@ -57,6 +57,59 @@ fn storage_error() -> AppError {
         "音频存储暂不可用，请使用相同请求重试",
     )
 }
+/// Only proven unsupported sound controls are projected away. Stored settings remain intact;
+/// unknown capabilities and content annotations still go through strict model validation.
+pub(crate) fn effective_setting(setting: &VoiceSettingV3, voice: &super::Voice) -> VoiceSettingV3 {
+    let mut effective = setting.clone();
+    let evidence = super::capabilities::for_voice(voice.provider_voice_id());
+    if voice.is_hd_flash() {
+        effective.rate_percent = 0;
+        effective.pitch_semitones = None;
+        effective.volume_percent = None;
+        effective.style = None;
+        effective.style_degree = None;
+        effective.role = None;
+        return effective;
+    }
+    if effective
+        .style
+        .as_ref()
+        .is_some_and(|style| !voice.supports_style(style))
+    {
+        effective.style = None;
+        effective.style_degree = None;
+        effective.role = None;
+    }
+    if evidence.is_some_and(|item| item.supports_style_degree == Some(false)) {
+        effective.style_degree = None;
+    }
+    if let Some(roles) = evidence.and_then(|item| item.roles.as_ref())
+        && effective
+            .role
+            .as_ref()
+            .is_some_and(|role| !roles.contains(role))
+    {
+        effective.role = None;
+    }
+    effective
+}
+
+pub(crate) fn effective_setting_with_limits(
+    setting: &VoiceSettingV3,
+    voice: &super::Voice,
+    rate: (i16, i16),
+    pitch: (i16, i16),
+) -> VoiceSettingV3 {
+    let mut effective = effective_setting(setting, voice);
+    if rate.0 == rate.1 {
+        effective.rate_percent = rate.0;
+    }
+    if pitch.0 == pitch.1 {
+        effective.pitch_semitones = (pitch.0 != 0).then_some(pitch.0 as i8);
+    }
+    effective
+}
+
 pub(crate) fn effect_hash(
     request: &SynthesisRequest,
     provider_version: &str,
@@ -107,6 +160,16 @@ pub(crate) async fn prepare_request(
         serde_json::from_value::<Vec<String>>(row.get("styles")).map_err(AppError::internal)?,
     )
     .map_err(|_| invalid())?;
+    let effective = effective_setting_with_limits(
+        setting,
+        &voice,
+        (row.get("min_rate_percent"), row.get("max_rate_percent")),
+        (
+            row.get("min_pitch_semitones"),
+            row.get("max_pitch_semitones"),
+        ),
+    );
+    let setting = &effective;
     if !super::capabilities::synthesis_available(voice.provider_voice_id(), voice.locale())
         || setting
             .locale
@@ -272,7 +335,7 @@ impl GeneratedAudioService {
         &self,
         actor: Uuid,
         security_version: i64,
-        input: GenerateVoiceAudioRequest,
+        mut input: GenerateVoiceAudioRequest,
     ) -> Result<GenerateVoiceAudioResponse, AppError> {
         self.authorize(actor, security_version).await?;
         if input.request_id.is_nil()
@@ -308,17 +371,6 @@ impl GeneratedAudioService {
         let native_locale = input.setting.locale.ok_or_else(invalid)?;
         input.source.validate_locale(native_locale.as_str())?;
         let source = input.source.canonical()?;
-        let mut setting = voice_input(&input.setting);
-        if !input.setting.voice_id.starts_with("azure-hd-flash-") {
-            let hash = Sha256::digest(
-                serde_json::to_vec(&serde_json::json!([source, setting]))
-                    .map_err(AppError::internal)?,
-            )
-            .to_vec();
-            if let Some(asset) = self.existing(actor, input.request_id, &hash).await? {
-                return Ok(GenerateVoiceAudioResponse { asset });
-            }
-        }
         let voice = PreviewRepository::new(self.pool.clone())
             .voice_by_alias(&input.setting.voice_id)
             .await
@@ -335,6 +387,13 @@ impl GeneratedAudioService {
                 "音色或模型能力未经当前资源确认，不能生成",
             ));
         }
+        input.setting = effective_setting_with_limits(
+            &input.setting,
+            &voice.voice,
+            (voice.min_rate_percent, voice.max_rate_percent),
+            (voice.min_pitch_semitones, voice.max_pitch_semitones),
+        );
+        let mut setting = voice_input(&input.setting);
         input.source.validate_model(&voice.voice)?;
         if voice.voice.is_hd_flash() {
             setting["provider_voice_id"] = voice.voice.provider_voice_id().into();
@@ -621,7 +680,7 @@ impl GeneratedAudioService {
     }
 }
 
-#[utoipa::path(post,path="/api/v1/admin/speech/audio",tag="admin-speech",security(("bearer_auth"=[])),request_body=GenerateVoiceAudioRequest,params(("X-TSZ-Test-Run"=Option<String>,Header,description="独占验收资源批次"),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 支持正式音频"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 与版本 v2 组合支持原生英语地区；指定发音必须携带 phoneme_locale")),responses((status=201,body=GenerateVoiceAudioResponse),(status=400,description="内容或配音版本无效"),(status=401,description="未登录"),(status=403,description="没有生成和内容编辑权限"),(status=404,description="音色不可用"),(status=409,description="生成中或请求编号冲突"),(status=501,description="长期音频存储未配置"),(status=503,description="生成或存储失败")))]
+#[utoipa::path(post,path="/api/v1/admin/speech/audio",tag="admin-speech",security(("bearer_auth"=[])),request_body=GenerateVoiceAudioRequest,params(("X-TSZ-Test-Run"=Option<String>,Header,description="独占验收资源批次"),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 支持正式音频；v3 支持分组继承；v4 支持显式官方 ID 局部池与来源，旧客户端读取兼容视图并拒绝覆盖已转换内容"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 与版本 v2 组合支持原生英语地区；指定发音必须携带 phoneme_locale")),responses((status=201,body=GenerateVoiceAudioResponse),(status=400,description="内容或配音版本无效"),(status=401,description="未登录"),(status=403,description="没有生成和内容编辑权限"),(status=404,description="音色不可用"),(status=409,description="生成中或请求编号冲突"),(status=501,description="长期音频存储未配置"),(status=503,description="生成或存储失败")))]
 pub async fn generate(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -629,11 +688,10 @@ pub async fn generate(
     ApiJson(input): ApiJson<GenerateVoiceAudioRequest>,
 ) -> Result<(StatusCode, HeaderMap, Json<GenerateVoiceAudioResponse>), AppError> {
     require_active_admin(&state, &auth).await?;
-    if !crate::lexicon::voice_versions::dubbing_supported(&headers)
-        && crate::lexicon::voice_versions::contains_dubbing(
-            &serde_json::json!({"profile":input.profile,"source":input.source,"setting":input.setting}),
-        )
-    {
+    if crate::lexicon::voice_versions::unsupported_dubbing(
+        &headers,
+        &serde_json::json!({"profile":input.profile,"source":input.source,"setting":input.setting}),
+    ) {
         return Err(AppError::bad_request(
             ErrorCode::InvalidSpeechPreview,
             crate::lexicon::voice_versions::UPGRADE_MESSAGE,
@@ -738,6 +796,39 @@ pub(crate) async fn validate_bindings_with_forms(
     current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
     batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
 ) -> Result<(), AppError> {
+    fn profiles(
+        value: &Value,
+        out: &mut Vec<crate::lexicon::dto::VoiceProfileV3>,
+    ) -> Result<(), AppError> {
+        if value.get("voices").is_some()
+            && value
+                .get("dubbing")
+                .and_then(|d| d.get("pool_version"))
+                .is_some()
+        {
+            out.push(serde_json::from_value(value.clone()).map_err(|_| invalid())?);
+            return Ok(());
+        }
+        match value {
+            Value::Object(fields) => {
+                for child in fields.values() {
+                    profiles(child, out)?;
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    profiles(child, out)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut pools = vec![];
+    profiles(value, &mut pools)?;
+    for pool in &pools {
+        super::dubbing::validate_pool_identities(conn, pool).await?;
+    }
     for configuration in super::generated_source::configurations(value)? {
         if !configuration
             .setting
@@ -747,7 +838,7 @@ pub(crate) async fn validate_bindings_with_forms(
             continue;
         }
         let row =
-            sqlx::query("SELECT provider_voice_id,locale,styles FROM speech.voices WHERE alias=$1")
+            sqlx::query("SELECT provider_voice_id,locale,styles,min_rate_percent,max_rate_percent,min_pitch_semitones,max_pitch_semitones FROM speech.voices WHERE alias=$1")
                 .bind(&configuration.setting.voice_id)
                 .fetch_optional(&mut *conn)
                 .await
@@ -760,7 +851,16 @@ pub(crate) async fn validate_bindings_with_forms(
             serde_json::from_value::<Vec<String>>(row.get("styles")).map_err(AppError::internal)?,
         )
         .map_err(|_| invalid())?;
-        let setting = &configuration.setting;
+        let effective = effective_setting_with_limits(
+            &configuration.setting,
+            &model,
+            (row.get("min_rate_percent"), row.get("max_rate_percent")),
+            (
+                row.get("min_pitch_semitones"),
+                row.get("max_pitch_semitones"),
+            ),
+        );
+        let setting = &effective;
         let active = setting.enabled || setting.audio_asset_id.is_some();
         if active {
             configuration.source.validate_model(&model)?;

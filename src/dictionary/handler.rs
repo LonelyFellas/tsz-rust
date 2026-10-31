@@ -30,6 +30,9 @@ fn reading_response<T: serde::Serialize>(
     value: T,
 ) -> Result<(HeaderMap, Json<serde_json::Value>), AppError> {
     let mut value = serde_json::to_value(value).map_err(AppError::internal)?;
+    if !crate::lexicon::voice_versions::pool_supported(headers) {
+        crate::lexicon::voice_versions::project_pool(&mut value);
+    }
     if !crate::lexicon::voice_versions::dubbing_supported(headers) {
         crate::lexicon::voice_versions::project_dubbing(&mut value);
     }
@@ -72,7 +75,7 @@ fn private_headers() -> HeaderMap {
     headers.insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
     headers
 }
-#[utoipa::path(get,path="/api/v1/dictionary",tag="dictionary",params(DictionaryQuery,("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 保留正式音频"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 返回原生英语地区及每项 accent_group；缺省仅返回英美旧格式")),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/dictionary",tag="dictionary",params(DictionaryQuery,("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 保留正式音频；v4 支持显式官方 ID 局部池"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 返回原生英语地区及每项 accent_group；缺省仅返回英美旧格式")),security(("bearer_auth"=[])),
 responses((status=200,description="当前发布词条，按英文拼写包含匹配；q 不能为空",body=DictionaryPage),(status=400,description="查询无效"),(status=401,description="需要登录"),(status=403,description="需要绑定手机号")))]
 pub async fn search(
     State(state): State<AppState>,
@@ -88,7 +91,7 @@ pub async fn search(
     }
     reading_response(&headers, page)
 }
-#[utoipa::path(get,path="/api/v1/dictionary/entries/{id}",tag="dictionary",params(("id"=Uuid,Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 保留正式音频"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 返回原生英语地区及每项 accent_group；缺省仅返回英美旧格式")),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/dictionary/entries/{id}",tag="dictionary",params(("id"=Uuid,Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 保留正式音频；v4 支持显式官方 ID 局部池"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 返回原生英语地区及每项 accent_group；缺省仅返回英美旧格式")),security(("bearer_auth"=[])),
 responses((status=200,body=DictionaryEntry),(status=401,description="需要登录"),(status=403,description="需要绑定手机号"),(status=404,description="词条未发布、已撤回或不存在")))]
 pub async fn detail(
     State(state): State<AppState>,

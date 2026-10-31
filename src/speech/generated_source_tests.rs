@@ -161,3 +161,66 @@ fn ipa_reference_ignores_neighboring_ups_word_data_and_accepts_absent_profiles()
         request.canonical().unwrap()
     );
 }
+
+#[test]
+fn effective_parameters_preserve_storage_and_hash_only_supported_sound_controls() {
+    use super::{
+        SpeechOptions, SynthesisRequest, Voice,
+        generated::{effect_hash, effective_setting},
+    };
+    let raw: crate::lexicon::dto::VoiceSettingV3 = serde_json::from_value(json!({"voice_id":"flash","enabled":true,"rate_percent":-27,"pitch_semitones":3,"volume_percent":65,"style":"cheerful","style_degree":1.2,"role":"Girl"})).unwrap();
+    let voice = Voice::new(
+        "azure",
+        "en-US-Tiana:DragonHDFlashLatestNeural",
+        "en-US",
+        vec![],
+    )
+    .unwrap();
+    let effective = effective_setting(&raw, &voice);
+    assert_eq!(raw.rate_percent, -27);
+    assert_eq!(raw.volume_percent, Some(65));
+    assert_eq!(effective.rate_percent, 0);
+    assert_eq!(effective.volume_percent, None);
+    assert_eq!(effective.style, None);
+    assert_eq!(effective.role, None);
+    let content: crate::lexicon::dto::RichTextV2 =
+        serde_json::from_value(json!({"version":2,"text":"hello","annotations":[]})).unwrap();
+    let make = |setting: &crate::lexicon::dto::VoiceSettingV3| {
+        SynthesisRequest::new(
+            voice.clone(),
+            SpeechOptions::new(
+                &voice,
+                setting.style.clone(),
+                setting.rate_percent,
+                setting.pitch_semitones.unwrap_or(0),
+                setting.volume_percent.unwrap_or(100),
+            )
+            .unwrap(),
+            content.clone(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        effect_hash(&make(&effective), "v1").unwrap(),
+        effect_hash(
+            &make(&effective_setting(
+                &serde_json::from_value(
+                    json!({"voice_id":"flash","enabled":true,"rate_percent":10,"volume_percent":20})
+                )
+                .unwrap(),
+                &voice
+            )),
+            "v1"
+        )
+        .unwrap()
+    );
+    let marked = serde_json::from_value(json!({"version":2,"text":"hello","annotations":[{"type":"pause","at":5,"duration_ms":500}]})).unwrap();
+    assert!(
+        SynthesisRequest::new(
+            voice.clone(),
+            SpeechOptions::new(&voice, None, 0, 0, 100).unwrap(),
+            marked
+        )
+        .is_err()
+    );
+}

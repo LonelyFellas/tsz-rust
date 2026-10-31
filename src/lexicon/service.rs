@@ -204,6 +204,7 @@ pub struct LexiconService {
     extended_voice_locales_supported: bool,
     voice_models_supported: bool,
     dubbing_supported: bool,
+    voice_pool_supported: bool,
     form_contents_supported: bool,
 }
 
@@ -214,7 +215,8 @@ impl LexiconService {
     }
 
     fn unsupported_voice_content(&self, value: &serde_json::Value) -> bool {
-        (!self.dubbing_supported && crate::lexicon::voice_versions::contains_dubbing(value))
+        (!self.voice_pool_supported && crate::lexicon::voice_versions::contains_pool(value))
+            || (!self.dubbing_supported && crate::lexicon::voice_versions::contains_dubbing(value))
             || (!self.voice_models_supported
                 && crate::lexicon::voice_versions::contains_models(value))
             || (!self.extended_voice_locales_supported
@@ -223,6 +225,11 @@ impl LexiconService {
                 && crate::lexicon::voice_versions::contains_versions(value))
             || (!self.generated_audio_supported
                 && crate::lexicon::voice_versions::contains_audio(value))
+    }
+
+    pub(crate) fn with_voice_pool_support(mut self, supported: bool) -> Self {
+        self.voice_pool_supported = supported;
+        self
     }
 
     pub(crate) fn with_dubbing_support(mut self, supported: bool) -> Self {
@@ -276,6 +283,7 @@ impl LexiconService {
             extended_voice_locales_supported: true,
             voice_models_supported: true,
             dubbing_supported: true,
+            voice_pool_supported: true,
             form_contents_supported: true,
         }
     }

@@ -972,9 +972,37 @@ pub struct VoiceProfileDubbingV3 {
     pub area: DubbingAreaV3,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recommendation_order: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_version: Option<VoicePoolVersionV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<Box<LocalVoiceRecommendationV3>>,
+}
+
+/// Explicit opt-in: historical profiles keep their existing fallback and version semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VoicePoolVersionV3 {
+    ProviderIdV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LocalVoiceRecommendationV3 {
+    pub group_id: Uuid,
+    pub pair_id: Uuid,
+    #[schema(max_items = 2)]
+    pub voice_ids: Vec<String>,
+    #[schema(max_items = 2)]
+    pub contribution_ids: Vec<Uuid>,
 }
 
 impl VoiceProfileV3 {
+    pub fn is_provider_pool(&self) -> bool {
+        self.dubbing
+            .as_ref()
+            .is_some_and(|value| value.pool_version.is_some())
+    }
+
     pub fn mode(&self) -> Option<VoiceProfileModeV3> {
         self.dubbing.as_ref().map(|value| value.mode)
     }
