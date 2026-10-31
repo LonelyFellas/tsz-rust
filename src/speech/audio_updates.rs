@@ -336,7 +336,31 @@ pub async fn change(
         if !["failed", "partial"].contains(&state.as_str()) {
             return Err(conflict());
         }
-        let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM speech.dubbing_audio_updates newer JOIN speech.dubbing_audio_updates current ON current.id=$2 WHERE (newer.group_id=$1 OR newer.areas && current.areas) AND newer.test_run IS NOT DISTINCT FROM current.test_run AND newer.id<>current.id AND (newer.state IN ('pending','running') OR (newer.created_at,newer.id)>(current.created_at,current.id)))").bind(row.get::<Uuid,_>("group_id")).bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+        // A no-effect successor must not seal off an earlier real failure.
+        // Check the exact failed targets: other areas may share the newer batch.
+        let active: bool = sqlx::query_scalar(r#"
+            SELECT EXISTS(
+                SELECT 1 FROM speech.dubbing_audio_updates newer
+                JOIN speech.dubbing_audio_updates current ON current.id=$2
+                WHERE (newer.group_id=$1 OR newer.areas && current.areas)
+                  AND newer.test_run IS NOT DISTINCT FROM current.test_run
+                  AND newer.id<>current.id
+                  AND (newer.state IN ('pending','running') OR (
+                    (newer.created_at,newer.id)>(current.created_at,current.id)
+                    AND NOT (
+                      newer.state IN ('completed','superseded') AND NOT EXISTS(
+                        SELECT 1 FROM speech.dubbing_audio_update_targets changed
+                        JOIN speech.dubbing_audio_update_targets failed
+                          ON failed.update_id=current.id AND failed.state='failed'
+                         AND (failed.owner_kind,failed.owner_id,failed.target_id,failed.target_path)=
+                             (changed.owner_kind,changed.owner_id,changed.target_id,changed.target_path)
+                        WHERE changed.update_id=newer.id
+                          AND (changed.state='completed' OR (newer.state='completed'
+                            AND (changed.state<>'skipped' OR changed.error_code IS NOT NULL)))
+                      )
+                    )
+                  ))
+            )"#).bind(row.get::<Uuid,_>("group_id")).bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
         if active {
             return Err(conflict());
         }

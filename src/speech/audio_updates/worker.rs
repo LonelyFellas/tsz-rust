@@ -272,9 +272,22 @@ async fn run(
             }
         }
     }
-    if hashes
+    // Baseline equality cannot undo an effect already committed by a superseded
+    // batch. Only genuinely missing audio with no contradictory active asset skips.
+    let current_audio_matches = profile
+        .voices
         .iter()
-        .any(|hash| !old.iter().any(|(saved, _)| saved == hash))
+        .filter(|setting| setting.enabled)
+        .filter_map(|setting| setting.audio_asset_id)
+        .all(|asset| {
+            old.iter()
+                .find(|(_, saved)| *saved == asset)
+                .is_some_and(|(hash, _)| hashes.contains(hash))
+        });
+    if current_audio_matches
+        && hashes
+            .iter()
+            .any(|hash| !old.iter().any(|(saved, _)| saved == hash))
         && let Some(baseline) = profile
             .area()
             .and_then(|area| claim.baseline_groups.get(area.as_str()))

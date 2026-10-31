@@ -1294,3 +1294,168 @@ async fn baseline_migration_preserves_legacy_jobs_and_rejects_lossy_rollback(poo
     .unwrap();
     assert_eq!(retained, snapshot);
 }
+
+#[sqlx::test]
+async fn baseline_does_not_hide_partially_applied_effects_when_a_running_batch_reverts(
+    pool: PgPool,
+) {
+    let (actor, a, version, provider, storage) = setup(&pool).await;
+    let mut owners = vec![];
+    for _ in 0..9 {
+        owners.push(
+            sentence(
+                &pool,
+                actor,
+                json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+            )
+            .await,
+        );
+    }
+    save(&pool, actor, group(a, version, 0), 0).await;
+    due(&pool).await;
+    while audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap()
+        > 0
+    {}
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    save(&pool, actor, group(a, version, -27), 1).await;
+    due(&pool).await;
+    assert_eq!(
+        audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+            .await
+            .unwrap(),
+        8
+    );
+    let partial = audio_updates::list(&pool, a)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(
+        (partial.state.as_str(), partial.completed, partial.total),
+        ("running", 8, 9)
+    );
+    save(&pool, actor, group(a, version, 0), 2).await;
+    due(&pool).await;
+    while audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap()
+        > 0
+    {}
+    for owner in owners {
+        assert_eq!(
+            current(&pool, owner).await["voices"][0]["rate_percent"],
+            0,
+            "a target already changed by the old batch must be restored"
+        );
+    }
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        2,
+        "restoration reuses each target's earlier owned effect"
+    );
+}
+
+#[sqlx::test]
+async fn baseline_noop_jobs_keep_failed_updates_explicitly_retryable(pool: PgPool) {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+    let (actor, a, version, provider, storage) = setup(&pool).await;
+    save(&pool, actor, group(a, version, 0), 0).await;
+    sqlx::query("UPDATE speech.dubbing_audio_updates SET state='cancelled' WHERE state='pending'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let owner = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
+    save(&pool, actor, group(a, version, -27), 1).await;
+    due(&pool).await;
+    for _ in 0..3 {
+        sqlx::query("UPDATE speech.dubbing_audio_update_targets SET retry_at=now()-interval '1 second' WHERE state='pending'").execute(&pool).await.unwrap();
+        audio_updates::sweep(&pool, None, Some(storage.clone()))
+            .await
+            .unwrap();
+    }
+    let failed = audio_updates::list(&pool, a)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(failed.state, "failed");
+    let state = tsz_rust::state::AppState::for_test(pool.clone());
+    let retry = |id| {
+        let token = state.admin_token_manager.generate(actor, "admin").unwrap();
+        tsz_rust::router(state.clone()).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/admin/speech/audio-updates/{id}/retry"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let mut renamed = group(a, version, -27);
+    renamed.name = "rename after failure".into();
+    save(&pool, actor, renamed.clone(), 2).await;
+    renamed.name = "another name only".into();
+    save(&pool, actor, renamed, 3).await;
+    assert_eq!(
+        retry(failed.id).await.unwrap().status(),
+        StatusCode::CONFLICT,
+        "a newer active batch still takes priority"
+    );
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "rename does not retry a paid operation implicitly"
+    );
+    assert_eq!(
+        retry(failed.id).await.unwrap().status(),
+        StatusCode::NO_CONTENT,
+        "a no-effect completion cannot seal off a real failed update"
+    );
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        current(&pool, owner).await["voices"][0]["rate_percent"],
+        -27
+    );
+    // A later batch that actually changed audio must continue to block the older retry.
+    save(&pool, actor, group(a, version, -20), 4).await;
+    due(&pool).await;
+    for _ in 0..3 {
+        sqlx::query("UPDATE speech.dubbing_audio_update_targets SET retry_at=now()-interval '1 second' WHERE state='pending'").execute(&pool).await.unwrap();
+        audio_updates::sweep(&pool, None, Some(storage.clone()))
+            .await
+            .unwrap();
+    }
+    let older = audio_updates::list(&pool, a)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(older.state, "failed");
+    save(&pool, actor, group(a, version, -30), 5).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider), Some(storage))
+        .await
+        .unwrap();
+    assert_eq!(
+        retry(older.id).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+}
