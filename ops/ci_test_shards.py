@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PAGINATION = "component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_late_entry"
 SHARD_MODULES = {
     "lexicon-pagination": "lexicon",
+    "lexicon-learning": "lexicon",
     "lexicon-handler": "lexicon",
     "lexicon-other": "lexicon",
     "admin": "admin",
@@ -30,7 +31,9 @@ def targets_for(shard, grouped):
         raise ClassificationError(f"unknown shard: {shard}")
     targets = grouped[SHARD_MODULES[shard]]
     if shard == "lexicon-pagination":
-        return tuple(target for target in targets if target == "lexicon_handler" or target.startswith("learning_"))
+        return ("lexicon_handler",)
+    if shard == "lexicon-learning":
+        return tuple(target for target in targets if target.startswith("learning_"))
     if shard == "lexicon-handler":
         return ("lexicon_handler",)
     if shard == "lexicon-other":

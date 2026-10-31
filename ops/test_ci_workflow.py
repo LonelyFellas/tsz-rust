@@ -31,7 +31,7 @@ class CiWorkflowTests(unittest.TestCase):
         integration = self._job("integration")
 
         self.assertIn("fail-fast: false", integration)
-        self.assertIn("module: [lexicon-pagination, lexicon-handler, lexicon-other, admin, identity, platform]", integration)
+        self.assertIn("module: [lexicon-pagination, lexicon-learning, lexicon-handler, lexicon-other, admin, identity, platform]", integration)
         self.assertIn(
             "python3 ops/ci_identity_profile.py run ${{ matrix.module }}", integration
         )
