@@ -160,14 +160,8 @@ pub async fn build_pool(
             source::candidates(tx, chunk, &settings.cefr_level, &settings.english_variant).await?,
         );
     }
-    let parts: Vec<_> = targets
-        .iter()
-        .map(|t| t.part_of_speech.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
     let mut algorithm =
-        algorithm::Pool::load(tx, &settings.cefr_level, &settings.english_variant, &parts).await?;
+        algorithm::Pool::load(tx, &settings.cefr_level, &settings.english_variant).await?;
     let mut eligible = Vec::new();
     for mut candidate in pool.candidates {
         let Some(target) = targets.iter().find(|t| {
@@ -217,21 +211,19 @@ pub async fn materialize(
     settings: &LearningContext,
     spelling_fallback: bool,
 ) -> Result<(), AppError> {
-    let mut parts = Vec::new();
+    let mut has_deferred = false;
     for unit in units {
         if let Some(value) = unit.answer_snapshot.get("choice").filter(|v| !v.is_null()) {
             let c: ChoiceSnapshot =
                 serde_json::from_value(value.clone()).map_err(AppError::internal)?;
-            if c.deferred {
-                parts.push(c.content.target.part_of_speech);
-            }
+            has_deferred |= c.deferred;
         }
     }
-    if parts.is_empty() {
+    if !has_deferred {
         return Ok(());
     }
     let mut algorithm =
-        algorithm::Pool::load(tx, &settings.cefr_level, &settings.english_variant, &parts).await?;
+        algorithm::Pool::load(tx, &settings.cefr_level, &settings.english_variant).await?;
     for unit in units {
         let mut answer: AnswerSnapshot =
             serde_json::from_value(unit.answer_snapshot.clone()).map_err(AppError::internal)?;

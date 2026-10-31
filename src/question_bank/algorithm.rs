@@ -53,12 +53,7 @@ pub struct Pool {
     profile: String,
 }
 impl Pool {
-    pub async fn load(
-        tx: &mut Tx<'_>,
-        level: &str,
-        profile: &str,
-        _parts: &[String],
-    ) -> Result<Self, AppError> {
+    pub async fn load(tx: &mut Tx<'_>, level: &str, profile: &str) -> Result<Self, AppError> {
         source::validate_context(level, profile)?;
         let _: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM dictionary.datasets WHERE status='active' ORDER BY id FOR SHARE",

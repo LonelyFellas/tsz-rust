@@ -55,7 +55,6 @@ async fn chatgpt_accounts_login_and_model_selection_are_super_only(pool: PgPool)
     state.vocabulary_agent = Some(Arc::new(tsz_rust::question_bank::worker::AgentConfig {
         base_url: format!("http://{address}"),
         outbound_token: "chatgpt-test-outbound".into(),
-        inbound_token: "unused".into(),
         client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(1))
             .build()
@@ -497,7 +496,6 @@ async fn model_selection_is_forwarded_to_agent_and_reread(pool: PgPool) {
     state.vocabulary_agent = Some(Arc::new(tsz_rust::question_bank::worker::AgentConfig {
         base_url: format!("http://{address}"),
         outbound_token: "outbound-test".into(),
-        inbound_token: "inbound-test".into(),
         client: reqwest::Client::new(),
     }));
     let target = json!({"source":"opencode","provider_id":"paid-provider","model_id":"model-a"});
@@ -559,7 +557,6 @@ async fn probes_are_super_only_and_proxy_async_reports_without_private_fields(po
     state.vocabulary_agent = Some(Arc::new(tsz_rust::question_bank::worker::AgentConfig {
         base_url: format!("http://{address}"),
         outbound_token: "probe-test-outbound".into(),
-        inbound_token: "unused-probe-inbound".into(),
         client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(1))
             .build()
