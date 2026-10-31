@@ -565,7 +565,7 @@ async fn publish_command(
     Ok(response)
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
 pub async fn publish(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -596,7 +596,7 @@ pub async fn publish(
 }
 
 /// 将历史快照恢复到草稿；已公开例句必须先撤回，不创建或激活发布版本。
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}/rollback",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}/rollback",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
 pub async fn rollback(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -752,7 +752,7 @@ async fn visibility_command(
     Ok(response)
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/withdraw",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=WithdrawSentenceInput,responses((status=200,body=SharedSentence),(status=403,description="无下架权"),(status=409,description="版本或影响确认过期")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/withdraw",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=WithdrawSentenceInput,responses((status=200,body=SharedSentence),(status=403,description="无下架权"),(status=409,description="版本或影响确认过期")))]
 pub async fn withdraw(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -782,7 +782,7 @@ pub async fn withdraw(
     )
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/restore",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/restore",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
 pub async fn restore(
     State(state): State<AppState>,
     auth: AdminAuth,

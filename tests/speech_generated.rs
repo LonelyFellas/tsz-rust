@@ -797,15 +797,54 @@ async fn flash_generates_only_natural_defaults_and_records_provider_identity(poo
         "en-US-Tiana:DragonHDFlashLatestNeural"
     );
     assert_eq!(identity["builder_version"], "hd-flash-natural-ssml-v1");
-    for (rate, volume, pause) in [(1, 100, false), (0, 90, false), (0, 100, true)] {
+    let natural_effect: Vec<u8> =
+        sqlx::query_scalar("SELECT effect_hash FROM lexicon.audio_generations WHERE asset_id=$1")
+            .bind(asset.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for (rate, volume) in [(1, 100), (0, 90)] {
         let mut request = input(Uuid::now_v7(), Uuid::now_v7(), "hello");
         request.setting.voice_id = catalog.alias();
         request.setting.locale = tsz_rust::speech::locale::EnglishLocale::parse("en-US");
         request.setting.rate_percent = rate;
         request.setting.volume_percent = Some(volume);
-        if pause {
-            request.source=serde_json::from_value(json!({"kind":"text","content":{"version":2,"text":"hello","annotations":[{"type":"pause","at":5,"duration_ms":300}]}})).unwrap();
-        }
+        let replay = GenerateVoiceAudioRequest {
+            request_id: request.request_id,
+            source: request.source.clone(),
+            setting: request.setting.clone(),
+            profile: None,
+        };
+        let projected = service.generate(actor, 0, request).await.unwrap().asset;
+        let (stored, effect): (serde_json::Value, Vec<u8>) = sqlx::query_as(
+            "SELECT voice,effect_hash FROM lexicon.audio_generations WHERE asset_id=$1",
+        )
+        .bind(projected.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored["rate_percent"], 0);
+        assert_eq!(stored["volume_percent"], 100);
+        assert_eq!(effect, natural_effect);
+        assert_eq!(
+            service.generate(actor, 0, replay).await.unwrap().asset.id,
+            projected.id,
+            "raw unsupported controls must replay their projected request identity"
+        );
+    }
+    for mark in [
+        json!({"type":"pause","at":5,"duration_ms":300}),
+        json!({"type":"phoneme","start":0,"end":5,"alphabet":"ipa","phoneme":"həˈləʊ"}),
+        json!({"type":"say_as","start":0,"end":5,"interpret_as":"characters"}),
+        json!({"type":"sub","start":0,"end":5,"alias":"hi"}),
+    ] {
+        let mut request = input(Uuid::now_v7(), Uuid::now_v7(), "hello");
+        request.setting.voice_id = catalog.alias();
+        request.setting.locale = tsz_rust::speech::locale::EnglishLocale::parse("en-US");
+        request.source = serde_json::from_value(
+            json!({"kind":"text","content":{"version":2,"text":"hello","annotations":[mark]}}),
+        )
+        .unwrap();
         assert!(service.generate(actor, 0, request).await.is_err());
     }
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);

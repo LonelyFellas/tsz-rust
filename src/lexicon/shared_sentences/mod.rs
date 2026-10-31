@@ -652,7 +652,7 @@ async fn bump(conn: &mut PgConnection, id: Uuid) -> Result<(), AppError> {
 }
 
 /// 公开视图允许 sentences.read_published 或 sentences.access；draft 视图仅允许 sentences.access。
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),params(SentenceListQuery,("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentenceList),(status=400,description="查询参数无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条")))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),params(SentenceListQuery,("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentenceList),(status=400,description="查询参数无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条")))]
 pub async fn list(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -782,7 +782,7 @@ pub async fn list(
 }
 
 /// 公开只读权限只返回当前公开快照；撤回内容和草稿不可访问。
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceReadQuery,("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceReadQuery,("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
 pub async fn get(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -809,7 +809,7 @@ pub async fn get(
     )
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),request_body=CreateSharedSentence,params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),request_body=CreateSharedSentence,params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
 pub async fn create(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -821,11 +821,10 @@ pub async fn create(
         return Err(invalid("来源词条与词义必须同时提供"));
     }
     validate(&input.content)?;
-    if !crate::lexicon::voice_versions::dubbing_supported(&headers)
-        && crate::lexicon::voice_versions::contains_dubbing(
-            &serde_json::to_value(&input.content).map_err(AppError::internal)?,
-        )
-    {
+    if crate::lexicon::voice_versions::unsupported_dubbing(
+        &headers,
+        &serde_json::to_value(&input.content).map_err(AppError::internal)?,
+    ) {
         return Err(invalid(crate::lexicon::voice_versions::UPGRADE_MESSAGE));
     }
     if !crate::lexicon::voice_versions::models_supported(&headers)
@@ -896,7 +895,7 @@ pub async fn create(
     formatting_response(&headers, StatusCode::OK, read(&state.pool, id).await?)
 }
 
-#[utoipa::path(put,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=UpdateSharedSentence,responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
+#[utoipa::path(put,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=UpdateSharedSentence,responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
 pub async fn update(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -906,11 +905,10 @@ pub async fn update(
 ) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     validate(&input.content)?;
-    if !crate::lexicon::voice_versions::dubbing_supported(&headers)
-        && crate::lexicon::voice_versions::contains_dubbing(
-            &serde_json::to_value(&input.content).map_err(AppError::internal)?,
-        )
-    {
+    if crate::lexicon::voice_versions::unsupported_dubbing(
+        &headers,
+        &serde_json::to_value(&input.content).map_err(AppError::internal)?,
+    ) {
         return Err(invalid(crate::lexicon::voice_versions::UPGRADE_MESSAGE));
     }
     if !crate::lexicon::voice_versions::models_supported(&headers)
@@ -959,11 +957,10 @@ pub async fn update(
         &serde_json::to_value(&current.content).map_err(AppError::internal)?,
         &serde_json::to_value(&input.content).map_err(AppError::internal)?,
     )?;
-    if !crate::lexicon::voice_versions::dubbing_supported(&headers)
-        && crate::lexicon::voice_versions::contains_dubbing(
-            &serde_json::to_value(&current.content).map_err(AppError::internal)?,
-        )
-    {
+    if crate::lexicon::voice_versions::unsupported_dubbing(
+        &headers,
+        &serde_json::to_value(&current.content).map_err(AppError::internal)?,
+    ) {
         return Err(invalid(crate::lexicon::voice_versions::UPGRADE_MESSAGE));
     }
     if !crate::lexicon::voice_versions::models_supported(&headers)

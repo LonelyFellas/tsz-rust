@@ -49,17 +49,55 @@ pub(crate) const UPGRADE_MESSAGE: &str =
 pub(crate) fn supported(headers: &HeaderMap) -> bool {
     headers
         .get(HEADER)
-        .is_some_and(|value| value == "v1" || value == "v2" || value == "v3")
+        .is_some_and(|value| value == "v1" || value == "v2" || value == "v3" || value == "v4")
 }
 
 pub(crate) fn generated_supported(headers: &HeaderMap) -> bool {
     headers
         .get(HEADER)
-        .is_some_and(|value| value == "v2" || value == "v3")
+        .is_some_and(|value| value == "v2" || value == "v3" || value == "v4")
 }
 
 pub(crate) fn dubbing_supported(headers: &HeaderMap) -> bool {
-    headers.get(HEADER).is_some_and(|value| value == "v3")
+    headers
+        .get(HEADER)
+        .is_some_and(|value| value == "v3" || value == "v4")
+}
+
+pub(crate) fn pool_supported(headers: &HeaderMap) -> bool {
+    headers.get(HEADER).is_some_and(|value| value == "v4")
+}
+
+pub(crate) fn contains_pool(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            fields
+                .get("dubbing")
+                .is_some_and(|value| value.get("pool_version").is_some())
+                || fields.values().any(contains_pool)
+        }
+        Value::Array(items) => items.iter().any(contains_pool),
+        _ => false,
+    }
+}
+
+pub(crate) fn project_pool(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(dubbing) = fields.get_mut("dubbing").and_then(Value::as_object_mut) {
+                dubbing.remove("pool_version");
+                dubbing.remove("recommendation");
+            }
+            fields.values_mut().for_each(project_pool);
+        }
+        Value::Array(items) => items.iter_mut().for_each(project_pool),
+        _ => {}
+    }
+}
+
+pub(crate) fn unsupported_dubbing(headers: &HeaderMap, value: &Value) -> bool {
+    (!dubbing_supported(headers) && contains_dubbing(value))
+        || (!pool_supported(headers) && contains_pool(value))
 }
 
 pub(crate) fn contains_dubbing(value: &Value) -> bool {
@@ -294,7 +332,7 @@ mod tests {
             (Some("v1"), true, false, false),
             (Some("v2"), true, true, false),
             (Some("v3"), true, true, false),
-            (Some("v4"), false, false, false),
+            (Some("v4"), true, true, false),
         ] {
             let mut headers = HeaderMap::new();
             if let Some(version) = version {
@@ -310,6 +348,27 @@ mod tests {
         assert!(supported(&negotiated));
         assert!(generated_supported(&negotiated));
         assert!(extended_supported(&negotiated));
+    }
+
+    #[test]
+    fn pool_negotiation_projects_only_response_and_protects_v3_writers() {
+        let stored = json!({"voice_profile":{"voices":[],"dubbing":{"mode":"local","area":"word","pool_version":"provider_id_v1","recommendation":{"group_id":"g","pair_id":"p","voice_ids":["sonia"],"contribution_ids":[]}}}});
+        let mut old = HeaderMap::new();
+        old.insert(HEADER, "v3".parse().unwrap());
+        assert!(dubbing_supported(&old));
+        assert!(!pool_supported(&old));
+        assert!(unsupported_dubbing(&old, &stored));
+        let mut response = stored.clone();
+        project_pool(&mut response);
+        assert!(!contains_pool(&response));
+        assert!(contains_pool(&stored));
+        assert_eq!(
+            response["voice_profile"]["dubbing"],
+            json!({"mode":"local","area":"word"})
+        );
+        old.insert(HEADER, "v4".parse().unwrap());
+        assert!(pool_supported(&old));
+        assert!(!unsupported_dubbing(&old, &stored));
     }
 
     #[test]

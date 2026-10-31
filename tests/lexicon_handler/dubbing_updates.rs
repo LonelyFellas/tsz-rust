@@ -220,3 +220,138 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
     assert_eq!(voices[0]["enabled"], false);
     assert!(voices[0]["audio_asset_id"].is_string());
 }
+
+#[sqlx::test]
+async fn provider_pool_persists_without_recommendation_and_rejects_old_writer_or_duplicate_official_id(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = fixture_state(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let created = create_v3_forms_fixture(&state, &pool, &bearer, false, false).await;
+    let id = created["word"]["id"].as_str().unwrap();
+    async fn request(
+        state: &AppState,
+        bearer: &str,
+        id: &str,
+        version: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let path = if body.is_some() {
+            format!("{ROOT}/entries/{id}/steps/forms")
+        } else {
+            format!("{ROOT}/entries/{id}")
+        };
+        let request = Request::builder()
+            .method(if body.is_some() {
+                Method::PUT
+            } else {
+                Method::GET
+            })
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("X-TSZ-Form-Contents", "v1")
+            .header("X-TSZ-Voice-Versions", version)
+            .header("X-TSZ-Voice-Locales", "v1")
+            .header("X-TSZ-Voice-Models", "v1")
+            .header("X-TSZ-Spelling-Speech", "v1")
+            .header("X-TSZ-Phoneme-Speech", "v1")
+            .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
+            .unwrap();
+        let response = tsz_rust::router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        (
+            status,
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap(),
+        )
+    }
+    let read = request(&state, &bearer, id, "v4", None).await.1;
+    let mut forms = read["word"]["forms"].clone();
+    let path = if forms
+        .pointer("/contents/0/regional_variants/common")
+        .is_some()
+    {
+        "/contents/0/regional_variants/common"
+    } else {
+        "/contents/0/regional_variants/uk"
+    };
+    let selected_id = Uuid::now_v7();
+    let setting = |alias, version, enabled| json!({"voice_id":alias,"version_id":version,"version_name":"局部参数","locale":"en-GB","enabled":enabled,"rate_percent":-27,"volume_percent":65});
+    let expected = json!({"voices":[setting("en-gb-sonianeural",selected_id,true),setting("en-gb-ryanneural",Uuid::now_v7(),false)],"dubbing":{"mode":"local","area":"word","pool_version":"provider_id_v1"}});
+    let variant = forms.pointer_mut(path).unwrap();
+    variant["spelling_speech"] = json!({"content":{"version":2,"text":variant["spelling"],"annotations":[]},"voice_profile":expected});
+    let save = |revision: Value, content: Value| json!({"schema_version":3,"base_revision":revision,"intent":"save","content":content});
+    let (status, saved) = request(
+        &state,
+        &bearer,
+        id,
+        "v4",
+        Some(save(read["word"]["revision"].clone(), forms)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let reread = request(&state, &bearer, id, "v4", None).await.1;
+    let profile_path = format!("{path}/spelling_speech/voice_profile");
+    assert_eq!(
+        reread["word"]["forms"].pointer(&profile_path).unwrap(),
+        &expected
+    );
+    let old = request(&state, &bearer, id, "v3", None).await.1;
+    assert!(
+        old["word"]["forms"]
+            .pointer(&format!("{profile_path}/dubbing/pool_version"))
+            .is_none()
+    );
+    let (status, _) = request(
+        &state,
+        &bearer,
+        id,
+        "v3",
+        Some(save(
+            old["word"]["revision"].clone(),
+            old["word"]["forms"].clone(),
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let stable = request(&state, &bearer, id, "v4", None).await.1;
+    assert_eq!(stable["word"]["revision"], reread["word"]["revision"]);
+    assert_eq!(
+        stable["word"]["forms"].pointer(&profile_path).unwrap(),
+        &expected
+    );
+    sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,'sonia-copy','azure','en-GB-SoniaNeural','en-GB','female','[]','v1')").bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+    let mut collision = stable["word"]["forms"].clone();
+    collision
+        .pointer_mut(&format!("{profile_path}/voices"))
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .push(setting("sonia-copy", Uuid::now_v7(), false));
+    let (status, _) = request(
+        &state,
+        &bearer,
+        id,
+        "v4",
+        Some(save(stable["word"]["revision"].clone(), collision)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let final_read = request(&state, &bearer, id, "v4", None).await.1;
+    assert_eq!(final_read["word"]["revision"], stable["word"]["revision"]);
+    assert_eq!(
+        final_read["word"]["forms"].pointer(&profile_path).unwrap(),
+        &expected
+    );
+}

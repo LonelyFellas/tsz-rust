@@ -96,7 +96,10 @@ pub fn resolve_profile(
             .cloned()
             .collect::<Vec<_>>()
     };
-    if !local.is_empty() || profile.mode().is_none() {
+    if !local.is_empty()
+        || profile.mode().is_none()
+        || (profile.is_provider_pool() && profile.mode() == Some(VoiceProfileModeV3::Local))
+    {
         return local;
     }
     let from_group = |group: &DubbingGroup| {
@@ -163,6 +166,46 @@ pub async fn resolve_in(
     resolve_in_groups(conn, profile, accent, content, native_locale, &groups).await
 }
 
+pub(crate) async fn validate_pool_identities(
+    conn: &mut PgConnection,
+    profile: &VoiceProfileV3,
+) -> Result<(), AppError> {
+    if profile.is_provider_pool() {
+        let aliases = profile
+            .voices
+            .iter()
+            .map(|setting| setting.voice_id.as_str())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            "SELECT alias,provider,provider_voice_id FROM speech.voices WHERE alias=ANY($1)",
+        )
+        .bind(&aliases)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(AppError::internal)?;
+        let mut identities = std::collections::HashSet::new();
+        for setting in &profile.voices {
+            let identity = rows
+                .iter()
+                .find(|row| row.get::<String, _>("alias") == setting.voice_id)
+                .map(|row| {
+                    (
+                        row.get::<String, _>("provider"),
+                        row.get::<String, _>("provider_voice_id"),
+                    )
+                })
+                .unwrap_or_else(|| ("alias".into(), setting.voice_id.clone()));
+            if !identities.insert(identity) {
+                return Err(AppError::bad_request(
+                    crate::error::ErrorCode::InvalidSpeechPreview,
+                    "局部池同一供应商官方音色只能保留一个配置，请明确处理历史冲突",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn resolve_in_groups(
     conn: &mut PgConnection,
     profile: &VoiceProfileV3,
@@ -171,6 +214,7 @@ pub(crate) async fn resolve_in_groups(
     native_locale: Option<&str>,
     groups: &[DubbingGroup],
 ) -> Result<Vec<VoiceSettingV3>, AppError> {
+    validate_pool_identities(conn, profile).await?;
     let phoneme = content.annotations.iter().any(|mark| {
         matches!(
             mark,
@@ -197,6 +241,16 @@ pub(crate) async fn resolve_in_groups(
                 let Ok(voice) = Voice::new("azure", id, &locale, styles) else {
                     return false;
                 };
+                let effective = super::generated::effective_setting_with_limits(
+                    setting,
+                    &voice,
+                    (row.get("min_rate_percent"), row.get("max_rate_percent")),
+                    (
+                        row.get("min_pitch_semitones"),
+                        row.get("max_pitch_semitones"),
+                    ),
+                );
+                let setting = &effective;
                 if setting.locale.is_some_and(|value| value.as_str() != locale)
                     || setting.rate_percent < row.get("min_rate_percent")
                     || setting.rate_percent > row.get("max_rate_percent")
@@ -236,7 +290,8 @@ pub(crate) async fn resolve_in_groups(
                         && row.get::<String, _>("accent") == accent
                 })
         });
-    if profile.mode() != Some(VoiceProfileModeV3::Inherit)
+    if !profile.is_provider_pool()
+        && profile.mode() != Some(VoiceProfileModeV3::Inherit)
         && profile.voices.iter().any(|setting| {
             setting.enabled
                 && !rows
@@ -246,7 +301,8 @@ pub(crate) async fn resolve_in_groups(
     {
         return Err(unavailable());
     }
-    if local_selected
+    if !profile.is_provider_pool()
+        && local_selected
         && profile.voices.iter().any(|setting| {
             setting.enabled
                 && rows.iter().any(|row| {
@@ -260,7 +316,10 @@ pub(crate) async fn resolve_in_groups(
     }
     let mut resolved = resolve_profile(profile, groups, accent, eligible);
     // Retain the historical local-empty behavior until the explicit pool migration.
-    if resolved.is_empty() && profile.mode() == Some(VoiceProfileModeV3::Local) {
+    if resolved.is_empty()
+        && !profile.is_provider_pool()
+        && profile.mode() == Some(VoiceProfileModeV3::Local)
+    {
         for row in &rows {
             let candidate = VoiceSettingV3 {
                 output_format: None,
@@ -315,7 +374,7 @@ pub(crate) async fn validate_setting(
     if profile.dubbing.is_none() {
         return Ok(());
     }
-    let row = sqlx::query("SELECT accent FROM speech.voices WHERE alias=$1 AND enabled")
+    let row = sqlx::query("SELECT accent,provider,provider_voice_id,locale,styles,min_rate_percent,max_rate_percent,min_pitch_semitones,max_pitch_semitones FROM speech.voices WHERE alias=$1 AND enabled")
         .bind(&setting.voice_id)
         .fetch_optional(&mut *conn)
         .await
@@ -345,8 +404,24 @@ pub(crate) async fn validate_setting(
         .then_some(locale.as_str()),
     )
     .await?;
+    let voice = Voice::new(
+        row.get::<String, _>("provider"),
+        row.get::<String, _>("provider_voice_id"),
+        row.get::<String, _>("locale"),
+        serde_json::from_value::<Vec<String>>(row.get("styles")).map_err(AppError::internal)?,
+    )
+    .map_err(|_| unavailable())?;
     let effect = |setting: &VoiceSettingV3| {
-        let mut value = super::generated_source::voice_input(setting);
+        let effective = super::generated::effective_setting_with_limits(
+            setting,
+            &voice,
+            (row.get("min_rate_percent"), row.get("max_rate_percent")),
+            (
+                row.get("min_pitch_semitones"),
+                row.get("max_pitch_semitones"),
+            ),
+        );
+        let mut value = super::generated_source::voice_input(&effective);
         value
             .as_object_mut()
             .expect("setting object")
@@ -623,6 +698,38 @@ mod tests {
         );
         groups[3].uk.clear();
         assert!(resolve_profile(&inherited, &groups, "gb", eligible).is_empty());
+    }
+
+    #[test]
+    fn provider_pool_empty_or_invalid_never_falls_back_and_disabled_cache_is_not_selected() {
+        let mut local = profile(Some("local"), json!([]), vec![]);
+        local.dubbing.as_mut().unwrap().pool_version =
+            Some(crate::lexicon::dto::VoicePoolVersionV3::ProviderIdV1);
+        let groups = vec![group(
+            true,
+            vec![recommendation(Uuid::now_v7(), "global", true)],
+        )];
+        assert!(resolve_profile(&local, &groups, "gb", |_| true).is_empty());
+        local.voices = vec![
+            setting(&recommendation(Uuid::now_v7(), "a", true)),
+            setting(&recommendation(Uuid::now_v7(), "b", true)),
+            setting(&recommendation(Uuid::now_v7(), "cache", true)),
+        ];
+        local.voices[2].enabled = false;
+        assert_eq!(
+            resolve_profile(&local, &groups, "gb", |v| v.voice_id != "a")
+                .iter()
+                .map(|v| v.voice_id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert!(resolve_profile(&local, &groups, "gb", |_| false).is_empty());
+        local.dubbing.as_mut().unwrap().pool_version = None;
+        local.voices.clear();
+        assert_eq!(
+            resolve_profile(&local, &groups, "gb", |_| true)[0].voice_id,
+            "global"
+        );
     }
 
     #[test]

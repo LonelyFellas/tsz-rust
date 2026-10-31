@@ -990,7 +990,34 @@ fn validate_voice_profile(
     let mut seen = HashSet::new();
     let mut version_ids = HashSet::new();
     let mut selected_locales = HashSet::new();
-    let voices_invalid = profile.voices.len() > MAX_VOICE_PROFILE_VOICES
+    let pool_invalid = profile.dubbing.as_ref().is_some_and(|dubbing| {
+        dubbing.recommendation.as_ref().is_some_and(|source| {
+            !profile.is_provider_pool()
+                || dubbing.mode != crate::lexicon::dto::VoiceProfileModeV3::Local
+                || source.group_id.is_nil()
+                || source.pair_id.is_nil()
+                || source.voice_ids.is_empty()
+                || source.voice_ids.len() > 2
+                || source
+                    .voice_ids
+                    .iter()
+                    .any(|id| id.trim().is_empty() || id.len() > 128)
+                || source.voice_ids.iter().collect::<HashSet<_>>().len() != source.voice_ids.len()
+                || source.contribution_ids.len() > 2
+                || source.contribution_ids.iter().collect::<HashSet<_>>().len()
+                    != source.contribution_ids.len()
+                || source.contribution_ids.iter().any(|id| {
+                    id.is_nil()
+                        || !profile
+                            .voices
+                            .iter()
+                            .any(|voice| voice.version_id == Some(*id))
+                })
+        })
+    });
+    let mut pool_ids = HashSet::new();
+    let voices_invalid = pool_invalid
+        || profile.voices.len() > MAX_VOICE_PROFILE_VOICES
         || (profile.mode() == Some(crate::lexicon::dto::VoiceProfileModeV3::Inherit)
             && profile.area().is_none())
         || (profile.mode().is_none()
@@ -1020,6 +1047,7 @@ fn validate_voice_profile(
                 _ => true,
             };
             version_invalid
+                || (profile.is_provider_pool() && !pool_ids.insert(voice_id.as_str()))
                 || voice
                     .audio_asset_id
                     .is_some_and(|id| id.is_nil() || voice.version_id.is_none())
@@ -3691,6 +3719,35 @@ mod tests {
 mod sense_group_voice_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn explicit_provider_pool_validates_sources_unique_aliases_and_keeps_legacy_versions() {
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        let version = |id| json!({"voice_id":"sonia","version_id":id,"version_name":"配置","locale":"en-GB","enabled":true,"rate_percent":-27});
+        let raw = json!({"voices":[version(first),version(second)],"dubbing":{"mode":"local","area":"word"}});
+        let validate = |value: Value| {
+            let profile: VoiceProfileV3 = serde_json::from_value(value).unwrap();
+            let mut issues = vec![];
+            validate_voice_profile(Some(&profile), first, &mut issues);
+            issues
+        };
+        assert!(validate(raw.clone()).is_empty());
+        let mut pool = raw;
+        pool["dubbing"]["pool_version"] = json!("provider_id_v1");
+        assert!(!validate(pool.clone()).is_empty());
+        pool["voices"] = json!([version(first)]);
+        pool["dubbing"]["recommendation"] = json!({"group_id":Uuid::now_v7(),"pair_id":Uuid::now_v7(),"voice_ids":["sonia"],"contribution_ids":[first]});
+        assert!(validate(pool.clone()).is_empty());
+        pool["dubbing"]["recommendation"]["contribution_ids"] = json!([second]);
+        assert!(!validate(pool.clone()).is_empty());
+        pool["dubbing"]
+            .as_object_mut()
+            .unwrap()
+            .remove("recommendation");
+        pool["voices"] = json!([]);
+        assert!(validate(pool).is_empty());
+    }
+
     #[test]
     fn voice_parameters_round_trip_and_validate_without_changing_legacy_defaults() {
         let legacy = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":0}]});
