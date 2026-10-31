@@ -189,7 +189,6 @@ async fn with_upstream(pool: PgPool) -> (AppState, Upstream, tokio::task::JoinHa
     state.vocabulary_agent = Some(Arc::new(AgentConfig {
         base_url: format!("http://{address}"),
         outbound_token: SERVICE_TOKEN.into(),
-        inbound_token: "unused-callback-token".into(),
         client: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(1))
