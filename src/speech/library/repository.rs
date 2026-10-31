@@ -9,10 +9,10 @@ use crate::{
 
 use super::dto::{
     DeleteDubbingGroupRequest, DubbingGroup, DubbingGroupsReadResponse, DubbingGroupsResponse,
-    DubbingGroupsV3Response, RestoreVoiceDescriptionRequest, SaveDubbingGroupRequest,
-    SaveDubbingGroupsRequest, SavePairedDubbingGroupRequest, SaveVoiceAccentRequest,
-    SaveVoiceDescriptionRequest, SaveVoiceSettingsRequest, VoiceLibraryItem, VoiceLibraryResponse,
-    VoiceParameters,
+    DubbingGroupsV3Response, RestoreVoiceDescriptionRequest, SaveDubbingGroupOrderRequest,
+    SaveDubbingGroupRequest, SaveDubbingGroupsRequest, SavePairedDubbingGroupRequest,
+    SaveVoiceAccentRequest, SaveVoiceDescriptionRequest, SaveVoiceSettingsRequest,
+    VoiceLibraryItem, VoiceLibraryResponse, VoiceParameters,
 };
 
 const ITEMS_SQL: &str = r#"
@@ -199,6 +199,82 @@ impl VoiceLibraryRepository {
         Ok(result)
     }
 
+    pub async fn save_order(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        request: SaveDubbingGroupOrderRequest,
+    ) -> Result<DubbingGroupsV3Response, AppError> {
+        let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+        authorize_write(&mut tx, actor, security_version, true).await?;
+        let row = sqlx::query(
+            "SELECT groups,order_revision FROM speech.dubbing_groups WHERE singleton FOR UPDATE",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+        if request.base_revision < 0 || row.get::<i64, _>("order_revision") != request.base_revision
+        {
+            return Err(conflict());
+        }
+        let groups: Vec<DubbingGroup> =
+            serde_json::from_value(row.get("groups")).map_err(AppError::internal)?;
+        let ids = request
+            .group_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if ids.len() != groups.len()
+            || ids.len() != request.group_ids.len()
+            || groups.iter().any(|group| !ids.contains(&group.id))
+            || request.group_ids.last() != Some(&global_group_id())
+        {
+            return Err(invalid());
+        }
+        let ordered = request
+            .group_ids
+            .iter()
+            .map(|id| {
+                groups
+                    .iter()
+                    .find(|group| group.id == *id)
+                    .expect("validated identity")
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        if groups
+            .iter()
+            .map(|group| group.id)
+            .ne(ordered.iter().map(|group| group.id))
+        {
+            let areas = groups
+                .iter()
+                .zip(&ordered)
+                .filter(|(before, after)| before.id != after.id)
+                .flat_map(|(before, after)| before.areas.iter().chain(&after.areas))
+                .cloned()
+                .collect();
+            super::super::audio_updates::enqueue_areas(
+                &mut tx,
+                actor,
+                security_version,
+                (global_group_id(), request.base_revision + 1, "分组优先级"),
+                areas,
+                self.test_run.as_deref(),
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE speech.dubbing_groups SET order_revision=order_revision+1 WHERE singleton",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+            write_groups(&mut tx, actor, &ordered).await?;
+        }
+        let result = super::pairs::read(&mut tx).await?;
+        tx.commit().await.map_err(AppError::internal)?;
+        Ok(result)
+    }
+
     pub async fn save_paired_group(
         &self,
         actor: Uuid,
@@ -351,13 +427,11 @@ impl VoiceLibraryRepository {
             }
         }
         for other in groups.iter().filter(|group| group.id != request.group.id) {
-            if other.name.trim() == request.group.name.trim()
-                || other.areas.iter().any(|area| assigned.contains(area))
-            {
+            if other.name.trim() == request.group.name.trim() {
                 return Err(AppError::conflict(
                     ErrorCode::RevisionConflict,
                     None,
-                    "分组名称或板块已被其他组占用，请保留草稿并重新载入",
+                    "分组名称已被其他组使用，请保留草稿并重新载入",
                 ));
             }
         }
@@ -449,7 +523,11 @@ impl VoiceLibraryRepository {
         if let Some(index) = index {
             groups[index] = request.group;
         } else {
-            groups.push(request.group);
+            let position = groups
+                .iter()
+                .position(|group| group.is_global)
+                .unwrap_or(groups.len());
+            groups.insert(position, request.group);
         }
         write_groups(&mut tx, actor, &groups).await?;
         let result = if pairings.is_some() {

@@ -208,3 +208,12 @@ pub enum DubbingGroupsReadResponse {
     Legacy(DubbingGroupsResponse),
     Paired(DubbingGroupsV3Response),
 }
+
+/// Only persisted identities participate; group content drafts are never accepted here.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveDubbingGroupOrderRequest {
+    pub group_ids: Vec<Uuid>,
+    #[schema(minimum = 0)]
+    pub base_revision: i64,
+}

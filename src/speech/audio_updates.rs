@@ -64,7 +64,7 @@ pub(crate) async fn enqueue(
 ) -> Result<Uuid, AppError> {
     let (before, after) = groups;
     let global = before.is_some_and(|g| g.is_global) || after.is_some_and(|g| g.is_global);
-    let mut areas = if global {
+    let areas = if global {
         vec![
             "word".into(),
             "azure".into(),
@@ -79,18 +79,62 @@ pub(crate) async fn enqueue(
             .flat_map(|g| g.areas.clone())
             .collect::<Vec<String>>()
     };
-    let old = sqlx::query("SELECT areas FROM speech.dubbing_audio_updates WHERE group_id=$1 AND state IN ('pending','running') FOR UPDATE")
-        .bind(group).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
-    for row in old {
-        areas.extend(row.get::<Vec<String>, _>("areas"));
+    enqueue_areas(
+        conn,
+        actor,
+        security_version,
+        (
+            group,
+            revision,
+            after
+                .or(before)
+                .map(|group| group.name.as_str())
+                .unwrap_or("已删除分组"),
+        ),
+        areas,
+        test_run,
+    )
+    .await
+}
+
+// All callers hold the configuration singleton lock. Merge the transitive overlap,
+// including areas removed by earlier commits, before restarting the waiting window.
+pub(crate) async fn enqueue_areas(
+    conn: &mut PgConnection,
+    actor: Uuid,
+    security_version: i64,
+    group: (Uuid, i64, &str),
+    mut areas: Vec<String>,
+    test_run: Option<&str>,
+) -> Result<Uuid, AppError> {
+    let (group, revision, name) = group;
+    let active = sqlx::query("SELECT id,group_id,areas FROM speech.dubbing_audio_updates WHERE state IN ('pending','running') AND test_run IS NOT DISTINCT FROM $1 FOR UPDATE")
+        .bind(test_run).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
+    let mut merged = std::collections::BTreeSet::new();
+    loop {
+        let count = merged.len();
+        for row in &active {
+            let id: Uuid = row.get("id");
+            let previous: Vec<String> = row.get("areas");
+            if !merged.contains(&id)
+                && (row.get::<Uuid, _>("group_id") == group
+                    || previous.iter().any(|area| areas.contains(area)))
+            {
+                merged.insert(id);
+                areas.extend(previous);
+            }
+        }
+        if count == merged.len() {
+            break;
+        }
     }
     areas.sort();
     areas.dedup();
-    sqlx::query("UPDATE speech.dubbing_audio_updates SET state='superseded',updated_at=now() WHERE group_id=$1 AND state IN ('pending','running')")
-        .bind(group).execute(&mut *conn).await.map_err(AppError::internal)?;
+    sqlx::query("UPDATE speech.dubbing_audio_updates SET state='superseded',updated_at=now() WHERE id=ANY($1)")
+        .bind(merged.into_iter().collect::<Vec<_>>()).execute(&mut *conn).await.map_err(AppError::internal)?;
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO speech.dubbing_audio_updates(id,group_id,group_revision,areas,created_by_admin_id,security_version,group_name,test_run,due_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8,now()+make_interval(secs=>wait_seconds) FROM speech.dubbing_update_settings WHERE singleton")
-        .bind(id).bind(group).bind(revision).bind(areas).bind(actor).bind(security_version).bind(after.or(before).map(|group|group.name.as_str()).unwrap_or("已删除分组")).bind(test_run)
+    sqlx::query("INSERT INTO speech.dubbing_audio_updates(id,group_id,group_revision,areas,created_by_admin_id,security_version,group_name,test_run,due_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp()+make_interval(secs=>wait_seconds) FROM speech.dubbing_update_settings WHERE singleton")
+        .bind(id).bind(group).bind(revision).bind(areas).bind(actor).bind(security_version).bind(name).bind(test_run)
         .execute(conn).await.map_err(AppError::internal)?;
     Ok(id)
 }
@@ -256,7 +300,7 @@ pub async fn change(
         if !["failed", "partial"].contains(&state.as_str()) {
             return Err(conflict());
         }
-        let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM speech.dubbing_audio_updates newer JOIN speech.dubbing_audio_updates current ON current.id=$2 WHERE newer.group_id=$1 AND newer.id<>current.id AND (newer.state IN ('pending','running') OR (newer.created_at,newer.id)>(current.created_at,current.id)))").bind(row.get::<Uuid,_>("group_id")).bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+        let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM speech.dubbing_audio_updates newer JOIN speech.dubbing_audio_updates current ON current.id=$2 WHERE (newer.group_id=$1 OR newer.areas && current.areas) AND newer.test_run IS NOT DISTINCT FROM current.test_run AND newer.id<>current.id AND (newer.state IN ('pending','running') OR (newer.created_at,newer.id)>(current.created_at,current.id)))").bind(row.get::<Uuid,_>("group_id")).bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
         if active {
             return Err(conflict());
         }

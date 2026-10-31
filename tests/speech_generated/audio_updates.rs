@@ -641,7 +641,7 @@ impl SpeechProvider for FailSecondProvider {
 }
 
 #[sqlx::test]
-async fn delayed_updates_switch_multiple_versions_only_after_every_asset_is_ready(pool: PgPool) {
+async fn delayed_updates_switch_both_accents_only_after_every_asset_is_ready(pool: PgPool) {
     let (actor, id, version, _, storage) = setup(&pool).await;
     let sentence = sentence(
         &pool,
@@ -649,13 +649,25 @@ async fn delayed_updates_switch_multiple_versions_only_after_every_asset_is_read
         json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
     )
     .await;
-    let mut values = group(id, version, 0);
-    let mut second = values.uk[0].clone();
-    second.id = Uuid::now_v7();
-    second.name = "Slower".into();
-    second.parameters.rate_percent = -27;
-    values.uk.push(second);
-    save(&pool, actor, values, 0).await;
+    let text = json!({"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":{"version":2,"text":"Hello","annotations":[]},"voice_profile":{"voices":[],"dubbing":{"mode":"inherit","area":"example"}}}});
+    sqlx::query(
+        "UPDATE lexicon.shared_sentences SET content=jsonb_set(content,'{en_text}',$2) WHERE id=$1",
+    )
+    .bind(sentence)
+    .bind(&text)
+    .execute(&pool)
+    .await
+    .unwrap();
+    tsz_rust::speech::dubbing::replace_dependencies(
+        &mut pool.acquire().await.unwrap(),
+        "sentence",
+        sentence,
+        1,
+        &text,
+    )
+    .await
+    .unwrap();
+    save(&pool, actor, group(id, version, 0), 0).await;
     due(&pool).await;
     let provider = Arc::new(FailSecondProvider(AtomicUsize::new(0)));
     audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
@@ -663,7 +675,7 @@ async fn delayed_updates_switch_multiple_versions_only_after_every_asset_is_read
         .unwrap();
     assert_eq!(provider.0.load(Ordering::SeqCst), 2);
     assert_eq!(
-        current(&pool, sentence).await["voices"],
+        sqlx::query_scalar::<_,Value>("SELECT content->'en_text'->'common'->'voice_profile'->'voices' FROM lexicon.shared_sentences WHERE id=$1").bind(sentence).fetch_one(&pool).await.unwrap(),
         json!([]),
         "a ready first version must not replace only half the target"
     );
@@ -676,7 +688,7 @@ async fn delayed_updates_switch_multiple_versions_only_after_every_asset_is_read
         3,
         "retry reuses the already-ready first version"
     );
-    let saved = current(&pool, sentence).await;
+    let saved:Value=sqlx::query_scalar("SELECT content->'en_text'->'common'->'voice_profile' FROM lexicon.shared_sentences WHERE id=$1").bind(sentence).fetch_one(&pool).await.unwrap();
     assert_eq!(saved["voices"].as_array().unwrap().len(), 2);
     assert!(
         saved["voices"]
@@ -803,4 +815,247 @@ async fn delayed_updates_provider_failure_retains_old_audio_until_retry(pool: Pg
         audio_updates::list(&pool, id).await.unwrap().updates[0].state,
         "completed"
     );
+}
+
+#[sqlx::test]
+async fn overlapping_groups_and_order_restart_one_window_and_resolve_only_final_effect(
+    pool: PgPool,
+) {
+    use tsz_rust::speech::library::dto::SaveDubbingGroupOrderRequest;
+    let (actor, a, version, provider, storage) = setup(&pool).await;
+    let owner = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
+    let independent = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"local","area":"example"}}),
+    )
+    .await;
+    save(&pool, actor, group(a, version, 0), 0).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    let original = current(&pool, owner).await;
+    let b = Uuid::now_v7();
+    let b_version = Uuid::now_v7();
+    let mut b_group = group(b, b_version, -27);
+    b_group.name = "second group".into();
+    save(&pool, actor, b_group.clone(), 0).await;
+    // The old group job is already due, but a later overlapping commit postpones it.
+    due(&pool).await;
+    let mut renamed = group(a, version, 0);
+    renamed.name = "first renamed".into();
+    save(&pool, actor, renamed, 1).await;
+    assert_eq!(
+        audio_updates::list(&pool, b).await.unwrap().updates[0].state,
+        "superseded"
+    );
+    assert_eq!(
+        audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+            .await
+            .unwrap(),
+        0
+    );
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "lower priority content and pure names do not call TTS"
+    );
+    assert_eq!(
+        current(&pool, owner).await["voices"][0]["audio_asset_id"],
+        original["voices"][0]["audio_asset_id"]
+    );
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    b_group.uk[0].parameters.rate_percent = 0;
+    save(&pool, actor, b_group.clone(), 1).await;
+    let before_switch = repo.groups_v3(actor).await.unwrap();
+    let global = before_switch
+        .groups
+        .iter()
+        .find(|g| g.is_global)
+        .unwrap()
+        .id;
+    repo.save_order(
+        actor,
+        0,
+        SaveDubbingGroupOrderRequest {
+            group_ids: vec![b, a, global],
+            base_revision: before_switch.order_revision,
+        },
+    )
+    .await
+    .unwrap();
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    let same_effect = current(&pool, owner).await;
+    assert_eq!(same_effect["voices"][0]["version_id"], json!(b_version));
+    assert_eq!(
+        same_effect["voices"][0]["audio_asset_id"],
+        original["voices"][0]["audio_asset_id"]
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "a different source identity with the same effect must reuse audio"
+    );
+    b_group.uk[0].parameters.rate_percent = -27;
+    save(&pool, actor, b_group.clone(), 2).await;
+    let read = repo.groups_v3(actor).await.unwrap();
+    let global = read.groups.iter().find(|g| g.is_global).unwrap().id;
+    let order = repo
+        .save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: vec![b, a, global],
+                base_revision: read.order_revision,
+            },
+        )
+        .await
+        .unwrap();
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    let switched = current(&pool, owner).await;
+    assert_eq!(switched["voices"][0]["version_id"], json!(b_version));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let interim = repo
+        .save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: vec![a, b, global],
+                base_revision: order.order_revision,
+            },
+        )
+        .await
+        .unwrap();
+    due(&pool).await;
+    repo.save_order(
+        actor,
+        0,
+        SaveDubbingGroupOrderRequest {
+            group_ids: vec![b, a, global],
+            base_revision: interim.order_revision,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+            .await
+            .unwrap(),
+        0
+    );
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        2,
+        "returning to the current final effect makes no call"
+    );
+    assert_eq!(current(&pool, owner).await, switched);
+    assert_eq!(current(&pool, independent).await["voices"], json!([]));
+    // A bridge commit must merge the transitive overlap, including removed areas.
+    let mut wide = group(a, version, 0);
+    wide.areas = vec!["example".into(), "meaning".into()];
+    save(&pool, actor, wide, 2).await;
+    let c = Uuid::now_v7();
+    let mut detached = group(c, Uuid::now_v7(), 0);
+    detached.name = "detached".into();
+    detached.areas = vec!["word".into()];
+    save(&pool, actor, detached, 0).await;
+    b_group.areas = vec!["meaning".into(), "word".into()];
+    save(&pool, actor, b_group, 3).await;
+    let active:Vec<(Uuid,Vec<String>)>=sqlx::query_as("SELECT group_id,areas FROM speech.dubbing_audio_updates WHERE state IN ('pending','running')").fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        active,
+        vec![(b, vec!["example".into(), "meaning".into(), "word".into()])]
+    );
+}
+
+#[sqlx::test]
+async fn order_supersedes_inflight_other_group_and_keeps_old_audio(pool: PgPool) {
+    use tsz_rust::speech::library::dto::SaveDubbingGroupOrderRequest;
+    let (actor, a, version, provider, storage) = setup(&pool).await;
+    let owner = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
+    save(&pool, actor, group(a, version, 0), 0).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    let old = current(&pool, owner).await;
+    let b = Uuid::now_v7();
+    let mut other = group(b, Uuid::now_v7(), -10);
+    other.name = "other".into();
+    save(&pool, actor, other, 0).await;
+    save(&pool, actor, group(a, version, -27), 1).await;
+    due(&pool).await;
+    let blocking = Arc::new(BlockingProvider {
+        calls: AtomicUsize::new(0),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let running = {
+        let pool = pool.clone();
+        let storage = storage.clone();
+        let provider = blocking.clone();
+        tokio::spawn(async move {
+            audio_updates::sweep(&pool, Some(provider), Some(storage))
+                .await
+                .unwrap()
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), blocking.started.notified())
+        .await
+        .unwrap();
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    let read = repo.groups_v3(actor).await.unwrap();
+    let global = read.groups.iter().find(|g| g.is_global).unwrap().id;
+    repo.save_order(
+        actor,
+        0,
+        SaveDubbingGroupOrderRequest {
+            group_ids: vec![b, a, global],
+            base_revision: read.order_revision,
+        },
+    )
+    .await
+    .unwrap();
+    blocking.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        current(&pool, owner).await,
+        old,
+        "superseded late response must preserve the full old profile"
+    );
+    // A failed replacement also preserves the old complete target.
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='speech.generate'").bind(actor).execute(&pool).await.unwrap();
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider), Some(storage))
+        .await
+        .unwrap();
+    assert_eq!(current(&pool, owner).await, old);
 }

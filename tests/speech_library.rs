@@ -202,7 +202,7 @@ fn group(name: &str, areas: &[&str]) -> DubbingGroup {
 }
 
 #[sqlx::test]
-async fn single_groups_preserve_other_groups_and_reject_stale_or_occupied_writes(pool: PgPool) {
+async fn single_groups_preserve_other_groups_and_allow_shared_areas(pool: PgPool) {
     use tsz_rust::speech::library::dto::{DeleteDubbingGroupRequest, SaveDubbingGroupRequest};
     let actor = admin(&pool).await;
     let repo = VoiceLibraryRepository::new(pool.clone());
@@ -239,7 +239,8 @@ async fn single_groups_preserve_other_groups_and_reject_stale_or_occupied_writes
         .await
         .unwrap()
         .groups
-        .pop()
+        .into_iter()
+        .rfind(|group| !group.is_global)
         .unwrap();
     let b = repo
         .save_group(
@@ -254,7 +255,8 @@ async fn single_groups_preserve_other_groups_and_reject_stale_or_occupied_writes
         .await
         .unwrap()
         .groups
-        .pop()
+        .into_iter()
+        .rfind(|group| !group.is_global)
         .unwrap();
     let mut draft_a = a.clone();
     draft_a.name = "A edited".into();
@@ -307,21 +309,17 @@ async fn single_groups_preserve_other_groups_and_reject_stale_or_occupied_writes
         saved.groups.iter().find(|g| g.id == b.id).unwrap().name,
         "B edited"
     );
-    assert_eq!(
-        repo.save_group(
-            actor,
-            0,
-            SaveDubbingGroupRequest {
-                group: group("C", &["word"]),
-                base_revision: 0
-            },
-            true
-        )
-        .await
-        .unwrap_err()
-        .code(),
-        ErrorCode::RevisionConflict
-    );
+    repo.save_group(
+        actor,
+        0,
+        SaveDubbingGroupRequest {
+            group: group("C", &["word"]),
+            base_revision: 0,
+        },
+        true,
+    )
+    .await
+    .unwrap();
     assert!(
         repo.delete_group(
             actor,
@@ -346,11 +344,11 @@ async fn single_groups_preserve_other_groups_and_reject_stale_or_occupied_writes
         .code(),
         ErrorCode::RevisionConflict
     );
-    assert_eq!(repo.groups(actor).await.unwrap().groups.len(), 3);
+    assert_eq!(repo.groups(actor).await.unwrap().groups.len(), 4);
 }
 
 #[sqlx::test]
-async fn concurrent_group_writes_are_independent_and_serialize_area_ownership(pool: PgPool) {
+async fn concurrent_group_writes_are_independent_and_allow_shared_areas(pool: PgPool) {
     use tsz_rust::speech::library::dto::SaveDubbingGroupRequest;
     let actor = admin(&pool).await;
     sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
@@ -368,7 +366,8 @@ async fn concurrent_group_writes_are_independent_and_serialize_area_ownership(po
         .await
         .unwrap()
         .groups
-        .pop()
+        .into_iter()
+        .rfind(|group| !group.is_global)
         .unwrap();
     let b = repo
         .save_group(
@@ -383,7 +382,8 @@ async fn concurrent_group_writes_are_independent_and_serialize_area_ownership(po
         .await
         .unwrap()
         .groups
-        .pop()
+        .into_iter()
+        .rfind(|group| !group.is_global)
         .unwrap();
     let (left, right) = tokio::join!(
         repo.save_group(
@@ -448,7 +448,8 @@ async fn concurrent_group_writes_are_independent_and_serialize_area_ownership(po
             true
         )
     );
-    assert_ne!(left.is_ok(), right.is_ok());
+    assert!(left.is_ok());
+    assert!(right.is_ok());
     assert_eq!(
         repo.groups(actor)
             .await
@@ -457,7 +458,7 @@ async fn concurrent_group_writes_are_independent_and_serialize_area_ownership(po
             .iter()
             .filter(|group| group.areas.iter().any(|area| area == "word"))
             .count(),
-        1
+        2
     );
 }
 
@@ -504,7 +505,8 @@ async fn group_completion_stably_orders_selected_and_keeps_unchanged_accent_mism
         .await
         .unwrap()
         .groups
-        .pop()
+        .into_iter()
+        .rfind(|group| !group.is_global)
         .unwrap();
     assert_eq!(
         saved.uk.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
@@ -536,7 +538,8 @@ async fn group_completion_stably_orders_selected_and_keeps_unchanged_accent_mism
         .await
         .unwrap()
         .groups
-        .pop()
+        .into_iter()
+        .rfind(|group| !group.is_global)
         .unwrap();
     assert_eq!(retained.uk.len(), 4);
     let mut changed = retained.clone();
@@ -1102,10 +1105,17 @@ async fn paired_writes_preserve_order_protect_old_clients_and_serialize_revision
         .unwrap();
     assert_eq!(created.order_revision, initial.order_revision + 1);
     assert_eq!(
-        serde_json::to_value(&created.groups[1]).unwrap()["recommendations"]["pairs"],
+        serde_json::to_value(&created.groups[0]).unwrap()["recommendations"]["pairs"],
         input["group"]["pairs"]
     );
-    let stored = repo.groups(actor).await.unwrap().groups.pop().unwrap();
+    let stored = repo
+        .groups(actor)
+        .await
+        .unwrap()
+        .groups
+        .into_iter()
+        .rfind(|group| !group.is_global)
+        .unwrap();
     assert!(
         !stored.uk[0].selected,
         "v3 must not sort selected items to the front"
@@ -1161,13 +1171,20 @@ async fn paired_writes_preserve_order_protect_old_clients_and_serialize_revision
         _ => panic!("exactly one write must succeed"),
     };
     assert_eq!(saved.order_revision, created.order_revision);
-    assert_eq!(saved.groups[1].revision, 2);
+    assert_eq!(saved.groups[0].revision, 2);
     let read = repo.groups_v3(actor).await.unwrap();
     assert_eq!(
         serde_json::to_value(&read).unwrap(),
         serde_json::to_value(saved).unwrap()
     );
-    let sides = repo.groups(actor).await.unwrap().groups.pop().unwrap();
+    let sides = repo
+        .groups(actor)
+        .await
+        .unwrap()
+        .groups
+        .into_iter()
+        .rfind(|group| !group.is_global)
+        .unwrap();
     assert_eq!(sides.uk[0].parameters.rate_percent, -20);
     assert_eq!(
         serde_json::to_value(sides.us).unwrap(),
@@ -1244,19 +1261,19 @@ async fn legacy_pair_conversion_is_explicit_and_retains_every_side_identity(pool
         .await
         .unwrap();
     let v3 = serde_json::to_value(repo.groups_v3(actor).await.unwrap()).unwrap();
-    assert_eq!(v3["groups"][1]["recommendations"]["format"], "legacy");
+    assert_eq!(v3["groups"][0]["recommendations"]["format"], "legacy");
     assert_eq!(
-        v3["groups"][1]["recommendations"]["uk"],
-        serde_json::to_value(&saved.groups[1].uk).unwrap()
+        v3["groups"][0]["recommendations"]["uk"],
+        serde_json::to_value(&saved.groups[0].uk).unwrap()
     );
-    assert_eq!(v3["groups"][1]["recommendations"]["us"], json!([]));
+    assert_eq!(v3["groups"][0]["recommendations"]["us"], json!([]));
     use sqlx::Row;
     let inventory = sqlx::query(include_str!("../ops/speech-dubbing/inventory.sql"))
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert!(inventory[1].get::<bool, _>("unequal_sides"));
-    let repeated: serde_json::Value = inventory[1].get("repeated_voices");
+    assert!(inventory[0].get::<bool, _>("unequal_sides"));
+    let repeated: serde_json::Value = inventory[0].get("repeated_voices");
     assert_eq!(repeated[0]["versions"], 2);
     assert_eq!(repeated[0]["parameter_variants"], 2);
     input["base_revision"] = json!(1);
@@ -1280,10 +1297,17 @@ async fn legacy_pair_conversion_is_explicit_and_retains_every_side_identity(pool
         .unwrap();
     assert_eq!(converted.order_revision, 1);
     assert_eq!(
-        serde_json::to_value(&converted.groups[1]).unwrap()["recommendations"]["pairs"],
+        serde_json::to_value(&converted.groups[0]).unwrap()["recommendations"]["pairs"],
         input["group"]["pairs"]
     );
-    let retained = repo.groups(actor).await.unwrap().groups.pop().unwrap();
+    let retained = repo
+        .groups(actor)
+        .await
+        .unwrap()
+        .groups
+        .into_iter()
+        .rfind(|group| !group.is_global)
+        .unwrap();
     assert_eq!(
         serde_json::to_value(retained.uk).unwrap(),
         serde_json::to_value(old.uk).unwrap()
@@ -1413,4 +1437,307 @@ async fn pairing_migration_preserves_legacy_bytes_and_refuses_lossy_down(pool: P
         .await
         .unwrap();
     assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn group_order_is_independent_complete_and_conflicts_with_membership_changes(pool: PgPool) {
+    use tsz_rust::speech::library::dto::{
+        DeleteDubbingGroupRequest, SaveDubbingGroupOrderRequest, SaveDubbingGroupRequest,
+    };
+    let actor = admin(&pool).await;
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    let global = repo.groups(actor).await.unwrap().groups[0].id;
+    assert_eq!(
+        repo.save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: vec![global],
+                base_revision: 0
+            }
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        ErrorCode::Forbidden
+    );
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    let a = group("priority A", &["word"]);
+    let b = group("priority B", &["word"]);
+    for g in [&a, &b] {
+        repo.save_group(
+            actor,
+            0,
+            SaveDubbingGroupRequest {
+                group: g.clone(),
+                base_revision: 0,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let start = repo.groups_v3(actor).await.unwrap();
+    assert!(start.groups.last().unwrap().is_global);
+    let ids = vec![b.id, a.id, global];
+    let mut draft_a = a.clone();
+    draft_a.name = "A draft must stay local".into();
+    let mut content_b = b.clone();
+    content_b.name = "B committed".into();
+    let (ordered, edited) = tokio::join!(
+        repo.save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: ids.clone(),
+                base_revision: start.order_revision
+            }
+        ),
+        repo.save_group(
+            actor,
+            0,
+            SaveDubbingGroupRequest {
+                group: content_b,
+                base_revision: 1
+            },
+            false
+        )
+    );
+    ordered.unwrap();
+    edited.unwrap();
+    let read = repo.groups_v3(actor).await.unwrap();
+    assert_eq!(read.groups.iter().map(|g| g.id).collect::<Vec<_>>(), ids);
+    assert_eq!(read.order_revision, start.order_revision + 1);
+    assert_eq!(
+        read.groups.iter().find(|g| g.id == a.id).unwrap().name,
+        "priority A"
+    );
+    assert_eq!(
+        read.groups.iter().find(|g| g.id == a.id).unwrap().revision,
+        1
+    );
+    assert_eq!(
+        read.groups.iter().find(|g| g.id == b.id).unwrap().revision,
+        2
+    );
+    assert_eq!(
+        repo.save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: ids.clone(),
+                base_revision: start.order_revision
+            }
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        ErrorCode::RevisionConflict
+    );
+    for invalid in [
+        vec![a.id, global],
+        vec![a.id, a.id, global],
+        vec![global, a.id, b.id],
+        vec![a.id, Uuid::now_v7(), global],
+    ] {
+        assert_eq!(
+            repo.save_order(
+                actor,
+                0,
+                SaveDubbingGroupOrderRequest {
+                    group_ids: invalid,
+                    base_revision: read.order_revision
+                }
+            )
+            .await
+            .unwrap_err()
+            .code(),
+            ErrorCode::InvalidRequestBody
+        );
+    }
+    // A no-op does not reset the waiting window or advance either revision.
+    let unchanged = repo
+        .save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: ids.clone(),
+                base_revision: read.order_revision,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged.revision, read.revision);
+    assert_eq!(unchanged.order_revision, read.order_revision);
+    let (left, right) = tokio::join!(
+        repo.save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: vec![a.id, b.id, global],
+                base_revision: read.order_revision
+            }
+        ),
+        repo.save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: vec![a.id, b.id, global],
+                base_revision: read.order_revision
+            }
+        )
+    );
+    assert_ne!(left.is_ok(), right.is_ok());
+    let stale = repo.groups_v3(actor).await.unwrap();
+    let c = group("priority C", &["word"]);
+    let (membership, order) = tokio::join!(
+        repo.save_group(
+            actor,
+            0,
+            SaveDubbingGroupRequest {
+                group: c.clone(),
+                base_revision: 0
+            },
+            true
+        ),
+        repo.save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: vec![b.id, a.id, global],
+                base_revision: stale.order_revision
+            }
+        )
+    );
+    membership.unwrap();
+    if let Err(error) = order {
+        assert_eq!(error.code(), ErrorCode::RevisionConflict);
+    }
+    let current = repo.groups_v3(actor).await.unwrap();
+    assert!(current.groups.last().unwrap().is_global);
+    repo.delete_group(
+        actor,
+        0,
+        c.id,
+        DeleteDubbingGroupRequest { base_revision: 1 },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.save_order(
+            actor,
+            0,
+            SaveDubbingGroupOrderRequest {
+                group_ids: current.groups.iter().map(|g| g.id).collect(),
+                base_revision: current.order_revision
+            }
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        ErrorCode::RevisionConflict
+    );
+    // Group-internal duplicates and duplicate names are still rejected.
+    let mut duplicate = group("duplicate areas", &["word", "word"]);
+    assert_eq!(
+        repo.save_group(
+            actor,
+            0,
+            SaveDubbingGroupRequest {
+                group: duplicate.clone(),
+                base_revision: 0
+            },
+            true
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        ErrorCode::InvalidRequestBody
+    );
+    duplicate.areas = vec!["word".into()];
+    duplicate.name = "priority A".into();
+    assert_eq!(
+        repo.save_group(
+            actor,
+            0,
+            SaveDubbingGroupRequest {
+                group: duplicate,
+                base_revision: 0
+            },
+            true
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        ErrorCode::RevisionConflict
+    );
+    assert_eq!(
+        repo.save_order(
+            actor,
+            1,
+            SaveDubbingGroupOrderRequest {
+                group_ids: vec![],
+                base_revision: 0
+            }
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        ErrorCode::InvalidToken
+    );
+}
+
+#[sqlx::test]
+async fn waiting_window_starts_after_the_configuration_lock_is_acquired(pool: PgPool) {
+    use tsz_rust::speech::library::dto::SaveDubbingGroupRequest;
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("SELECT revision FROM speech.dubbing_groups WHERE singleton FOR UPDATE")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    let value = group("waited submission", &["word"]);
+    let id = value.id;
+    let saving = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            VoiceLibraryRepository::new(pool)
+                .save_group(
+                    actor,
+                    0,
+                    SaveDubbingGroupRequest {
+                        group: value,
+                        base_revision: 0,
+                    },
+                    true,
+                )
+                .await
+                .unwrap();
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%FROM speech.dubbing_groups WHERE singleton FOR UPDATE%')").fetch_one(&pool).await.unwrap();
+            if blocked {break;}
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let released: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    held.commit().await.unwrap();
+    saving.await.unwrap();
+    let deadline: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT due_at FROM speech.dubbing_audio_updates WHERE group_id=$1 AND state='pending'",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        deadline >= released + chrono::Duration::seconds(60),
+        "lock wait must not consume the submitted update window"
+    );
 }
