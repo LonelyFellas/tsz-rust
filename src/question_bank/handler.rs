@@ -10,6 +10,8 @@ pub async fn capabilities(
     headers: axum::http::HeaderMap,
 ) -> Json<LearningCapabilities> {
     Json(LearningCapabilities {
+        choice_policies: super::learning::strict_capable(&headers)
+            .then(|| vec![super::learning::STRICT_POLICY.into()]),
         practice_modes: crate::learning_tasks::mastery::capable(&headers)
             .then(|| vec![crate::learning_tasks::mastery::MODE.into()]),
         question_types: vec!["spelling_zh_to_en".into(), "choice_zh_to_en".into()],

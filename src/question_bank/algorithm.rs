@@ -45,6 +45,8 @@ struct Recall {
     definition: String,
 }
 pub struct Pool {
+    pub supplemental_entries: Vec<Uuid>,
+    pub failure_reason: Option<&'static str>,
     pages: HashMap<Recall, PageCache>,
     evidence: HashMap<String, Arc<Evidence>>,
     current: HashMap<Uuid, Vec<QuestionCandidate>>,
@@ -62,6 +64,8 @@ impl Pool {
         .await
         .map_err(AppError::internal)?;
         Ok(Self {
+            supplemental_entries: vec![],
+            failure_reason: None,
             pages: HashMap::new(),
             evidence: HashMap::new(),
             current: HashMap::new(),
@@ -93,12 +97,12 @@ impl Pool {
             }
             query.push(")");
         }
-        if key.domains.is_empty() {
+        if !key.related.is_empty() {
             query
                 .push(" AND lexicon.question_candidate_key_v1(c.spelling)=ANY(")
                 .push_bind(&key.related)
                 .push("::text[])");
-        } else {
+        } else if !key.domains.is_empty() {
             query.push(" AND EXISTS(SELECT 1 FROM dictionary.choice_semantics sem JOIN dictionary.datasets d ON d.id=sem.dataset_id WHERE d.status='active' AND sem.normalized_term=lexicon.question_candidate_key_v1(c.spelling) AND sem.pos=c.part_of_speech AND sem.domains && ").push_bind(&key.domains).push("::text[])");
         }
         query
@@ -134,7 +138,10 @@ impl Pool {
         tx: &mut Tx<'_>,
         target: &QuestionCandidate,
         level: &str,
+        supplement: bool,
     ) -> Result<Option<BankQuestionContent>, AppError> {
+        self.supplemental_entries.clear();
+        self.failure_reason = Some("insufficient_distractors");
         if let std::collections::hash_map::Entry::Vacant(e) =
             self.synonyms.entry(target.source.entry_id)
         {
@@ -156,6 +163,11 @@ impl Pool {
         }
         let target_evidence = self.evidence[&evidence_key].clone();
         let Some(context) = target_evidence.context(target) else {
+            self.failure_reason = Some(if target_evidence.complete {
+                "target_unaligned"
+            } else {
+                "evidence_incomplete"
+            });
             return Ok(None);
         };
         let mut domains: Vec<_> = context.domains.iter().cloned().collect();
@@ -188,6 +200,14 @@ impl Pool {
                 definition: key_v1(&target.definition),
             });
         }
+        if supplement && supplement_allowed(level, &target.part_of_speech, &self.profile) {
+            recalls.push(Recall {
+                pos: target.part_of_speech.clone(),
+                domains: vec![],
+                related: vec![],
+                definition: key_v1(&target.definition),
+            });
+        }
         let spelling_keys: HashSet<_> = target
             .accepted_spellings
             .iter()
@@ -198,6 +218,10 @@ impl Pool {
         let mut choices: HashMap<Uuid, (Quality, QuestionCandidate)> = HashMap::new();
         // Explicit relations use indexed word lookup; domain pages are shared across targets.
         for key in recalls {
+            let supplementary = key.domains.is_empty() && key.related.is_empty();
+            if supplementary && best_choices(&choices, target).len() == 3 {
+                break;
+            }
             let mut start = 0;
             loop {
                 if !self.pages.contains_key(&key)
@@ -283,8 +307,14 @@ impl Pool {
                     if target_evidence.conflicts(evidence, target, c) {
                         continue;
                     }
-                    let Some(quality) = evidence.quality(&context, target, c) else {
+                    // Alignment/completeness remains mandatory even when semantic relatedness is optional.
+                    if evidence.context(c).is_none() {
                         continue;
+                    }
+                    let quality = match evidence.quality(&context, target, c) {
+                        Some(quality) => quality,
+                        None if supplementary => 0,
+                        None => continue,
                     };
                     let score = (
                         quality,
@@ -316,10 +346,21 @@ impl Pool {
                 }
             }
         }
+        let supplemental: HashSet<_> = choices
+            .iter()
+            .filter(|(_, (score, _))| score.0 == 0)
+            .map(|(id, _)| *id)
+            .collect();
         let mut choices = best_choices(&choices, target);
         if choices.len() != 3 {
             return Ok(None);
         }
+        self.supplemental_entries = choices
+            .iter()
+            .filter(|c| supplemental.contains(&c.source.entry_id))
+            .map(|c| c.source.entry_id)
+            .collect();
+        self.failure_reason = None;
         choices.insert(0, target.clone());
         let options: Vec<_> = choices
             .into_iter()
@@ -390,4 +431,11 @@ fn level_distance(a: &str, b: &str) -> usize {
 }
 pub fn definitions_overlap(a: &str, b: &str) -> bool {
     semantics::meanings_overlap(a, b)
+}
+
+/// Versioned retirement boundary. Close a reviewed level/POS/profile cohort here;
+/// dictionary size never toggles policy automatically. See tsz tiered-distractors-plan.md.
+const SEMANTIC_ONLY_COHORTS: &[(&str, &str, &str)] = &[];
+fn supplement_allowed(level: &str, pos: &str, profile: &str) -> bool {
+    !SEMANTIC_ONLY_COHORTS.contains(&(level, pos, profile))
 }

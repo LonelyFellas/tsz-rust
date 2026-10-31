@@ -58,6 +58,9 @@ pub struct BankQuestionContent {
 pub struct LearningCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub choice_policies: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub practice_modes: Option<Vec<String>>,
     pub question_types: Vec<String>,
 }

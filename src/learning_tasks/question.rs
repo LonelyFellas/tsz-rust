@@ -58,6 +58,8 @@ pub struct LearningSource {
     pub content: PublishedContentV3,
 }
 pub struct CandidatePool {
+    pub choice_preview: Option<super::plans::dto::ChoicePlanPreview>,
+    pub choice_failures: std::collections::HashMap<String, String>,
     pub candidates: Vec<Candidate>,
     pub exclusions: LearningExclusions,
 }
@@ -172,6 +174,8 @@ fn build_with_policy(
     all_content: bool,
 ) -> Result<CandidatePool, AppError> {
     let mut pool = CandidatePool {
+        choice_failures: Default::default(),
+        choice_preview: None,
         candidates: vec![],
         exclusions: LearningExclusions::default(),
     };

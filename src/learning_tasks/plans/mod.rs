@@ -16,6 +16,7 @@ use uuid::Uuid;
 #[derive(sqlx::FromRow)]
 struct PlanMeta {
     generation_policy: String,
+    choice_policy: Option<String>,
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
 }
@@ -40,7 +41,7 @@ struct Unit {
     practice_success_days: i16,
 }
 async fn meta(tx: &mut Tx<'_>, id: Uuid) -> Result<PlanMeta, AppError> {
-    sqlx::query_as("SELECT generation_policy,start_date,end_date FROM learning_tasks WHERE id=$1")
+    sqlx::query_as("SELECT generation_policy,choice_policy,start_date,end_date FROM learning_tasks WHERE id=$1")
         .bind(id)
         .fetch_one(&mut **tx)
         .await
@@ -67,6 +68,12 @@ fn digest(value: &impl serde::Serialize) -> Result<String, AppError> {
     Ok(hash(value)?.iter().map(|b| format!("{b:02x}")).collect())
 }
 fn validate(input: &PreviewLearningPlan) -> Result<(), AppError> {
+    if input.choice_policy.as_deref().is_some_and(|p| {
+        p != crate::question_bank::learning::STRICT_POLICY
+            || input.question_type.as_deref() != Some(crate::question_bank::learning::CHOICE)
+    }) {
+        return Err(invalid("严格单选策略只适用于单选任务"));
+    }
     if input
         .practice_mode
         .as_deref()
@@ -127,6 +134,7 @@ async fn preview_in(
         auth,
         &input.wordlist_ids,
         input.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE),
+        input.choice_policy.is_some(),
     )
     .await?;
     let custom_word_count: i64 = sqlx::query_scalar(
@@ -171,10 +179,22 @@ async fn preview_in(
         }
         days.max(0)
     });
-    let preview_fingerprint = digest(&(input, &pool.candidates, &settings, earliest))?;
+    let preview_fingerprint = if input.choice_policy.is_some() {
+        digest(&(
+            input,
+            &pool.candidates,
+            &pool.choice_preview,
+            &settings,
+            earliest,
+            crate::question_bank::learning::STRATEGY_VERSION,
+        ))?
+    } else {
+        digest(&(input, &pool.candidates, &settings, earliest))?
+    };
     learner(tx, auth).await?;
     Ok((
         LearningPlanPreview {
+            choice: pool.choice_preview,
             entry_count,
             eligible_count: count,
             custom_word_count,
@@ -250,13 +270,18 @@ pub async fn create(
     if p.preview_fingerprint != input.preview_fingerprint {
         return Err(conflict("题量、来源或学习设置已变化，请重新核对预览后创建"));
     }
+    if p.choice.as_ref().is_some_and(|c| c.unavailable_count > 0) && !input.accept_partial_choice {
+        return Err(invalid(
+            "部分内容暂不可出单选，请核对预览并确认仅使用可用内容创建",
+        ));
+    }
     if !p.can_create {
         return Err(invalid(&p.reasons.join("；")));
     }
     let id = Uuid::now_v7();
     let s = input.schedule.as_ref();
-    sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,daily_question_count,ends_at,create_key,create_hash,generation_policy,start_date,end_date,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$13,$10,$11,$12)")
- .bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.task_type).bind(&input.wordlist_ids).bind(input.daily_question_count).bind(s.map(|s|boundary(s.end_date+Duration::days(1)))).bind(input.idempotency_key).bind(h).bind(s.map(|s|s.start_date)).bind(s.map(|s|s.end_date)).bind(input.question_type.as_deref().unwrap_or("spelling_zh_to_en")).bind(input.practice_mode.as_deref().unwrap_or("coverage_v1")).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,daily_question_count,ends_at,create_key,create_hash,generation_policy,start_date,end_date,question_type,choice_policy) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$13,$10,$11,$12,$14)")
+ .bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.task_type).bind(&input.wordlist_ids).bind(input.daily_question_count).bind(s.map(|s|boundary(s.end_date+Duration::days(1)))).bind(input.idempotency_key).bind(h).bind(s.map(|s|s.start_date)).bind(s.map(|s|s.end_date)).bind(input.question_type.as_deref().unwrap_or("spelling_zh_to_en")).bind(input.practice_mode.as_deref().unwrap_or("coverage_v1")).bind(input.choice_policy.as_deref()).execute(&mut *tx).await.map_err(AppError::internal)?;
     let cycle_id = write_cycle(
         &mut tx,
         auth,
@@ -848,7 +873,7 @@ pub async fn start(
                 &mut tx,
                 &selected_units,
                 &settings,
-                c.generation_version == WORDLIST_GENERATION_VERSION,
+                c.generation_version == WORDLIST_GENERATION_VERSION && m.choice_policy.is_none(),
             )
             .await?;
         }
@@ -932,6 +957,7 @@ async fn cycle_preview_in(
         earliest = earliest.max(m.start_date.unwrap_or(day));
     }
     let req = PreviewLearningPlan {
+        choice_policy: m.choice_policy.clone(),
         practice_mode: None,
         question_type: t.question_type.clone(),
         task_type: t.task_type,
@@ -1034,6 +1060,16 @@ pub async fn cycle_create(
     let (p, candidates, c) = cycle_preview_in(&mut tx, auth, &t, &m, &req).await?;
     if p.preview.preview_fingerprint != input.preview_fingerprint {
         return Err(conflict("新轮内容或开始日期已变化，请重新核对"));
+    }
+    if p.preview
+        .choice
+        .as_ref()
+        .is_some_and(|c| c.unavailable_count > 0)
+        && !input.accept_partial_choice
+    {
+        return Err(invalid(
+            "部分内容暂不可出单选，请确认仅使用可用内容开启新轮",
+        ));
     }
     if !p.preview.can_create {
         return Err(invalid(&p.preview.reasons.join("；")));
