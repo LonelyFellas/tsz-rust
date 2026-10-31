@@ -36,6 +36,8 @@ use publication_audio::{
     audio_forms, confirm_audio, fixture_state, generated_profile, publish_reviewed_v3,
     save_publishable_forms,
 };
+#[path = "lexicon_handler/assistant.rs"]
+mod assistant;
 #[path = "lexicon_handler/fixtures.rs"]
 mod fixtures;
 #[path = "lexicon_handler/shared_forms.rs"]

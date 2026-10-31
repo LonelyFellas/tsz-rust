@@ -1,3 +1,4 @@
+pub mod assistant;
 pub mod audio_assets;
 pub mod detection_store;
 pub mod dto;
