@@ -220,7 +220,10 @@ class IsolatedRuntime:
                  + "INSERT INTO user_roles(user_id,role) VALUES('" + user + "','student');")
         return user
 
-    def snapshot(self):
+    def table_columns(self):
+        return json.loads(self.sql("SELECT coalesce(json_object_agg(table_schema || '.' || table_name, columns), '{}') FROM (SELECT table_schema, table_name, json_agg(column_name ORDER BY ordinal_position) AS columns FROM information_schema.columns WHERE table_schema NOT IN ('pg_catalog','information_schema') GROUP BY table_schema,table_name) schema_columns"))
+
+    def snapshot(self, *, projection=None):
         tables = json.loads(self.sql("SELECT coalesce(json_agg(json_build_array(schemaname,tablename) ORDER BY schemaname,tablename),'[]') FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')"))
         result = {}
         schema_dump = self.docker("schema_snapshot", "exec", self.pg_id, "pg_dump", "-U", "postgres", "-d", "artifact_test", "--schema-only", "--no-owner", "--no-privileges").decode()
@@ -230,7 +233,11 @@ class IsolatedRuntime:
         result["sequences"] = sequences
         for schema, table in tables:
             quoted = '"' + schema.replace('"', '""') + '"."' + table.replace('"', '""') + '"'
-            result[schema + "." + table] = json.loads(self.sql("SELECT json_build_object('rows',count(*),'digest',md5(coalesce(string_agg(md5(to_jsonb(t)::text),'' ORDER BY md5(to_jsonb(t)::text)),''))) FROM " + quoted + " t"))
+            row = "to_jsonb(t)"
+            if projection is not None and schema + "." + table in projection:
+                columns = ",".join("'" + name.replace("'", "''") + "'" for name in projection[schema + "." + table])
+                row = "(SELECT coalesce(jsonb_object_agg(k,v),'{}'::jsonb) FROM jsonb_each(to_jsonb(t)) projected(k,v) WHERE k=ANY(ARRAY[" + columns + "]::text[]))"
+            result[schema + "." + table] = json.loads(self.sql("SELECT json_build_object('rows',count(*),'digest',md5(coalesce(string_agg(md5(" + row + "::text),'' ORDER BY md5(" + row + "::text)),''))) FROM " + quoted + " t"))
         return result
 
     def close(self):
