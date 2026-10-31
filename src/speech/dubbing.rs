@@ -154,18 +154,29 @@ pub async fn resolve_in(
     content: &crate::lexicon::dto::RichTextV2,
     native_locale: Option<&str>,
 ) -> Result<Vec<VoiceSettingV3>, AppError> {
-    let phoneme = content.annotations.iter().any(|mark| {
-        matches!(
-            mark,
-            crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
-        )
-    });
     let groups: Value =
         sqlx::query_scalar("SELECT groups FROM speech.dubbing_groups WHERE singleton")
             .fetch_one(&mut *conn)
             .await
             .map_err(AppError::internal)?;
     let groups: Vec<DubbingGroup> = serde_json::from_value(groups).map_err(AppError::internal)?;
+    resolve_in_groups(conn, profile, accent, content, native_locale, &groups).await
+}
+
+pub(crate) async fn resolve_in_groups(
+    conn: &mut PgConnection,
+    profile: &VoiceProfileV3,
+    accent: &str,
+    content: &crate::lexicon::dto::RichTextV2,
+    native_locale: Option<&str>,
+    groups: &[DubbingGroup],
+) -> Result<Vec<VoiceSettingV3>, AppError> {
+    let phoneme = content.annotations.iter().any(|mark| {
+        matches!(
+            mark,
+            crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
+        )
+    });
     let rows=sqlx::query("SELECT id,alias,provider_voice_id,locale,accent,styles,min_rate_percent,max_rate_percent,min_pitch_semitones,max_pitch_semitones FROM speech.voices WHERE enabled AND provider='azure' ORDER BY alias").fetch_all(&mut *conn).await.map_err(AppError::internal)?;
     let eligible = |setting: &VoiceSettingV3| {
         rows.iter()
@@ -247,7 +258,7 @@ pub async fn resolve_in(
     {
         return Err(unavailable());
     }
-    let mut resolved = resolve_profile(profile, &groups, accent, eligible);
+    let mut resolved = resolve_profile(profile, groups, accent, eligible);
     // Retain the historical local-empty behavior until the explicit pool migration.
     if resolved.is_empty() && profile.mode() == Some(VoiceProfileModeV3::Local) {
         for row in &rows {

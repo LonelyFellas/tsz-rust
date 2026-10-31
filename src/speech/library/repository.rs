@@ -217,8 +217,9 @@ impl VoiceLibraryRepository {
         {
             return Err(conflict());
         }
-        let groups: Vec<DubbingGroup> =
+        let mut groups: Vec<DubbingGroup> =
             serde_json::from_value(row.get("groups")).map_err(AppError::internal)?;
+        groups.sort_by_key(|group| group.is_global);
         let ids = request
             .group_ids
             .iter()
@@ -523,6 +524,7 @@ impl VoiceLibraryRepository {
         if let Some(index) = index {
             groups[index] = request.group;
         } else {
+            groups.sort_by_key(|group| group.is_global);
             let position = groups
                 .iter()
                 .position(|group| group.is_global)

@@ -474,6 +474,9 @@ async fn automatic_updates_migration_preserves_settings_and_pending_jobs(pool: P
         "refusing rollback must preserve schema, settings, tasks and ledger"
     );
 
+    // The historical assertions above stay on the old schema; current worker
+    // code runs only after upgrading the preserved job to its current schema.
+    migrator.run(&pool).await.unwrap();
     due(&pool).await;
     audio_updates::sweep(&pool, Some(provider.clone()), Some(storage))
         .await
@@ -579,7 +582,8 @@ async fn delayed_updates_api_enforces_versions_cancel_boundary_and_retry(pool: P
         json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
     )
     .await;
-    save(&pool, actor, group(id, version, 0), 1).await;
+    // Retry exercises a real default change, not revival of a cancelled update by an unchanged save.
+    save(&pool, actor, group(id, version, -27), 1).await;
     let job = audio_updates::list(&pool, id).await.unwrap().updates[0].id;
     sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='speech.generate'").bind(actor).execute(&pool).await.unwrap();
     audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
@@ -1058,4 +1062,235 @@ async fn order_supersedes_inflight_other_group_and_keeps_old_audio(pool: PgPool)
         .await
         .unwrap();
     assert_eq!(current(&pool, owner).await, old);
+}
+
+#[sqlx::test]
+async fn unchanged_defaults_never_generate_missing_audio_and_real_changes_survive_merging(
+    pool: PgPool,
+) {
+    use tsz_rust::speech::library::dto::SaveDubbingGroupOrderRequest;
+    let (actor, a, version, provider, storage) = setup(&pool).await;
+    save(&pool, actor, group(a, version, 0), 0).await;
+    // A pending update may be cancelled while its saved defaults remain in effect.
+    sqlx::query("UPDATE speech.dubbing_audio_updates SET state='cancelled' WHERE state='pending'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let owner = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
+    let mut renamed = group(a, version, 0);
+    renamed.name = "renamed A".into();
+    save(&pool, actor, renamed.clone(), 1).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "names cannot fill a previously missing asset"
+    );
+    assert_eq!(current(&pool, owner).await["voices"], json!([]));
+    let b = Uuid::now_v7();
+    let mut lower = group(b, Uuid::now_v7(), -10);
+    lower.name = "lower B".into();
+    save(&pool, actor, lower.clone(), 0).await;
+    let c = Uuid::now_v7();
+    let mut lowest = group(c, Uuid::now_v7(), -20);
+    lowest.name = "lower C".into();
+    save(&pool, actor, lowest, 0).await;
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    let read = repo.groups_v3(actor).await.unwrap();
+    let global = read.groups.iter().find(|g| g.is_global).unwrap().id;
+    repo.save_order(
+        actor,
+        0,
+        SaveDubbingGroupOrderRequest {
+            group_ids: vec![a, c, b, global],
+            base_revision: read.order_revision,
+        },
+    )
+    .await
+    .unwrap();
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "lower priority additions and reorder keep the actual default"
+    );
+    renamed.uk[0].parameters.rate_percent = -27;
+    save(&pool, actor, renamed, 2).await;
+    lower.name = "B renamed after A change".into();
+    save(&pool, actor, lower, 1).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "a later rename must preserve the earlier real change baseline"
+    );
+    assert_eq!(
+        current(&pool, owner).await["voices"][0]["rate_percent"],
+        -27
+    );
+}
+
+#[sqlx::test]
+async fn unchanged_defaults_do_not_fill_a_missing_side_of_a_partial_inherit_profile(pool: PgPool) {
+    let (actor, a, version, provider, storage) = setup(&pool).await;
+    let owner = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
+    let initial = group(a, version, 0);
+    save(&pool, actor, initial.clone(), 0).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage.clone()))
+        .await
+        .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let mut variant: Value = sqlx::query_scalar(
+        "SELECT content->'en_text'->'uk'->'variant' FROM lexicon.shared_sentences WHERE id=$1",
+    )
+    .bind(owner)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    variant["voice_profile"]["voices"].as_array_mut().unwrap().push(json!({"voice_id":"jenny","locale":"en-US","version_id":initial.us[0].id,"version_name":"American","enabled":true,"rate_percent":0}));
+    let unified = json!({"mode":"unified","common":variant});
+    sqlx::query(
+        "UPDATE lexicon.shared_sentences SET content=jsonb_set(content,'{en_text}',$2) WHERE id=$1",
+    )
+    .bind(owner)
+    .bind(&unified)
+    .execute(&pool)
+    .await
+    .unwrap();
+    tsz_rust::speech::dubbing::replace_dependencies(
+        &mut pool.acquire().await.unwrap(),
+        "sentence",
+        owner,
+        2,
+        &unified,
+    )
+    .await
+    .unwrap();
+    let mut renamed = initial;
+    renamed.name = "partial target rename".into();
+    save(&pool, actor, renamed, 1).await;
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "the missing US asset must not cause a call when the entire default is unchanged"
+    );
+    let stored: Value =
+        sqlx::query_scalar("SELECT content->'en_text' FROM lexicon.shared_sentences WHERE id=$1")
+            .bind(owner)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, unified);
+}
+
+#[sqlx::test]
+async fn merging_preserves_unknown_historical_baselines_and_task_scope(pool: PgPool) {
+    let (actor, a, version, _, _) = setup(&pool).await;
+    save(&pool, actor, group(a, version, 0), 0).await;
+    sqlx::query("UPDATE speech.dubbing_audio_updates SET state='cancelled'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut changed = group(a, version, -27);
+    save(&pool, actor, changed.clone(), 1).await;
+    let unknown = Uuid::now_v7();
+    sqlx::query("INSERT INTO speech.dubbing_audio_updates(id,group_id,group_name,group_revision,areas,created_by_admin_id,security_version,due_at,created_at) VALUES($1,$2,'historical',1,ARRAY['example'],$3,0,now()+interval '1 minute',now()+interval '1 day')").bind(unknown).bind(Uuid::now_v7()).bind(actor).execute(&pool).await.unwrap();
+    let scoped = Uuid::now_v7();
+    sqlx::query("INSERT INTO speech.dubbing_audio_updates(id,group_id,group_name,group_revision,areas,created_by_admin_id,security_version,due_at,test_run) VALUES($1,$2,'isolated',1,ARRAY['example'],$3,0,now()+interval '1 minute','other-test-batch')").bind(scoped).bind(Uuid::now_v7()).bind(actor).execute(&pool).await.unwrap();
+    for base in [2, 3] {
+        changed.name = format!("rename {base}");
+        save(&pool, actor, changed.clone(), base).await;
+        let baseline:Value=sqlx::query_scalar("SELECT baseline_groups FROM speech.dubbing_audio_updates WHERE group_id=$1 AND state='pending'").bind(a).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            baseline.get("example"),
+            Some(&Value::Null),
+            "unknown must dominate regardless of a misleading created_at or a later merge"
+        );
+    }
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM speech.dubbing_audio_updates WHERE id=$1")
+            .bind(scoped)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        state, "pending",
+        "another test scope cannot be merged or superseded"
+    );
+}
+
+#[sqlx::test]
+async fn baseline_migration_preserves_legacy_jobs_and_rejects_lossy_rollback(pool: PgPool) {
+    let down = include_str!("../../migrations/20261031100000_dubbing_update_baselines.down.sql");
+    let up = include_str!("../../migrations/20261031100000_dubbing_update_baselines.up.sql");
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    let (actor, a, version, _, _) = setup(&pool).await;
+    seed_historical_group_and_job(&pool, actor, group(a, version, 0)).await;
+    let before: Value =
+        sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(j)) FROM speech.dubbing_audio_updates j")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    let after: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(j)-'baseline_groups') FROM speech.dubbing_audio_updates j",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, before);
+    let baseline: Value =
+        sqlx::query_scalar("SELECT baseline_groups FROM speech.dubbing_audio_updates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        baseline,
+        json!({}),
+        "old tasks must not infer a pre-submit configuration"
+    );
+    save(&pool, actor, group(a, version, -27), 1).await;
+    let snapshot: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(j) ORDER BY id) FROM speech.dubbing_audio_updates j",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let error = sqlx::raw_sql(down).execute(&pool).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Cannot discard saved dubbing update baselines")
+    );
+    let retained: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(j) ORDER BY id) FROM speech.dubbing_audio_updates j",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(retained, snapshot);
 }

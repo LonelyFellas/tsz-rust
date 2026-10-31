@@ -1741,3 +1741,90 @@ async fn waiting_window_starts_after_the_configuration_lock_is_acquired(pool: Pg
         "lock wait must not consume the submitted update window"
     );
 }
+
+#[sqlx::test]
+async fn creation_preserves_existing_priority_when_legacy_storage_has_global_first(pool: PgPool) {
+    use serde_json::json;
+    use tsz_rust::speech::library::dto::SaveDubbingGroupRequest;
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    let global = repo.groups(actor).await.unwrap().groups.remove(0);
+    let mut a = group("historical A", &["word"]);
+    a.revision = 1;
+    let mut b = group("historical B", &["word"]);
+    b.revision = 1;
+    let recommendation = |name| {
+        serde_json::from_value(json!({"id":Uuid::now_v7(),"name":name,"voice_alias":"en-gb-sonianeural","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}})).unwrap()
+    };
+    a.uk.push(recommendation("A"));
+    b.uk.push(recommendation("B"));
+    sqlx::query("UPDATE speech.dubbing_groups SET groups=$1 WHERE singleton")
+        .bind(json!([global, a, b]))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let original = repo.groups_v3(actor).await.unwrap();
+    let same = repo
+        .save_order(
+            actor,
+            0,
+            tsz_rust::speech::library::dto::SaveDubbingGroupOrderRequest {
+                group_ids: original.groups.iter().map(|group| group.id).collect(),
+                base_revision: original.order_revision,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(original.revision, same.revision);
+    assert_eq!(original.order_revision, same.order_revision);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM speech.dubbing_audio_updates")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let mut c = group("new C", &["word"]);
+    c.uk.push(recommendation("C"));
+    repo.save_group(
+        actor,
+        0,
+        SaveDubbingGroupRequest {
+            group: c.clone(),
+            base_revision: 0,
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let stored = repo.groups(actor).await.unwrap();
+    assert_eq!(
+        stored.groups.iter().map(|g| g.id).collect::<Vec<_>>(),
+        vec![a.id, b.id, c.id, global.id]
+    );
+    let read = repo.groups_v3(actor).await.unwrap();
+    assert_eq!(
+        read.groups.iter().map(|g| g.id).collect::<Vec<_>>(),
+        vec![a.id, b.id, c.id, global.id]
+    );
+    let profile =
+        serde_json::from_value(json!({"voices":[],"dubbing":{"mode":"inherit","area":"word"}}))
+            .unwrap();
+    let content =
+        serde_json::from_value(json!({"version":2,"text":"cat","annotations":[]})).unwrap();
+    let resolved = tsz_rust::speech::dubbing::resolve_in(
+        &mut pool.acquire().await.unwrap(),
+        &profile,
+        "gb",
+        &content,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved[0].version_id, Some(a.uk[0].id));
+}

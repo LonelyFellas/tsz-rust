@@ -108,7 +108,7 @@ pub(crate) async fn enqueue_areas(
     test_run: Option<&str>,
 ) -> Result<Uuid, AppError> {
     let (group, revision, name) = group;
-    let active = sqlx::query("SELECT id,group_id,areas FROM speech.dubbing_audio_updates WHERE state IN ('pending','running') AND test_run IS NOT DISTINCT FROM $1 FOR UPDATE")
+    let active = sqlx::query("SELECT id,group_id,areas,baseline_groups FROM speech.dubbing_audio_updates WHERE state IN ('pending','running') AND test_run IS NOT DISTINCT FROM $1 ORDER BY created_at,id FOR UPDATE")
         .bind(test_run).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
     let mut merged = std::collections::BTreeSet::new();
     loop {
@@ -130,11 +130,47 @@ pub(crate) async fn enqueue_areas(
     }
     areas.sort();
     areas.dedup();
+    let previous: serde_json::Value =
+        sqlx::query_scalar("SELECT groups FROM speech.dubbing_groups WHERE singleton")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(AppError::internal)?;
+    let previous: Vec<DubbingGroup> =
+        serde_json::from_value(previous).map_err(AppError::internal)?;
+    let mut baseline = serde_json::Map::new();
+    // Each area keeps its earliest pending baseline. An unknown historical baseline
+    // stays null, rather than guessing defaults from a later configuration.
+    for row in active
+        .iter()
+        .filter(|row| merged.contains(&row.get::<Uuid, _>("id")))
+    {
+        let saved: serde_json::Value = row.get("baseline_groups");
+        for area in row.get::<Vec<String>, _>("areas") {
+            let previous = saved.get(&area).cloned().unwrap_or(serde_json::Value::Null);
+            if previous.is_null() {
+                baseline.insert(area, previous);
+            } else {
+                baseline.entry(area).or_insert(previous);
+            }
+        }
+    }
+    for area in &areas {
+        if !baseline.contains_key(area) {
+            let groups = previous
+                .iter()
+                .filter(|group| group.is_global || group.areas.contains(area))
+                .collect::<Vec<_>>();
+            baseline.insert(
+                area.clone(),
+                serde_json::to_value(groups).map_err(AppError::internal)?,
+            );
+        }
+    }
     sqlx::query("UPDATE speech.dubbing_audio_updates SET state='superseded',updated_at=now() WHERE id=ANY($1)")
         .bind(merged.into_iter().collect::<Vec<_>>()).execute(&mut *conn).await.map_err(AppError::internal)?;
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO speech.dubbing_audio_updates(id,group_id,group_revision,areas,created_by_admin_id,security_version,group_name,test_run,due_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp()+make_interval(secs=>wait_seconds) FROM speech.dubbing_update_settings WHERE singleton")
-        .bind(id).bind(group).bind(revision).bind(areas).bind(actor).bind(security_version).bind(name).bind(test_run)
+    sqlx::query("INSERT INTO speech.dubbing_audio_updates(id,group_id,group_revision,areas,created_by_admin_id,security_version,group_name,test_run,baseline_groups,due_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp()+make_interval(secs=>wait_seconds) FROM speech.dubbing_update_settings WHERE singleton")
+        .bind(id).bind(group).bind(revision).bind(areas).bind(actor).bind(security_version).bind(name).bind(test_run).bind(serde_json::Value::Object(baseline))
         .execute(conn).await.map_err(AppError::internal)?;
     Ok(id)
 }
