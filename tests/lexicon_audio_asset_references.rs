@@ -2446,10 +2446,7 @@ async fn pronunciation_editor_rejects_invalid_annotations_and_profiles(pool: PgP
 
 #[sqlx::test(migrations = false)]
 async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool) {
-    sqlx::migrate!("./migrations")
-        .run_to(20261027100000, &pool)
-        .await
-        .unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let mut state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -2515,21 +2512,6 @@ async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool
         error.as_database_error().unwrap().constraint(),
         Some("audio_asset_not_reclaiming")
     );
-    let current_version: i64 =
-        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923030000, current_version)
-        .await
-        .unwrap_err();
-    assert!(format!("{error:#}").contains("cannot remove reclamation state"));
-    let version: i64 =
-        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(version, current_version);
     assert_eq!(draft_reference_count(&pool, entry.id).await, 0);
     assert_eq!(
         tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
@@ -2538,6 +2520,44 @@ async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool
         1
     );
     assert!(!asset_exists(&pool, &asset["id"]).await);
+}
+
+#[sqlx::test(migrations = false)]
+async fn reclamation_marker_blocks_historical_native_downgrade(pool: PgPool) {
+    sqlx::migrate!("./migrations")
+        .run_to(20261027100000, &pool)
+        .await
+        .unwrap();
+    let actor = seed_admin(&pool).await;
+    let asset = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id,reclamation_started_at) VALUES($1,$2,$2,'audio/mpeg',3,'en-GB','female','historical-guard.mp3',$3,now())")
+        .bind(asset).bind(format!("fixtures/{asset}.mp3")).bind(actor).execute(&pool).await.unwrap();
+    let current_version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923030000, current_version)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("cannot remove reclamation state"),
+        "{error:#}"
+    );
+    let version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(version, current_version);
+    let marked: bool = sqlx::query_scalar(
+        "SELECT reclamation_started_at IS NOT NULL FROM lexicon.audio_assets WHERE id=$1",
+    )
+    .bind(asset)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(marked);
 }
 
 #[sqlx::test(migrations = false)]
