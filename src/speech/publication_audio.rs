@@ -148,7 +148,11 @@ fn add_selected(
         let profile: VoiceProfileV3 =
             serde_json::from_value(owner["voice_profile"].clone()).map_err(AppError::internal)?;
         let profile = Arc::new(profile);
-        if profile.mode() == Some(crate::lexicon::dto::VoiceProfileModeV3::Inherit)
+        if (profile.mode() == Some(crate::lexicon::dto::VoiceProfileModeV3::Inherit)
+            || profile
+                .dubbing
+                .as_ref()
+                .is_some_and(|dubbing| dubbing.pool_version.is_some()))
             && !profile.voices.iter().any(|voice| voice.enabled)
         {
             out.push(AudioRequirement {
@@ -360,6 +364,58 @@ mod tests {
             Some(RequirementIssue::MissingConfiguration)
         ));
         assert!(items[0].asset_id.is_none());
+    }
+
+    #[test]
+    fn new_local_empty_pool_requires_configuration_without_changing_legacy_empty() {
+        for enabled in [false, true] {
+            let mut value = json!({"en_text":{"common":{"id":Uuid::now_v7(),"value":{"version":2,"text":"Hello","annotations":[]},
+                "voice_profile":{"voices":[],"dubbing":{"mode":"local","area":"meaning"}}}}});
+            if enabled {
+                value["en_text"]["common"]["voice_profile"]["dubbing"]["pool_version"] =
+                    json!("provider_id_v1");
+            }
+            let items = collect(&value).unwrap();
+            assert_eq!(items.len(), usize::from(enabled));
+            if enabled {
+                assert!(matches!(
+                    items[0].issue,
+                    Some(RequirementIssue::MissingConfiguration)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_selected_pool_ignores_cached_voices_and_changes_review_binding() {
+        let version = |alias: &str, locale: &str, enabled: bool, asset| {
+            let mut setting = voice(locale, enabled, asset);
+            setting["voice_id"] = json!(alias);
+            setting["version_id"] = json!(Uuid::now_v7());
+            setting["version_name"] = json!(alias);
+            setting
+        };
+        let first = version("en-us-jennyneural", "en-US", true, Some(Uuid::now_v7()));
+        let second = version("en-us-guyneural", "en-US", true, Some(Uuid::now_v7()));
+        let cached = version("en-gb-sonianeural", "en-GB", false, None);
+        let mut value = json!({"en_text":{"common":{"id":Uuid::now_v7(),"value":{"version":2,"text":"Hello","annotations":[]},
+            "voice_profile":{"voices":[first, cached, second],"dubbing":{"mode":"local","area":"meaning","pool_version":"provider_id_v1"}}}}});
+        let before = collect(&value).unwrap();
+        assert_eq!(before.len(), 2);
+        assert_eq!(
+            before[0].asset_id,
+            serde_json::from_value(first["audio_asset_id"].clone()).unwrap()
+        );
+        value["en_text"]["common"]["voice_profile"]["voices"]
+            .as_array_mut()
+            .unwrap()
+            .swap(0, 2);
+        let after = collect(&value).unwrap();
+        assert_eq!(after[0].asset_id, before[1].asset_id);
+        assert_ne!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(&after).unwrap()
+        );
     }
 
     #[test]

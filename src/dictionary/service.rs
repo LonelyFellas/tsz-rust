@@ -138,6 +138,7 @@ pub async fn entries(
                 std::mem::discriminant(&item.source_dialect),
             ))
         });
+        let audio = playable_audio(tx, audio).await?;
         result.push(DictionaryEntry {
             content,
             audio,
@@ -149,7 +150,7 @@ pub async fn entries(
 
 // The immutable publication is the authority for selectable owned audio. Sharing
 // this collector with the reader keeps signing independent of display projection.
-fn own_audio(native: &published::PublishedContentV3) -> Vec<DictionaryAudio> {
+pub(crate) fn own_audio(native: &published::PublishedContentV3) -> Vec<DictionaryAudio> {
     let mut audio = Vec::new();
     for pos in &native.forms.pos {
         for form in &pos.forms {
@@ -259,6 +260,7 @@ fn own_audio(native: &published::PublishedContentV3) -> Vec<DictionaryAudio> {
                     accent_group: a.locale.accent_group(),
                     source_dialect: variant.dialect,
                     hd_flash: false,
+                    setting: None,
                 }));
             }
         }
@@ -312,7 +314,11 @@ pub(crate) async fn audio_available(
     let allowed = |audio: &DictionaryAudio| {
         audio.asset_id == asset_id && (models_supported || !audio.hd_flash)
     };
-    if own_audio(&native).iter().any(allowed) {
+    if playable_audio(tx, own_audio(&native))
+        .await?
+        .iter()
+        .any(allowed)
+    {
         return Ok(true);
     }
     // Shared sentences have independent publication, hide and withdrawal state.
@@ -353,6 +359,7 @@ fn uploaded_audio(
         accent_group: asset.locale.accent_group(),
         source_dialect,
         hd_flash: false,
+        setting: None,
     }));
 }
 
@@ -375,6 +382,7 @@ fn generated_audio(
                 accent_group: locale.accent_group(),
                 source_dialect,
                 hd_flash: setting.voice_id.starts_with("azure-hd-flash-"),
+                setting: Some(setting.clone()),
             });
         }
     }
@@ -397,4 +405,65 @@ fn english(content: &EnglishTextV3) -> Vec<WordlistText> {
             })
             .collect(),
     }
+}
+
+/// Preserve publication selection order; current catalog capability and asset readiness
+/// may remove candidates but never replace them with live recommendations.
+pub(crate) async fn playable_audio(
+    tx: &mut Transaction<'_, Postgres>,
+    audio: Vec<DictionaryAudio>,
+) -> Result<Vec<DictionaryAudio>, AppError> {
+    use sqlx::Row;
+    if audio.is_empty() {
+        return Ok(audio);
+    }
+    let ids: Vec<_> = audio.iter().map(|item| item.asset_id).collect();
+    let assets = sqlx::query("SELECT a.id,a.locale,g.state,g.resolved_content,g.source FROM lexicon.audio_assets a LEFT JOIN lexicon.audio_generations g ON g.asset_id=a.id WHERE a.id=ANY($1) AND a.reclamation_started_at IS NULL ORDER BY a.id FOR SHARE OF a")
+        .bind(&ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let catalog = crate::speech::dubbing::playback_catalog(tx).await?;
+    let mut result = Vec::new();
+    for mut item in audio {
+        let Some(asset) = assets
+            .iter()
+            .find(|row| row.get::<Uuid, _>("id") == item.asset_id)
+        else {
+            continue;
+        };
+        if asset.get::<String, _>("locale") != item.locale {
+            continue;
+        }
+        if let Some(setting) = &item.setting {
+            if asset.get::<Option<String>, _>("state").as_deref() != Some("ready") {
+                continue;
+            }
+            let Some(voice) = catalog
+                .iter()
+                .find(|row| row.get::<String, _>("alias") == setting.voice_id)
+            else {
+                continue;
+            };
+            let accent: String = voice.get("accent");
+            item.accent_group = match accent.as_str() {
+                "gb" => crate::speech::locale::AccentGroup::Uk,
+                "us" => crate::speech::locale::AccentGroup::Us,
+                _ => crate::speech::locale::AccentGroup::Other,
+            };
+            let content = serde_json::from_value(asset.get("resolved_content"))
+                .map_err(AppError::internal)?;
+            let source: serde_json::Value = asset.get("source");
+            if !crate::speech::dubbing::setting_available(
+                &catalog,
+                setting,
+                &accent,
+                &content,
+                (source["kind"] == "phoneme").then_some(item.locale.as_str()),
+            ) {
+                continue;
+            }
+        } else if asset.get::<Option<String>, _>("state").is_some() {
+            continue; // Generated assets cannot enter via the recording path.
+        }
+        result.push(item);
+    }
+    Ok(result)
 }

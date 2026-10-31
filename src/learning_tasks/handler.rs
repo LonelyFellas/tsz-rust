@@ -29,6 +29,10 @@ pub fn router() -> Router<AppState> {
             get(get_questions),
         )
         .route("/api/v1/me/learning-runs/{id}/answers", post(answer))
+        .route(
+            "/api/v1/me/learning-runs/{id}/questions/{question_id}/audio",
+            get(super::audio::read),
+        )
 }
 #[utoipa::path(get,path="/api/v1/me/coins/learning-rewards",tag="learning_tasks",security(("bearer_auth"=[])),params(LearningRewardQuery),responses((status=200,description="本人业务日奖励",body=LearningRewardDay),(status=400,description="日期无效"),(status=401,description="会话失效"),(status=403,description="需要已绑定手机的学生资格"),(status=409,description="需要学习设置")))]
 pub async fn reward_day(

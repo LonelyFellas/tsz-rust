@@ -29,7 +29,7 @@ class IntegrationShardsTests(unittest.TestCase):
             self.reports.append({"shard": shard, "sha": "exact-sha", "inventory": inventory, "executed": executed})
 
     def test_complete_partition_and_workflow_matrix(self):
-        self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha"), {"targets": 6, "cases": 8, "shards": 6})
+        self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha"), {"targets": 6, "cases": 8, "shards": 7})
         import re
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         matrix = re.search(r"module: \[([^\]]+)\]", workflow)[1].split(", ")
@@ -49,7 +49,7 @@ class IntegrationShardsTests(unittest.TestCase):
                 verify_manifests(reports, self.grouped, "exact-sha")
 
     def test_missing_duplicate_wrong_version_and_disagreeing_inventory_fail(self):
-        for mutation in [lambda r: r.pop(), lambda r: r.append(r[0]), lambda r: r[0].update(sha="old-sha"), lambda r: r[1]["inventory"]["lexicon_handler"]["names"].append("new_case")]:
+        for mutation in [lambda r: r.pop(), lambda r: r.append(r[0]), lambda r: r[0].update(sha="old-sha"), lambda r: next(row for row in r if row["shard"] == "lexicon-handler")["inventory"]["lexicon_handler"]["names"].append("new_case")]:
             reports = copy.deepcopy(self.reports)
             mutation(reports)
             with self.assertRaises(ClassificationError):
@@ -69,15 +69,17 @@ class IntegrationShardsTests(unittest.TestCase):
         self.assertEqual(filters_for("lexicon-pagination", "lexicon_handler"), [PAGINATION, "--exact"])
         self.assertEqual(filters_for("lexicon-handler", "lexicon_handler"), ["--skip", PAGINATION])
         self.assertEqual(filters_for("lexicon-pagination", "learning_runs_handler"), [])
-        self.assertEqual(targets_for("lexicon-pagination", self.grouped), ("lexicon_handler", "learning_runs_handler"))
+        self.assertEqual(targets_for("lexicon-pagination", self.grouped), ("lexicon_handler",))
+        self.assertEqual(targets_for("lexicon-learning", self.grouped), ("learning_runs_handler",))
         self.assertEqual(targets_for("lexicon-other", self.grouped), ("wordlists_test",))
 
     def test_build_uses_locked_all_feature_target_and_records_real_executable(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch("ci_test_shards.subprocess.run") as runner:
             runner.return_value.stdout = "\n".join(json.dumps({"reason": "compiler-artifact", "target": {"name": target}, "executable": f"/{target}"}) for target in ("lexicon_handler", "learning_runs_handler"))
-            build("lexicon-pagination", self.grouped, Path(directory))
-            self.assertEqual(runner.call_args.args[0], ["cargo", "test", "--locked", "--all-features", "--test", "lexicon_handler", "--test", "learning_runs_handler", "--no-run", "--message-format=json"])
-            self.assertEqual(json.loads((Path(directory) / "lexicon-pagination-executables.json").read_text()), {"lexicon_handler": "/lexicon_handler", "learning_runs_handler": "/learning_runs_handler"})
+            for shard, target in [("lexicon-pagination", "lexicon_handler"), ("lexicon-learning", "learning_runs_handler")]:
+                build(shard, self.grouped, Path(directory))
+                self.assertEqual(runner.call_args.args[0], ["cargo", "test", "--locked", "--all-features", "--test", target, "--no-run", "--message-format=json"])
+                self.assertEqual(json.loads((Path(directory) / f"{shard}-executables.json").read_text()), {target: f"/{target}"})
 
     def test_malformed_list_is_rejected(self):
         with mock.patch("ci_test_shards.subprocess.run") as runner:
@@ -114,14 +116,16 @@ else:
     print('test learning_case ... ok')
 ''')
             learning.chmod(0o755)
-            for shard in ["lexicon-pagination", "lexicon-handler"]:
+            for shard in ["lexicon-pagination", "lexicon-learning", "lexicon-handler"]:
                 executables = {target: str(binary if target == "lexicon_handler" else learning) for target in targets_for(shard, self.grouped)}
                 (root / f"{shard}-executables.json").write_text(json.dumps(executables))
                 with mock.patch.dict("os.environ", {"GITHUB_SHA": "exact-sha"}):
                     run(shard, self.grouped, root, root / f"{shard}-report.json")
             heavy = json.loads((root / "lexicon-pagination-report.json").read_text())
             rest = json.loads((root / "lexicon-handler-report.json").read_text())
-            self.assertEqual([row["name"] for row in heavy["executed"]], ["learning_case", PAGINATION])
+            learned = json.loads((root / "lexicon-learning-report.json").read_text())
+            self.assertEqual([row["name"] for row in heavy["executed"]], [PAGINATION])
+            self.assertEqual([row["name"] for row in learned["executed"]], ["learning_case"])
             self.assertEqual([row["name"] for row in rest["executed"]], ["ordinary", "ignored_case"])
             self.assertEqual(heavy["inventory"]["lexicon_handler"], rest["inventory"]["lexicon_handler"])
 

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-#[derive(Serialize, ToSchema)]
+#[derive(Clone, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DictionaryAudio {
     pub target_id: Uuid,
@@ -22,6 +22,9 @@ pub struct DictionaryAudio {
     #[serde(skip)]
     #[schema(ignore)]
     pub(crate) hd_flash: bool,
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) setting: Option<crate::lexicon::dto::VoiceSettingV3>,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

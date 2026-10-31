@@ -1874,7 +1874,9 @@ fn collect_forbidden_object(
         // deny_unknown_fields 的闭合 union，多余键交给 serde 拒。
         // 注意本函数由 forms 与 meanings 两条解码路径共用：forms 的禁用名单里没有一项
         // 会出现在成分对象内，所以那侧不受影响，只是错误形状从结构化 issue 退成通用 422。
-        if field == "component_usages" {
+        // 配音来源的 group_id 属于 voice_profile 的闭合 DTO，不是旧词形分组字段。
+        // 未知键仍由 VoiceProfileV3 及其嵌套 deny_unknown_fields 拒绝。
+        if matches!(field.as_str(), "component_usages" | "voice_profile") {
             continue;
         }
         collect_forbidden_fields(nested, forbidden, issues, node_id);
@@ -3719,6 +3721,32 @@ mod tests {
 mod sense_group_voice_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn meanings_accept_stable_recommendation_sources_without_allowing_legacy_or_unknown_fields() {
+        let version = Uuid::now_v7();
+        let profile = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":-27,"version_id":version,"version_name":"局部副本","locale":"en-GB"}],
+            "dubbing":{"mode":"local","area":"grammar","pool_version":"provider_id_v1","recommendation":{"group_id":Uuid::now_v7(),"pair_id":Uuid::now_v7(),"voice_ids":["sonia"],"contribution_ids":[version]}}});
+        let input = json!({"schema_version":3,"base_revision":1,"intent":"save","content":{"sense_groups":[],"pos":[{"pos_id":Uuid::now_v7(),"grammar_structures":[{"id":Uuid::now_v7(),"variants":[{"id":Uuid::now_v7(),"dialect":"common","content":{"version":2,"text":"Hello","annotations":[]},"form_links":[],"voice_profile":profile}]}],"senses":[]}]}});
+        let parsed = decode_v3_meanings_request::<crate::lexicon::dto::SaveMeaningsStepInputV3>(
+            input.clone(),
+        )
+        .expect("stable source is writable");
+        assert!(validate_meanings(&parsed.content, StepSaveIntent::Save).is_empty());
+        let mut unknown = input.clone();
+        unknown["content"]["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"]["dubbing"]
+            ["recommendation"]["form_id"] = json!(Uuid::now_v7());
+        assert!(
+            decode_v3_meanings_request::<crate::lexicon::dto::SaveMeaningsStepInputV3>(unknown)
+                .is_err()
+        );
+        let mut legacy = input;
+        legacy["content"]["pos"][0]["group_id"] = json!(Uuid::now_v7());
+        assert!(
+            decode_v3_meanings_request::<crate::lexicon::dto::SaveMeaningsStepInputV3>(legacy)
+                .is_err()
+        );
+    }
+
     #[test]
     fn explicit_provider_pool_validates_sources_unique_aliases_and_keeps_legacy_versions() {
         let first = Uuid::now_v7();

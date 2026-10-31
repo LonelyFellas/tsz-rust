@@ -1,4 +1,4 @@
 //! Authenticated dictionary reads from current publications only.
-mod dto;
+pub(crate) mod dto;
 pub mod handler;
-mod service;
+pub(crate) mod service;

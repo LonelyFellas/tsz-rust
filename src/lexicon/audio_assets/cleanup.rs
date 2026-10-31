@@ -80,6 +80,7 @@ pub async fn reclaim_once(
                   SELECT 1 FROM lexicon.shared_sentence_audio_asset_references reference
                   WHERE reference.asset_id = asset.id
               )
+              AND NOT EXISTS (SELECT 1 FROM learning_question_audio reference WHERE reference.asset_id = asset.id)
             ORDER BY asset.created_at
             LIMIT 1
             FOR UPDATE OF asset SKIP LOCKED
@@ -98,7 +99,7 @@ pub async fn reclaim_once(
         // 候选查询的语句快照可能早于并发保存提交。持有资产排他锁后，
         // 用新的 READ COMMITTED 快照再次确认，不能先删对象再靠 FK 拒绝删行。
         let referenced: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1 UNION ALL SELECT 1 FROM lexicon.shared_sentence_audio_asset_references WHERE asset_id = $1)",
+            "SELECT EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1 UNION ALL SELECT 1 FROM lexicon.shared_sentence_audio_asset_references WHERE asset_id = $1 UNION ALL SELECT 1 FROM learning_question_audio WHERE asset_id = $1)",
         )
         .bind(id)
         .fetch_one(&mut *tx)

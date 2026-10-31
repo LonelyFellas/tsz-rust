@@ -298,7 +298,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [lexicon-pagination, lexicon-handler, lexicon-other, admin, identity, platform]
+        module: [lexicon-pagination, lexicon-learning, lexicon-handler, lexicon-other, admin, identity, platform]
 
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/tsz_rust
