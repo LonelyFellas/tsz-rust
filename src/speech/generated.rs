@@ -371,6 +371,19 @@ impl GeneratedAudioService {
         let native_locale = input.setting.locale.ok_or_else(invalid)?;
         input.source.validate_locale(native_locale.as_str())?;
         let source = input.source.canonical()?;
+        // Completed identical requests remain replayable after a voice is disabled.
+        // Raw controls may differ from the effective identity; verify that identity
+        // below before any generation or writes when the raw hash does not match.
+        let raw_hash = Sha256::digest(
+            serde_json::to_vec(&serde_json::json!([source, voice_input(&input.setting)]))
+                .map_err(AppError::internal)?,
+        );
+        match self.existing(actor, input.request_id, &raw_hash).await {
+            Ok(Some(asset)) => return Ok(GenerateVoiceAudioResponse { asset }),
+            Ok(None) => {}
+            Err(error) if error.code() == ErrorCode::IdempotencyConflict => {}
+            Err(error) => return Err(error),
+        }
         let voice = PreviewRepository::new(self.pool.clone())
             .voice_by_alias(&input.setting.voice_id)
             .await
