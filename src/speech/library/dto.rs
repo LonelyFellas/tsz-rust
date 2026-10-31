@@ -121,3 +121,90 @@ pub struct SaveVoiceAccentRequest {
 pub struct RestoreVoiceDescriptionRequest {
     pub base_revision: i64,
 }
+
+/// A pair owns selection and order; each side retains its existing version identity.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DubbingPairVoice {
+    pub id: Uuid,
+    pub voice_alias: String,
+    pub parameters: VoiceParameters,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DubbingRecommendationPair {
+    pub id: Uuid,
+    pub name: String,
+    pub selected: bool,
+    pub uk: DubbingPairVoice,
+    pub us: DubbingPairVoice,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "format", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DubbingRecommendationsV3 {
+    Legacy {
+        uk: Vec<DubbingRecommendation>,
+        us: Vec<DubbingRecommendation>,
+    },
+    Paired {
+        #[schema(max_items = 20)]
+        pairs: Vec<DubbingRecommendationPair>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DubbingGroupV3 {
+    pub id: Uuid,
+    pub name: String,
+    pub areas: Vec<String>,
+    #[schema(minimum = 0)]
+    pub revision: i64,
+    pub is_global: bool,
+    pub recommendations: DubbingRecommendationsV3,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DubbingGroupsV3Response {
+    pub groups: Vec<DubbingGroupV3>,
+    #[schema(minimum = 0)]
+    pub revision: i64,
+    #[schema(minimum = 0)]
+    pub order_revision: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PairedDubbingGroup {
+    pub id: Uuid,
+    pub name: String,
+    pub areas: Vec<String>,
+    pub is_global: bool,
+    #[schema(max_items = 20)]
+    pub pairs: Vec<DubbingRecommendationPair>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SavePairedDubbingGroupRequest {
+    pub group: PairedDubbingGroup,
+    #[schema(minimum = 0)]
+    pub base_revision: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum DubbingGroupWriteRequest {
+    Legacy(SaveDubbingGroupRequest),
+    Paired(SavePairedDubbingGroupRequest),
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum DubbingGroupsReadResponse {
+    Legacy(DubbingGroupsResponse),
+    Paired(DubbingGroupsV3Response),
+}

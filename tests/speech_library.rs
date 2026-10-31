@@ -1066,3 +1066,351 @@ async fn migration_can_be_reverted_without_removing_existing_voice_catalog(pool:
         1
     );
 }
+
+fn paired_input(name: &str) -> serde_json::Value {
+    use serde_json::json;
+    let side = |alias| json!({"id":Uuid::now_v7(),"voice_alias":alias,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
+    json!({"base_revision":0,"group":{"id":Uuid::now_v7(),"name":name,"areas":[],"is_global":false,"pairs":[
+        {"id":Uuid::now_v7(),"name":"first","selected":false,"uk":side("en-gb-sonianeural"),"us":side("en-us-jennyneural")},
+        {"id":Uuid::now_v7(),"name":"second","selected":true,"uk":side("en-gb-sonianeural"),"us":side("en-us-jennyneural")}
+    ]}})
+}
+
+#[sqlx::test]
+async fn paired_writes_preserve_order_protect_old_clients_and_serialize_revisions(pool: PgPool) {
+    use tsz_rust::speech::library::dto::{DeleteDubbingGroupRequest, SaveDubbingGroupRequest};
+    let actor = admin(&pool).await;
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    let mut input = paired_input("paired");
+    let request = || serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(
+        repo.save_paired_group(actor, 0, request(), true)
+            .await
+            .unwrap_err()
+            .code(),
+        ErrorCode::Forbidden
+    );
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let initial = repo.groups_v3(actor).await.unwrap();
+    let created = repo
+        .save_paired_group(actor, 0, request(), true)
+        .await
+        .unwrap();
+    assert_eq!(created.order_revision, initial.order_revision + 1);
+    assert_eq!(
+        serde_json::to_value(&created.groups[1]).unwrap()["recommendations"]["pairs"],
+        input["group"]["pairs"]
+    );
+    let stored = repo.groups(actor).await.unwrap().groups.pop().unwrap();
+    assert!(
+        !stored.uk[0].selected,
+        "v3 must not sort selected items to the front"
+    );
+    assert_eq!(
+        repo.save_group(
+            actor,
+            0,
+            SaveDubbingGroupRequest {
+                group: stored.clone(),
+                base_revision: 1
+            },
+            false
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        ErrorCode::RevisionConflict
+    );
+    assert_eq!(
+        repo.delete_group(
+            actor,
+            0,
+            stored.id,
+            DeleteDubbingGroupRequest { base_revision: 1 }
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        ErrorCode::RevisionConflict
+    );
+    input["base_revision"] = 1.into();
+    input["group"]["pairs"][0]["uk"]["parameters"]["rate_percent"] = (-20).into();
+    let (a, b) = tokio::join!(
+        repo.save_paired_group(
+            actor,
+            0,
+            serde_json::from_value(input.clone()).unwrap(),
+            false
+        ),
+        repo.save_paired_group(
+            actor,
+            0,
+            serde_json::from_value(input.clone()).unwrap(),
+            false
+        )
+    );
+    let saved = match (a, b) {
+        (Ok(saved), Err(error)) | (Err(error), Ok(saved)) => {
+            assert_eq!(error.code(), ErrorCode::RevisionConflict);
+            saved
+        }
+        _ => panic!("exactly one write must succeed"),
+    };
+    assert_eq!(saved.order_revision, created.order_revision);
+    assert_eq!(saved.groups[1].revision, 2);
+    let read = repo.groups_v3(actor).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&read).unwrap(),
+        serde_json::to_value(saved).unwrap()
+    );
+    let sides = repo.groups(actor).await.unwrap().groups.pop().unwrap();
+    assert_eq!(sides.uk[0].parameters.rate_percent, -20);
+    assert_eq!(
+        serde_json::to_value(sides.us).unwrap(),
+        serde_json::to_value(stored.us).unwrap()
+    );
+    assert_eq!(
+        repo.delete_paired_group(
+            actor,
+            0,
+            stored.id,
+            DeleteDubbingGroupRequest { base_revision: 1 }
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        ErrorCode::RevisionConflict
+    );
+    let removed = repo
+        .delete_paired_group(
+            actor,
+            0,
+            stored.id,
+            DeleteDubbingGroupRequest { base_revision: 2 },
+        )
+        .await
+        .unwrap();
+    assert_eq!(removed.order_revision, read.order_revision + 1);
+    assert_eq!(removed.groups.len(), 1);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM speech.dubbing_group_pairings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn legacy_pair_conversion_is_explicit_and_retains_every_side_identity(pool: PgPool) {
+    use serde_json::json;
+    use tsz_rust::speech::library::dto::SaveDubbingGroupRequest;
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    let mut input = paired_input("history");
+    let pair_a = input["group"]["pairs"][0].clone();
+    let pair_b = input["group"]["pairs"][1].clone();
+    // Same name and provider voice, different parameters; there is no US side.
+    let mut old = group("history", &[]);
+    old.id = serde_json::from_value(input["group"]["id"].clone()).unwrap();
+    for (index, pair) in [pair_a, pair_b].iter().enumerate() {
+        let mut side = pair["uk"].clone();
+        side["name"] = json!("same");
+        side["selected"] = json!(false);
+        side["parameters"]["rate_percent"] = json!(index as i16 * 10);
+        input["group"]["pairs"][index]["uk"] = pair["uk"].clone();
+        input["group"]["pairs"][index]["uk"]["parameters"] = side["parameters"].clone();
+        input["group"]["pairs"][index]["name"] = json!("same");
+        input["group"]["pairs"][index]["selected"] = json!(false);
+        old.uk.push(serde_json::from_value(side).unwrap());
+    }
+    let saved = repo
+        .save_group(
+            actor,
+            0,
+            SaveDubbingGroupRequest {
+                group: old.clone(),
+                base_revision: 0,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    let v3 = serde_json::to_value(repo.groups_v3(actor).await.unwrap()).unwrap();
+    assert_eq!(v3["groups"][1]["recommendations"]["format"], "legacy");
+    assert_eq!(
+        v3["groups"][1]["recommendations"]["uk"],
+        serde_json::to_value(&saved.groups[1].uk).unwrap()
+    );
+    assert_eq!(v3["groups"][1]["recommendations"]["us"], json!([]));
+    use sqlx::Row;
+    let inventory = sqlx::query(include_str!("../ops/speech-dubbing/inventory.sql"))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(inventory[1].get::<bool, _>("unequal_sides"));
+    let repeated: serde_json::Value = inventory[1].get("repeated_voices");
+    assert_eq!(repeated[0]["versions"], 2);
+    assert_eq!(repeated[0]["parameter_variants"], 2);
+    input["base_revision"] = json!(1);
+    let mut missing = input.clone();
+    missing["group"]["pairs"].as_array_mut().unwrap().pop();
+    assert_eq!(
+        repo.save_paired_group(actor, 0, serde_json::from_value(missing).unwrap(), false)
+            .await
+            .unwrap_err()
+            .code(),
+        ErrorCode::InvalidRequestBody
+    );
+    let converted = repo
+        .save_paired_group(
+            actor,
+            0,
+            serde_json::from_value(input.clone()).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(converted.order_revision, 1);
+    assert_eq!(
+        serde_json::to_value(&converted.groups[1]).unwrap()["recommendations"]["pairs"],
+        input["group"]["pairs"]
+    );
+    let retained = repo.groups(actor).await.unwrap().groups.pop().unwrap();
+    assert_eq!(
+        serde_json::to_value(retained.uk).unwrap(),
+        serde_json::to_value(old.uk).unwrap()
+    );
+}
+
+#[sqlx::test]
+async fn paired_identity_and_voice_validation_rejects_without_partial_writes(pool: PgPool) {
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    let good = paired_input("original");
+    repo.save_paired_group(
+        actor,
+        0,
+        serde_json::from_value(good.clone()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let before = serde_json::to_value(repo.groups_v3(actor).await.unwrap()).unwrap();
+    for (path, value) in [
+        ("/group/pairs/0/id", good["group"]["pairs"][0]["id"].clone()),
+        (
+            "/group/pairs/0/id",
+            good["group"]["pairs"][0]["uk"]["id"].clone(),
+        ),
+        (
+            "/group/pairs/0/uk/id",
+            good["group"]["pairs"][0]["id"].clone(),
+        ),
+        ("/group/id", good["group"]["pairs"][0]["id"].clone()),
+        (
+            "/group/pairs/0/us/voice_alias",
+            serde_json::json!("en-gb-sonianeural"),
+        ),
+        (
+            "/group/pairs/0/uk/parameters/rate_percent",
+            serde_json::json!(999),
+        ),
+        ("/group/pairs/0/id", serde_json::json!(Uuid::nil())),
+    ] {
+        let mut invalid = paired_input("invalid");
+        *invalid.pointer_mut(path).unwrap() = value;
+        assert_eq!(
+            repo.save_paired_group(actor, 0, serde_json::from_value(invalid).unwrap(), true)
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::InvalidRequestBody
+        );
+        assert_eq!(
+            serde_json::to_value(repo.groups_v3(actor).await.unwrap()).unwrap(),
+            before
+        );
+    }
+    let mut duplicate = paired_input("duplicate");
+    duplicate["group"]["pairs"][1]["id"] = duplicate["group"]["pairs"][0]["id"].clone();
+    assert!(
+        repo.save_paired_group(actor, 0, serde_json::from_value(duplicate).unwrap(), true)
+            .await
+            .is_err()
+    );
+    let mut revoked = good.clone();
+    revoked["base_revision"] = 1.into();
+    sqlx::query("UPDATE admins SET security_version=security_version+1 WHERE id=$1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.save_paired_group(actor, 0, serde_json::from_value(revoked).unwrap(), false)
+            .await
+            .unwrap_err()
+            .code(),
+        ErrorCode::InvalidToken
+    );
+}
+
+#[sqlx::test]
+async fn pairing_migration_preserves_legacy_bytes_and_refuses_lossy_down(pool: PgPool) {
+    const UP: &str =
+        include_str!("../migrations/20261031090000_dubbing_recommendation_pairs.up.sql");
+    const DOWN: &str =
+        include_str!("../migrations/20261031090000_dubbing_recommendation_pairs.down.sql");
+    let mut history = paired_input("migration history");
+    let side = history["group"]["pairs"][0]["uk"].clone();
+    history["group"]["uk"] = serde_json::json!([{ "id":side["id"],"name":"same","voice_alias":side["voice_alias"],"parameters":side["parameters"],"selected":false }]);
+    history["group"]["us"] = serde_json::json!([]);
+    history["group"].as_object_mut().unwrap().remove("pairs");
+    history["group"]["revision"] = 7.into();
+    sqlx::query("UPDATE speech.dubbing_groups SET groups=groups || jsonb_build_array($1::jsonb)")
+        .bind(&history["group"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before: serde_json::Value = sqlx::query_scalar("SELECT groups FROM speech.dubbing_groups")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    sqlx::raw_sql(UP).execute(&pool).await.unwrap();
+    let after: serde_json::Value = sqlx::query_scalar("SELECT groups FROM speech.dubbing_groups")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    sqlx::query("INSERT INTO speech.dubbing_group_pairings(group_id,pairs) VALUES($1,'[]')")
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::raw_sql(DOWN)
+            .execute(&pool)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot discard saved dubbing pair identities")
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM speech.dubbing_group_pairings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
