@@ -160,16 +160,22 @@ impl RefreshTokenRepository {
         .await?;
         Ok(())
     }
-    /// 改密 / 全设备登出用。返回吊销行数
+    /// 全量吊销与轮换使用同一用户行锁，包含等待期间提交的后继。
     pub async fn revoke_all_by_user_id(&self, user_id: Uuid) -> Result<u64, RefreshTokenError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
         let row = sqlx::query!(
             r#"
             UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL
             "#,
             user_id
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(row.rows_affected())
     }
 
