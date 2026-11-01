@@ -356,6 +356,50 @@ impl GeneratedAudioService {
                 .require("words.access")?;
             tx.commit().await.map_err(AppError::internal)?;
         }
+        let native_locale = input.setting.locale.ok_or_else(invalid)?;
+        input.source.validate_locale(native_locale.as_str())?;
+        let source = input.source.canonical()?;
+        // Completed identical requests remain replayable after a voice is disabled.
+        // A projected request needs catalog metadata to recover its effective hash.
+        // Disabled voices may supply that metadata, but never authorize new synthesis.
+        let raw_hash = Sha256::digest(
+            serde_json::to_vec(&serde_json::json!([source, voice_input(&input.setting)]))
+                .map_err(AppError::internal)?,
+        );
+        let replaying = match self.existing(actor, input.request_id, &raw_hash).await {
+            Ok(Some(asset)) => return Ok(GenerateVoiceAudioResponse { asset }),
+            Ok(None) => false,
+            Err(error) if error.code() == ErrorCode::IdempotencyConflict => true,
+            Err(error) => return Err(error),
+        };
+        let voice_unavailable =
+            || AppError::not_found_with_code(ErrorCode::SpeechVoiceNotFound, "音色不可用");
+        let (voice, enabled) = PreviewRepository::new(self.pool.clone())
+            .lookup_voice(&input.setting.voice_id, replaying)
+            .await
+            .map_err(AppError::internal)?
+            .ok_or_else(voice_unavailable)?;
+        input.setting = effective_setting_with_limits(
+            &input.setting,
+            &voice.voice,
+            (voice.min_rate_percent, voice.max_rate_percent),
+            (voice.min_pitch_semitones, voice.max_pitch_semitones),
+        );
+        let mut setting = voice_input(&input.setting);
+        if voice.voice.is_hd_flash() {
+            setting["provider_voice_id"] = voice.voice.provider_voice_id().into();
+            setting["provider_version"] = voice.provider_version.clone().into();
+            setting["builder_version"] = super::model::HD_FLASH_BUILDER_VERSION.into();
+        }
+        let identity = serde_json::json!([source, setting]);
+        let hash =
+            Sha256::digest(serde_json::to_vec(&identity).map_err(AppError::internal)?).to_vec();
+        if let Some(asset) = self.existing(actor, input.request_id, &hash).await? {
+            return Ok(GenerateVoiceAudioResponse { asset });
+        }
+        if !enabled {
+            return Err(voice_unavailable());
+        }
         if let Some(profile) = &input.profile {
             let mut conn = self.pool.acquire().await.map_err(AppError::internal)?;
             super::dubbing::validate_setting(
@@ -368,29 +412,6 @@ impl GeneratedAudioService {
             )
             .await?;
         }
-        let native_locale = input.setting.locale.ok_or_else(invalid)?;
-        input.source.validate_locale(native_locale.as_str())?;
-        let source = input.source.canonical()?;
-        // Completed identical requests remain replayable after a voice is disabled.
-        // Raw controls may differ from the effective identity; verify that identity
-        // below before any generation or writes when the raw hash does not match.
-        let raw_hash = Sha256::digest(
-            serde_json::to_vec(&serde_json::json!([source, voice_input(&input.setting)]))
-                .map_err(AppError::internal)?,
-        );
-        match self.existing(actor, input.request_id, &raw_hash).await {
-            Ok(Some(asset)) => return Ok(GenerateVoiceAudioResponse { asset }),
-            Ok(None) => {}
-            Err(error) if error.code() == ErrorCode::IdempotencyConflict => {}
-            Err(error) => return Err(error),
-        }
-        let voice = PreviewRepository::new(self.pool.clone())
-            .voice_by_alias(&input.setting.voice_id)
-            .await
-            .map_err(AppError::internal)?
-            .ok_or_else(|| {
-                AppError::not_found_with_code(ErrorCode::SpeechVoiceNotFound, "音色不可用")
-            })?;
         if !crate::speech::capabilities::synthesis_available(
             voice.voice.provider_voice_id(),
             voice.voice.locale(),
@@ -400,22 +421,7 @@ impl GeneratedAudioService {
                 "音色或模型能力未经当前资源确认，不能生成",
             ));
         }
-        input.setting = effective_setting_with_limits(
-            &input.setting,
-            &voice.voice,
-            (voice.min_rate_percent, voice.max_rate_percent),
-            (voice.min_pitch_semitones, voice.max_pitch_semitones),
-        );
-        let mut setting = voice_input(&input.setting);
         input.source.validate_model(&voice.voice)?;
-        if voice.voice.is_hd_flash() {
-            setting["provider_voice_id"] = voice.voice.provider_voice_id().into();
-            setting["provider_version"] = voice.provider_version.clone().into();
-            setting["builder_version"] = super::model::HD_FLASH_BUILDER_VERSION.into();
-        }
-        let identity = serde_json::json!([source, setting]);
-        let hash =
-            Sha256::digest(serde_json::to_vec(&identity).map_err(AppError::internal)?).to_vec();
         let locale = native_locale.as_str();
         let pitch = input.setting.pitch_semitones.unwrap_or(0);
         if voice.voice.locale() != locale
@@ -457,9 +463,6 @@ impl GeneratedAudioService {
             AppError::bad_request(ErrorCode::InvalidSpeechPreview, error.to_string())
         })?;
         let effect_hash = effect_hash(&request, &voice.provider_version)?;
-        if let Some(asset) = self.existing(actor, input.request_id, &hash).await? {
-            return Ok(GenerateVoiceAudioResponse { asset });
-        }
         let provider = self.provider.clone().ok_or_else(unavailable)?;
         if provider.provider_name() != request.voice().provider() {
             return Err(unavailable());

@@ -557,6 +557,125 @@ async fn dubbing_migration_roundtrips_empty_schema_but_rejects_saved_local_seman
 }
 
 #[sqlx::test]
+async fn projected_generation_replays_after_voice_disable_without_new_synthesis(pool: PgPool) {
+    let actor = actor(&pool).await;
+    let provider = Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        fail_first: false,
+    });
+    let service = GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(store()));
+    for (flash, with_profile) in [(false, false), (false, true), (true, false), (true, true)] {
+        let request_id = Uuid::now_v7();
+        let version = Uuid::now_v7();
+        let mut original = input(request_id, version, "hello");
+        if flash {
+            let catalog = tsz_rust::speech::CatalogVoice {
+                voice: tsz_rust::speech::Voice::new(
+                    "azure",
+                    "en-US-Tiana:DragonHDFlashLatestNeural",
+                    "en-US",
+                    [],
+                )
+                .unwrap(),
+                gender: "female".into(),
+            };
+            tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+                .sync_voices(std::slice::from_ref(&catalog))
+                .await
+                .unwrap();
+            original.setting.voice_id = catalog.alias();
+            original.setting.locale = tsz_rust::speech::locale::EnglishLocale::parse("en-US");
+            original.setting.rate_percent = 10;
+        } else {
+            original.setting.style = Some("cheerful".into());
+        }
+        sqlx::query("UPDATE speech.voices SET enabled=true,accent=$2 WHERE alias=$1")
+            .bind(&original.setting.voice_id)
+            .bind(if flash { "us" } else { "gb" })
+            .execute(&pool)
+            .await
+            .unwrap();
+        let make = |request_id, text| {
+            let mut request = input(request_id, version, text);
+            request.setting = original.setting.clone();
+            if with_profile {
+                request.profile = Some(
+                    serde_json::from_value(json!({
+                        "voices":[original.setting],
+                        "dubbing":{"mode":"local","area":"word","pool_version":"provider_id_v1"}
+                    }))
+                    .unwrap(),
+                );
+            }
+            request
+        };
+        let asset = service
+            .generate(actor, 0, make(request_id, "hello"))
+            .await
+            .unwrap()
+            .asset;
+        sqlx::query("UPDATE speech.voices SET enabled=false WHERE alias=$1")
+            .bind(&original.setting.voice_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let calls = provider.calls.load(Ordering::SeqCst);
+        assert_eq!(
+            service
+                .generate(actor, 0, make(request_id, "hello"))
+                .await
+                .expect("completed projected request must replay after disable")
+                .asset
+                .id,
+            asset.id
+        );
+        assert_eq!(
+            service
+                .generate(actor, 0, make(request_id, "changed"))
+                .await
+                .unwrap_err()
+                .code(),
+            tsz_rust::error::ErrorCode::IdempotencyConflict
+        );
+        assert_eq!(
+            service
+                .generate(actor, 0, make(Uuid::now_v7(), "hello"))
+                .await
+                .unwrap_err()
+                .code(),
+            tsz_rust::error::ErrorCode::SpeechVoiceNotFound
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='speech.generate'")
+            .bind(actor).execute(&pool).await.unwrap();
+        assert_eq!(
+            service
+                .generate(actor, 0, make(request_id, "hello"))
+                .await
+                .unwrap_err()
+                .code(),
+            tsz_rust::error::ErrorCode::Forbidden
+        );
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.generate',$1)")
+            .bind(actor).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE lexicon.audio_generations SET state='failed' WHERE asset_id=$1")
+            .bind(asset.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .generate(actor, 0, make(request_id, "hello"))
+                .await
+                .unwrap_err()
+                .code(),
+            tsz_rust::error::ErrorCode::SpeechVoiceNotFound
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+    }
+}
+
+#[sqlx::test]
 async fn generated_asset_is_long_lived_idempotent_and_retries_failed_generation(pool: PgPool) {
     let actor = actor(&pool).await;
     let provider = Arc::new(Provider {
