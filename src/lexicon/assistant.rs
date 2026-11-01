@@ -2,7 +2,7 @@
 use axum::{
     Json,
     extract::State,
-    http::header,
+    http::{HeaderMap, header},
     response::{IntoResponse, Response},
 };
 use deadpool_redis::redis::Script;
@@ -16,18 +16,42 @@ use crate::{
     admin::{AdminAuth, permissions},
     api::ApiJson,
     error::{AppError, ErrorCode},
-    lexicon::{
-        dto::{AdminWordListQuery, WordCreationStep},
-        repository::LexiconRepository,
-    },
+    lexicon::dto::{AdminWordListQuery, WordCreationStep},
     state::AppState,
 };
 
-const MAX_CALLS: u32 = 4;
+// Prepared materials answer most questions in one call; tools remain for other words.
+const MAX_CALLS: u32 = 3;
 const MAX_TOOLS: usize = 6;
 #[path = "assistant_candidates.rs"]
 pub mod candidates;
-const RULES: &str = "填写规则 v1：基础信息用于确认词条与词性；词形与发音按当前词性配置填写，英美无差异时共用，有证据才区分。不同拼写应有各自的词形内容，不能把原形内容直接共用给不同拼写的复数等变体。实际发音采用平台天生之®通用英语音标字母表，不等同于 IPA；缺少规范依据不能编造转换或用 IPA 直接替代。词义与例句按具体词性、词义组织，中文/英文释义应指向同一义项，例句应体现目标义项，CEFR 是教学等级建议，不是词典事实。语法结构说明具体用法，细分词性以当前目录为准。当前编辑可能未保存；完成情况不能代替服务端发布校验，也不能据此把后续步骤尚未填写的内容判成当前步骤错误。词频没有可信来源时不能猜测。AI 只提供建议，不保存或发布。";
+#[path = "assistant_materials.rs"]
+mod materials;
+/// Filling rules live in tsz-agent's system prompt; only older Agents still ask for them.
+const RULES_NOTICE: &str = "填写规则由 Agent 系统说明提供。";
+const OFFERED_TOOLS: [&str; 4] = [
+    "check_draft",
+    "find_entries",
+    "read_lexicon",
+    "lookup_dictionary",
+];
+const EXTENSIONS_HEADER: &str = "x-tsz-assistant-version";
+const MAX_DRAFT_BYTES: usize = 1_500_000;
+/// Agent rejects longer message contents; leave room for history and JSON escaping.
+const MAX_USER_MESSAGE_CHARS: usize = 45_000;
+const AUTHORIZATION_RECHECK: Duration = Duration::from_secs(3);
+const SAVED_DURING_ANSWER: &str =
+    "\n\n（提示：回答期间词条已保存过，以上内容基于提问时的版本，请按最新内容核对。）";
+
+/// Structured unsaved editor content, in the same shapes the step save endpoints accept.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LexiconAssistantDraft {
+    #[schema(value_type = crate::lexicon::dto::FormsStepRepresentationV3)]
+    pub forms: Value,
+    #[schema(value_type = crate::lexicon::dto::DraftMeaningsStepContentWritableV3)]
+    pub meanings: Value,
+}
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +83,12 @@ pub struct LexiconAssistantInput {
     pub question: String,
     #[schema(max_items = 6)]
     pub history: Vec<LexiconAssistantHistory>,
+    /// Newer editors send structured content; the server validates and projects it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub draft: Option<LexiconAssistantDraft>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub extensions: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
@@ -102,12 +132,32 @@ pub struct LexiconAssistantResponse {
     pub sources: Vec<LexiconAssistantSource>,
     pub usage: LexiconAssistantUsage,
     pub requires_human_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_refs: Option<Vec<LexiconAssistantFieldRef>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LexiconAssistantFieldRef {
+    pub path: String,
+    pub label: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LexiconAssistantFeatureSet {
+    pub structured_draft: bool,
+    pub history_summary: bool,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LexiconAssistantCapability {
     pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<LexiconAssistantFeatureSet>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -176,9 +226,19 @@ pub async fn ask_stream(
                 },
             )
             .await?;
-            let output = run(&state, &auth, &input, Some(&sender)).await?;
+            let mut output = run(&state, &auth, &input, Some(&sender)).await?;
             authorize(&state, &auth).await?;
-            check_revision(&state, &input).await?;
+            // A save while answering does not invalidate advice bound to the asked snapshot.
+            if revision_changed(&state, &input).await? {
+                emit(
+                    Some(&sender),
+                    LexiconAssistantEvent::Delta {
+                        text: SAVED_DURING_ANSWER.into(),
+                    },
+                )
+                .await?;
+                output.answer.push_str(SAVED_DURING_ANSWER);
+            }
             emit(
                 Some(&sender),
                 LexiconAssistantEvent::Complete {
@@ -221,7 +281,6 @@ pub async fn ask_stream(
 async fn agent_stream_request(
     state: &AppState,
     auth: &AdminAuth,
-    input: &LexiconAssistantInput,
     body: Value,
     sender: &tokio::sync::mpsc::Sender<LexiconAssistantEvent>,
 ) -> Result<ModelStep, AppError> {
@@ -246,6 +305,7 @@ async fn agent_stream_request(
     let mut total = 0;
     let mut complete = None;
     let mut text = String::new();
+    let mut authorized_at = std::time::Instant::now();
     while let Some(chunk) = response.chunk().await.map_err(|_| unavailable())? {
         total += chunk.len();
         if total > 100000 {
@@ -259,8 +319,12 @@ async fn agent_stream_request(
             }
             match serde_json::from_slice::<ModelEvent>(&line).map_err(|_| unavailable())? {
                 ModelEvent::Delta { text: delta } => {
-                    authorize(state, auth).await?;
-                    check_revision(state, input).await?;
+                    // Revocation still stops delivery within a few seconds without a
+                    // permission reload for every 16-character delta.
+                    if authorized_at.elapsed() >= AUTHORIZATION_RECHECK {
+                        authorize(state, auth).await?;
+                        authorized_at = std::time::Instant::now();
+                    }
                     text.push_str(&delta);
                     if text.chars().count() > 16000 {
                         return Err(unavailable());
@@ -297,6 +361,8 @@ enum ToolName {
     SearchLexicon,
     ReadLexicon,
     LookupDictionary,
+    FindEntries,
+    CheckDraft,
     ReadFillingRules,
 }
 
@@ -319,6 +385,11 @@ struct QueryArgs {
 #[serde(deny_unknown_fields)]
 struct EntryArgs {
     entry_id: Uuid,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpellingArgs {
+    spelling: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -347,6 +418,11 @@ fn validate(input: &LexiconAssistantInput) -> Result<(), AppError> {
     {
         return Err(invalid("问题或上下文过长，请缩小问题范围后重试"));
     }
+    if let Some(draft) = &input.draft
+        && serde_json::to_vec(draft).map_or(true, |bytes| bytes.len() > MAX_DRAFT_BYTES)
+    {
+        return Err(invalid("当前编辑内容过大，请缩小问题范围后重试"));
+    }
     Ok(())
 }
 
@@ -355,6 +431,7 @@ fn validate(input: &LexiconAssistantInput) -> Result<(), AppError> {
 pub async fn capability(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     permissions::load(&state, &auth)
         .await?
@@ -363,14 +440,21 @@ pub async fn capability(
         agent_request(&state, "capability", None)
             .await
             .ok()
-            .and_then(|v| serde_json::from_value::<LexiconAssistantCapability>(v).ok())
-            .is_some_and(|v| v.available)
+            .and_then(|v| v["available"].as_bool())
+            .unwrap_or(false)
     } else {
         false
     };
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(LexiconAssistantCapability { available }),
+        Json(LexiconAssistantCapability {
+            available,
+            features: (headers.get(EXTENSIONS_HEADER).and_then(|v| v.to_str().ok()) == Some("2"))
+                .then_some(LexiconAssistantFeatureSet {
+                    structured_draft: true,
+                    history_summary: true,
+                }),
+        }),
     )
         .into_response())
 }
@@ -404,9 +488,11 @@ pub async fn ask(
         let _ = Script::new("if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) end return 0")
             .key(&lock).arg(&receipt).invoke_async::<i64>(&mut conn).await;
     }
-    let output = result?;
+    let mut output = result?;
     authorize(&state, &auth).await?;
-    check_revision(&state, &input).await?;
+    if revision_changed(&state, &input).await? {
+        output.answer.push_str(SAVED_DURING_ANSWER);
+    }
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(output)).into_response())
 }
 
@@ -439,6 +525,17 @@ async fn check_revision(state: &AppState, input: &LexiconAssistantInput) -> Resu
         ));
     }
     Ok(())
+}
+
+async fn revision_changed(
+    state: &AppState,
+    input: &LexiconAssistantInput,
+) -> Result<bool, AppError> {
+    match check_revision(state, input).await {
+        Ok(()) => Ok(false),
+        Err(error) if error.status_code() == axum::http::StatusCode::CONFLICT => Ok(true),
+        Err(error) => Err(error),
+    }
 }
 
 async fn reserve(state: &AppState, key: &str, receipt: &str) -> Result<(), AppError> {
@@ -486,6 +583,9 @@ async fn agent_request(
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_string());
     }
+    if operation == "capability" {
+        request = request.header(EXTENSIONS_HEADER, "2");
+    }
     let mut response = request
         .bearer_auth(&config.outbound_token)
         .timeout(Duration::from_secs(36))
@@ -516,9 +616,31 @@ async fn run(
         .iter()
         .map(|m| json!({"role":m.role,"content":m.content}))
         .collect();
-    messages.push(json!({"role":"user","content":json!({"entry_id":input.entry_id,"base_revision":input.base_revision,"step":input.step,
-        "untrusted_unsaved_content":input.local_content,"context_truncated":input.context_truncated,"question":input.question}).to_string()}));
     let mut sources: Vec<LexiconAssistantSource> = Vec::new();
+    let mut tool_summaries = Vec::<Value>::new();
+    let prepared = prepare(state, input, &mut sources).await?;
+    let prepared_value: Value = serde_json::from_str(&prepared).map_err(|_| unavailable())?;
+    let agent_capability = agent_request(state, "capability", None).await.ok();
+    let supports_tools = agent_capability
+        .as_ref()
+        .and_then(|v| v["tool_selection"].as_bool())
+        .unwrap_or(false);
+    if let Some(version) = agent_capability
+        .as_ref()
+        .and_then(|v| v["rules_version"].as_str())
+    {
+        add_source(
+            &mut sources,
+            LexiconAssistantSource {
+                kind: AssistantSourceKind::FillingRules,
+                label: "填写规则".into(),
+                entry_id: None,
+                version: Some(version.into()),
+                truncated: false,
+            },
+        );
+    }
+    messages.push(json!({"role":"user","content":prepared}));
     let mut usage = LexiconAssistantUsage {
         model: String::new(),
         model_calls: 0,
@@ -537,9 +659,15 @@ async fn run(
             },
         )
         .await?;
-        let body = json!({"messages":messages,"allow_tools":allow_tools});
+        let mut body = json!({"messages":messages,"allow_tools":allow_tools});
+        if supports_tools {
+            body["tools"] = json!(OFFERED_TOOLS);
+        }
+        if body.to_string().len() > 390_000 {
+            return Err(invalid("查询资料过多，请缩小问题范围后重试"));
+        }
         let step = if let Some(sender) = events {
-            agent_stream_request(state, auth, input, body, sender).await?
+            agent_stream_request(state, auth, body, sender).await?
         } else {
             serde_json::from_value(agent_request(state, "step", Some(body)).await?)
                 .map_err(|_| unavailable())?
@@ -579,6 +707,21 @@ async fn run(
                 sources,
                 usage,
                 requires_human_review: true,
+                context_summary: input.extensions.then(|| {
+                    let mut summary = prepared_value["server_materials"].clone();
+                    summary["catalog"] = Value::Null;
+                    summary["tool_results"] = json!(tool_summaries);
+                    let (summary, _) = bounded_projection_with(summary, 2800);
+                    summary.to_string()
+                }),
+                field_refs: input.extensions.then(|| {
+                    prepared_value["server_materials"]["validation"]["result"]["issues"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|i| serde_json::from_value(i["location"].clone()).ok())
+                        .collect()
+                }),
             });
         }
         if !allow_tools || step.tool_calls.len() + usage.tool_calls as usize > MAX_TOOLS {
@@ -600,6 +743,8 @@ async fn run(
                 ToolName::SearchLexicon => "正在搜索智能词库…",
                 ToolName::ReadLexicon => "正在读取词条内容…",
                 ToolName::LookupDictionary => "正在查询内置词典…",
+                ToolName::FindEntries => "正在查找同拼写词条…",
+                ToolName::CheckDraft => "正在核对本次提问的草稿…",
                 ToolName::ReadFillingRules => "正在核对填写规则…",
             };
             emit(events, LexiconAssistantEvent::Reset).await?;
@@ -610,23 +755,217 @@ async fn run(
                 },
             )
             .await?;
-            let (data, source) = execute_tool(state, auth, call).await?;
+            let (data, source) = if matches!(call.name, ToolName::CheckDraft) {
+                let _: EmptyArgs =
+                    serde_json::from_str(&call.arguments).map_err(|_| unavailable())?;
+                (
+                    prepared_value["server_materials"]["validation"].clone(),
+                    LexiconAssistantSource {
+                        kind: AssistantSourceKind::FillingRules,
+                        label: "当前草稿校验".into(),
+                        entry_id: None,
+                        version: None,
+                        truncated: false,
+                    },
+                )
+            } else {
+                execute_tool(state, auth, call).await?
+            };
             usage.tool_calls += 1;
             let source_label = source.label.clone();
-            if let Some(existing) = sources.iter_mut().find(|existing| {
-                existing.kind == source.kind
-                    && existing.label == source.label
-                    && existing.entry_id == source.entry_id
-                    && existing.version == source.version
-            }) {
-                existing.truncated |= source.truncated;
-            } else {
-                sources.push(source);
-            }
+            let (summary, _) = bounded_projection_with(data.clone(), 1000);
+            tool_summaries.push(json!({"source":source_label,"data":summary}));
+            add_source(&mut sources, source);
             messages.push(json!({"role":"tool","content":json!({"source_label":source_label,"untrusted_data":data}).to_string(),"tool_call_id":call.id}));
         }
     }
     Err(unavailable())
+}
+
+fn add_source(sources: &mut Vec<LexiconAssistantSource>, source: LexiconAssistantSource) {
+    if let Some(existing) = sources.iter_mut().find(|existing| {
+        existing.kind == source.kind
+            && existing.label == source.label
+            && existing.entry_id == source.entry_id
+            && existing.version == source.version
+    }) {
+        existing.truncated |= source.truncated;
+    } else {
+        sources.push(source);
+    }
+}
+
+async fn catalog(state: &AppState) -> Result<crate::catalog::model::CatalogResponse, AppError> {
+    crate::catalog::service::CatalogService::new(
+        crate::catalog::repository::CatalogRepository::new(state.pool.clone()),
+    )
+    .catalog()
+    .await
+    .map_err(|_| unavailable())
+}
+
+/// Materials the model should not have to ask for: publish-rule issues for the asked
+/// snapshot, the headword's built-in dictionary record, same-spelling entries and the
+/// part-of-speech catalog. Each part is bounded; a failed lookup is reported, not fatal.
+async fn prepare(
+    state: &AppState,
+    input: &LexiconAssistantInput,
+    sources: &mut Vec<LexiconAssistantSource>,
+) -> Result<String, AppError> {
+    let saved = super::handler::service(state)
+        .get_v3(input.entry_id)
+        .await
+        .map_err(super::handler::map_error)?;
+    let draft = input
+        .draft
+        .as_ref()
+        .and_then(|draft| materials::parse_draft(&draft.forms, &draft.meanings));
+    if input.draft.is_some() && draft.is_none() {
+        return Err(invalid("当前编辑结构无效，请核对草稿后重试"));
+    }
+    let snapshot = materials::Draft {
+        forms: saved.forms.clone(),
+        meanings: saved.meanings.clone(),
+    };
+    let current = draft.as_ref().unwrap_or(&snapshot);
+    let mut headwords = materials::headwords(&current.forms);
+    if headwords.is_empty() {
+        let initial: Option<Value> = sqlx::query_scalar(
+            "SELECT initial_headwords FROM lexicon.v3_entry_state WHERE entry_id=$1",
+        )
+        .bind(input.entry_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::internal)?
+        .flatten();
+        if let Some(initial) = initial {
+            for key in ["common", "uk", "us"] {
+                if let Some(spelling) = initial[key].as_str()
+                    && !headwords.iter().any(|s| s == spelling)
+                {
+                    headwords.push(spelling.into());
+                }
+            }
+        }
+    }
+    let headword = headwords.join(" / ");
+    let catalog_result = catalog(state).await.ok();
+    let scope = if draft.is_some() {
+        "当前未保存编辑"
+    } else {
+        "已保存版本（未包含未保存编辑）"
+    };
+    let validation = if let Some(catalog) = &catalog_result {
+        let parents = catalog
+            .items
+            .iter()
+            .flat_map(|p| p.sub_parts.iter().map(|s| (s.code.clone(), p.code.clone())))
+            .collect();
+        materials::check(input.entry_id, current, &parents)
+    } else {
+        json!({"available":false,"note":"词性目录未取到，无法完成草稿校验"})
+    };
+    let mut dictionaries = Vec::new();
+    let mut same_spellings = Vec::new();
+    for headword in headwords.iter().take(8) {
+        let dictionary = match materials::dictionary(state, headword).await {
+            Ok((data, version)) => {
+                let (data, truncated) = bounded_projection_with(data, 4000);
+                add_source(
+                    sources,
+                    LexiconAssistantSource {
+                        kind: AssistantSourceKind::BuiltinDictionary,
+                        label: format!("内置词典：{headword}"),
+                        entry_id: None,
+                        version,
+                        truncated,
+                    },
+                );
+                data
+            }
+            Err(_) => json!({"available": false}),
+        };
+        let same_spelling =
+            match materials::same_spelling(state, headword, Some(input.entry_id)).await {
+                Ok(data) => {
+                    add_source(
+                        sources,
+                        LexiconAssistantSource {
+                            kind: AssistantSourceKind::SmartLexicon,
+                            label: format!("库内同拼写：{headword}"),
+                            entry_id: None,
+                            version: None,
+                            truncated: data["limited"].as_bool().unwrap_or(false),
+                        },
+                    );
+                    data
+                }
+                Err(_) => json!({"available": false}),
+            };
+        dictionaries.push(json!({"spelling":headword,"data":dictionary}));
+        same_spellings.push(same_spelling);
+    }
+    let dictionary = json!(dictionaries);
+    let same_spelling = json!(same_spellings);
+    let catalog = match catalog_result {
+        Some(catalog) => {
+            let version = catalog.catalog_version.to_string();
+            let parts:Vec<Value>=catalog.items.iter().filter(|p|current.forms.pos.is_empty() || current.forms.pos.iter().any(|pos|pos.pos==p.code)).map(|p|json!({"code":p.code,"name":p.name_zh,"allowed_form_types":p.allowed_form_types,"sub_parts":p.sub_parts.iter().map(|s|json!({"code":s.code,"name":s.name_zh})).collect::<Vec<_>>()})).collect();
+            let available_pos: Vec<Value> = catalog
+                .items
+                .iter()
+                .filter(|part| {
+                    serde_json::to_value(part.kind).ok() == serde_json::to_value(saved.kind).ok()
+                })
+                .map(|part| json!({"code":part.code,"name":part.name_zh}))
+                .collect();
+            let data = json!({"scope":"current_pos_details","note":"items 仅详列当前草稿已有词性；可新增词性以 available_pos 为准，不能把 items 当作完整目录", "available_pos":available_pos,"items":parts});
+            let truncated = false;
+            add_source(
+                sources,
+                LexiconAssistantSource {
+                    kind: AssistantSourceKind::FillingRules,
+                    label: "发布校验规则与词性配置".into(),
+                    entry_id: None,
+                    version: Some(version),
+                    truncated,
+                },
+            );
+            data
+        }
+        None => json!({"available": false}),
+    };
+    let mut budget = 18_000;
+    loop {
+        let content = match &draft {
+            Some(draft) => materials::draft_view(draft, input.step, budget),
+            None => Value::String(input.local_content.clone()),
+        };
+        let message = json!({
+            "entry_id": input.entry_id,
+            "base_revision": input.base_revision,
+            "headword": headword,
+            "step": input.step,
+            "question": input.question,
+            "server_materials": {
+                "validation": { "scope": scope, "result": validation,
+                    "note": "与发布校验相同的结构规则；引用其他词条的检查在发布时由系统完成" },
+                "builtin_dictionary": dictionary,
+                "same_spelling_entries": same_spelling,
+                "catalog": catalog,
+            },
+            "untrusted_unsaved_content": content,
+            "context_truncated": input.context_truncated,
+        })
+        .to_string();
+        if message.chars().count() <= MAX_USER_MESSAGE_CHARS {
+            return Ok(message);
+        }
+        if draft.is_none() || budget < 2_000 {
+            return Err(invalid("当前编辑内容过多，请缩小问题范围后重试"));
+        }
+        budget /= 2;
+    }
 }
 
 fn query_argument(arguments: &str) -> Result<String, AppError> {
@@ -670,7 +1009,18 @@ async fn execute_tool(
                 .await
                 .map_err(super::handler::map_error)?;
             (
-                json!({"entry_id":word.id,"label":word.presentation.label,"revision":word.revision,"status":word.status,"forms":word.forms,"meanings":word.meanings}),
+                {
+                    let draft = materials::Draft {
+                        forms: word.forms,
+                        meanings: word.meanings,
+                    };
+                    let mut data = materials::draft_view(&draft, WordCreationStep::Meanings, 10000);
+                    data["entry_id"] = json!(word.id);
+                    data["label"] = json!(word.presentation.label);
+                    data["revision"] = json!(word.revision);
+                    data["status"] = json!(word.status);
+                    data
+                },
                 AssistantSourceKind::SmartLexicon,
                 format!("智能词库草稿：{}", word.presentation.label),
                 Some(word.id),
@@ -679,50 +1029,50 @@ async fn execute_tool(
         }
         ToolName::LookupDictionary => {
             let q = query_argument(&call.arguments)?;
-            let normalized = super::normalization::normalize_headword(&q)
-                .map_err(|_| unavailable())?
-                .key;
-            let repo = LexiconRepository::new(state.pool.clone());
-            let term = repo
-                .dictionary_term(&normalized)
-                .await
-                .map_err(AppError::internal)?;
-            let contents = repo
-                .dictionary_contents_for_terms(&[normalized])
-                .await
-                .map_err(AppError::internal)?;
-            let version = contents
-                .first()
-                .map(|c| c.provider_version.clone())
-                .or_else(|| term.as_ref().map(|t| t.provider_version.clone()));
-            let records: Vec<Value> = contents.iter().take(12).map(|c| json!({"pos":c.pos,"senses":c.senses,"forms":c.forms,"sounds":c.sounds,"provider":c.provider_name,"version":c.provider_version})).collect();
-            let headword = term.as_ref().map(|t| json!({"term":t.term,"pos":t.pos,"region":t.region_family,"provider":t.provider_name,"version":t.provider_version}));
+            let (data, version) = materials::dictionary(state, &q).await?;
             (
-                json!({"headword":headword,"contents":records,"content_available":!contents.is_empty(),"records_total":contents.len(),"records_limited":contents.len()>12}),
+                data,
                 AssistantSourceKind::BuiltinDictionary,
                 format!("内置词典：{q}"),
                 None,
                 version,
             )
         }
+        ToolName::FindEntries => {
+            let args: SpellingArgs =
+                serde_json::from_str(&call.arguments).map_err(|_| unavailable())?;
+            let spelling = args.spelling.trim();
+            if spelling.is_empty() || spelling.chars().count() > 100 || spelling.contains('\0') {
+                return Err(unavailable());
+            }
+            (
+                materials::same_spelling(state, spelling, None).await?,
+                AssistantSourceKind::SmartLexicon,
+                format!("库内同拼写：{spelling}"),
+                None,
+                None,
+            )
+        }
+        ToolName::CheckDraft => return Err(unavailable()),
         ToolName::ReadFillingRules => {
             let _: EmptyArgs = serde_json::from_str(&call.arguments).map_err(|_| unavailable())?;
-            let catalog = crate::catalog::service::CatalogService::new(
-                crate::catalog::repository::CatalogRepository::new(state.pool.clone()),
-            )
-            .catalog()
-            .await
-            .map_err(|_| unavailable())?;
+            let catalog = catalog(state).await?;
+            let version = catalog.catalog_version.to_string();
             (
-                json!({"rules":RULES,"catalog":catalog}),
+                json!({"rules":RULES_NOTICE,"catalog":catalog}),
                 AssistantSourceKind::FillingRules,
-                "平台填写规则与词性配置".into(),
+                "词性配置".into(),
                 None,
-                Some("v1".into()),
+                Some(version),
             )
         }
     };
-    let (data, truncated) = bounded_projection(data);
+    let (data, truncated) = if matches!(call.name, ToolName::ReadLexicon) {
+        let truncated = data["omissions"]["total"].as_u64().unwrap_or(0) > 0;
+        (data, truncated)
+    } else {
+        bounded_projection(data)
+    };
     Ok((
         json!({"content":data,"truncated":truncated}),
         LexiconAssistantSource {
@@ -737,6 +1087,10 @@ async fn execute_tool(
 
 // Strip non-content infrastructure fields, bound every branch, and tell the model about omissions.
 fn bounded_projection(value: Value) -> (Value, bool) {
+    bounded_projection_with(value, 12000)
+}
+
+fn bounded_projection_with(value: Value, budget: usize) -> (Value, bool) {
     fn visit(value: Value, remaining: &mut usize, truncated: &mut bool, depth: u32) -> Value {
         if *remaining == 0 || depth > 24 {
             *truncated = true;
@@ -788,7 +1142,7 @@ fn bounded_projection(value: Value) -> (Value, bool) {
         }
     }
     let mut truncated = false;
-    let output = visit(value, &mut 12000, &mut truncated, 0);
+    let output = visit(value, &mut budget.clone(), &mut truncated, 0);
     (output, truncated)
 }
 

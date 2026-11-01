@@ -2,7 +2,7 @@
 use axum::{
     Json,
     extract::State,
-    http::header,
+    http::{HeaderMap, header},
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, NaiveDate, Utc};
@@ -25,6 +25,16 @@ pub struct AiLedgerQuery {
     #[param(minimum = 1, maximum = 100)]
     pub page_size: Option<u32>,
     pub run_id: Option<Uuid>,
+    pub purpose: Option<AiCallPurpose>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiCallPurpose {
+    QuestionGeneration,
+    Assistant,
+    FormCandidates,
+    ReferenceExtract,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -32,6 +42,8 @@ pub struct AiLedgerQuery {
 pub enum AiCallPhase {
     Generate,
     Review,
+    Assistant,
+    FormCandidates,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -58,8 +70,12 @@ pub struct AiCallMetrics {
 #[serde(deny_unknown_fields)]
 pub struct AiLedgerItem {
     pub call_id: Uuid,
-    pub run_id: Uuid,
-    pub external_request_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<AiCallPurpose>,
+    #[schema(required = true)]
+    pub run_id: Option<Uuid>,
+    #[schema(required = true)]
+    pub external_request_id: Option<Uuid>,
     pub model: String,
     pub created_at: DateTime<Utc>,
     #[schema(required = true)]
@@ -171,6 +187,13 @@ pub struct AiCostPeriod {
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct AiPurposeCosts {
+    pub purpose: AiCallPurpose,
+    pub total: AiCostTotals,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AiCostOverview {
     pub generated_at: DateTime<Utc>,
     pub timezone: AiCostTimezone,
@@ -181,6 +204,8 @@ pub struct AiCostOverview {
     pub today: AiCostPeriod,
     pub week: AiCostPeriod,
     pub month: AiCostPeriod,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_purpose: Option<Vec<AiPurposeCosts>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -189,6 +214,13 @@ pub struct AiCostLedgerPage {
     pub ledger: AiLedgerPage,
     pub costs: Vec<AiCallCost>,
     pub cost_summary: AiCostTotals,
+}
+
+fn extended(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-tsz-ledger-version")
+        .and_then(|v| v.to_str().ok())
+        == Some("2")
 }
 
 fn unavailable() -> AppError {
@@ -213,10 +245,11 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiQuery(query): ApiQuery<AiLedgerQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     require_super_admin(&state, &auth).await?;
     let (page, page_size) = pagination(&query)?;
-    let bytes = read_agent(&state, "/v1/model-calls", Some(&query)).await?;
+    let bytes = read_agent(&state, "/v1/model-calls", Some(&query), extended(&headers)).await?;
     let result: AiLedgerPage = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
     if result.page != page
         || result.page_size != page_size
@@ -243,6 +276,7 @@ async fn read_agent(
     state: &AppState,
     path: &str,
     query: Option<&AiLedgerQuery>,
+    extended: bool,
 ) -> Result<Vec<u8>, AppError> {
     let config = state.vocabulary_agent.as_ref().ok_or_else(unavailable)?;
     let mut url =
@@ -255,10 +289,15 @@ async fn read_agent(
         if let Some(id) = query.run_id {
             params.append_pair("run_id", &id.to_string());
         }
+        if extended && let Some(purpose) = query.purpose {
+            let value = serde_json::to_value(purpose).map_err(|_| unavailable())?;
+            params.append_pair("purpose", value.as_str().ok_or_else(unavailable)?);
+        }
     }
     let mut response = config
         .client
         .get(url)
+        .header("x-tsz-ledger-version", if extended { "2" } else { "1" })
         .bearer_auth(&config.outbound_token)
         .send()
         .await
@@ -283,10 +322,11 @@ pub async fn costs(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiQuery(query): ApiQuery<AiLedgerQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     require_super_admin(&state, &auth).await?;
     let (page, page_size) = pagination(&query)?;
-    let bytes = read_agent(&state, "/v1/model-costs", Some(&query)).await?;
+    let bytes = read_agent(&state, "/v1/model-costs", Some(&query), extended(&headers)).await?;
     let result: AiCostLedgerPage = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
     if result.ledger.page != page
         || result.ledger.page_size != page_size
@@ -303,9 +343,10 @@ pub async fn costs(
 pub async fn cost_overview(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     require_super_admin(&state, &auth).await?;
-    let bytes = read_agent(&state, "/v1/model-costs/overview", None).await?;
+    let bytes = read_agent(&state, "/v1/model-costs/overview", None, extended(&headers)).await?;
     let result: AiCostOverview = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response())
 }

@@ -9,6 +9,7 @@ struct ModelStub {
     replies: Arc<AsyncMutex<VecDeque<Value>>>,
     inputs: Arc<AsyncMutex<Vec<Value>>>,
     revoke: Arc<AsyncMutex<Option<Uuid>>>,
+    bump: Arc<AsyncMutex<Option<Uuid>>>,
     hold: Arc<std::sync::atomic::AtomicBool>,
     gate: Arc<tokio::sync::Notify>,
     pool: PgPool,
@@ -26,6 +27,13 @@ async fn model_step(
     stub.inputs.lock().await.push(body);
     if let Some(id) = stub.revoke.lock().await.take() {
         sqlx::query("UPDATE admins SET status='disabled' WHERE id=$1")
+            .bind(id)
+            .execute(&stub.pool)
+            .await
+            .unwrap();
+    }
+    if let Some(id) = stub.bump.lock().await.take() {
+        sqlx::query("UPDATE lexicon.entries SET revision=revision+1 WHERE id=$1")
             .bind(id)
             .execute(&stub.pool)
             .await
@@ -103,6 +111,7 @@ async fn setup(
         replies: Arc::new(AsyncMutex::new(VecDeque::new())),
         inputs: Arc::new(AsyncMutex::new(Vec::new())),
         revoke: Arc::new(AsyncMutex::new(None)),
+        bump: Arc::new(AsyncMutex::new(None)),
         hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         gate: Arc::new(tokio::sync::Notify::new()),
         pool,
@@ -110,6 +119,12 @@ async fn setup(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let app = Router::new()
+        .route(
+            "/v1/lexicon-assistant/capability",
+            axum::routing::get(|| async {
+                Json(json!({"available":true,"tool_selection":true,"rules_version":"fixture-v2"}))
+            }),
+        )
         .route("/v1/lexicon-assistant/step", post(model_step))
         .route("/v1/lexicon-assistant/form-candidates", post(model_step))
         .route("/v1/lexicon-assistant/step/stream", post(model_stream))
@@ -159,12 +174,18 @@ async fn assistant_stream_delivers_delta_before_upstream_completion(pool: PgPool
         received.push_str(std::str::from_utf8(&bytes).unwrap());
     }
     assert!(!received.contains("\"event\":\"complete\""));
+    sqlx::query("UPDATE lexicon.entries SET revision=revision+1 WHERE id=$1")
+        .bind(entry)
+        .execute(&stub.pool)
+        .await
+        .unwrap();
     stub.gate.notify_one();
     while let Some(bytes) = stream.next().await {
         received.push_str(std::str::from_utf8(&bytes.unwrap()).unwrap());
     }
     assert!(received.contains("\"event\":\"complete\""));
     assert!(received.contains("\"requires_human_review\":true"));
+    assert!(received.contains("回答期间词条已保存过"));
     server.abort();
 }
 
@@ -204,8 +225,18 @@ async fn assistant_queries_both_sources_and_rules_without_changing_business_data
     assert_eq!(result["requires_human_review"], true);
     assert_eq!(result["usage"]["model_calls"], 3);
     assert_eq!(result["usage"]["tool_calls"], 4);
-    assert_eq!(result["sources"][1]["version"], "assistant-fixture-v1");
-    assert_eq!(result["sources"][2]["entry_id"], entry.to_string());
+    let sources = result["sources"].as_array().unwrap();
+    assert!(
+        sources
+            .iter()
+            .any(|source| source["kind"] == "builtin_dictionary"
+                && source["version"] == "assistant-fixture-v1")
+    );
+    assert!(
+        sources
+            .iter()
+            .any(|source| source["entry_id"] == entry.to_string())
+    );
     let inputs = stub.inputs.lock().await;
     let transmitted = inputs.last().unwrap().to_string();
     assert!(transmitted.contains("financial institution"));
@@ -259,7 +290,7 @@ async fn assistant_rejects_write_tools_and_stale_snapshots_without_retry(pool: P
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(stub.inputs.lock().await.len(), 1);
-    stub.replies.lock().await.extend((0..4).map(|index| {
+    stub.replies.lock().await.extend((0..3).map(|index| {
         reply(
             "",
             json!([
@@ -281,7 +312,7 @@ async fn assistant_rejects_write_tools_and_stale_snapshots_without_retry(pool: P
         StatusCode::SERVICE_UNAVAILABLE
     );
     let inputs = stub.inputs.lock().await;
-    assert_eq!(inputs.len(), 5);
+    assert_eq!(inputs.len(), 4);
     assert_eq!(inputs.last().unwrap()["allow_tools"], false);
     server.abort();
 }
@@ -422,5 +453,238 @@ async fn candidates_reject_nonowner_stale_catalog_and_invalid_model_output(pool:
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(stub.inputs.lock().await.len(), 1);
+    server.abort();
+}
+
+fn user_message(body: &Value) -> Value {
+    let messages = body["messages"].as_array().unwrap();
+    let content = messages
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    serde_json::from_str(content).unwrap()
+}
+
+#[sqlx::test]
+async fn prepared_materials_validate_the_unsaved_draft_without_tool_rounds(pool: PgPool) {
+    let (state, bearer, entry, stub, server) = setup(pool).await;
+    let (status, saved) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let word = &saved["word"];
+    stub.replies
+        .lock()
+        .await
+        .push_back(reply("按校验结果先补齐词性。", json!([])));
+    let mut body = input(entry);
+    body["draft"] = json!({"forms": word["forms"], "meanings": word["meanings"]});
+    body["extensions"] = json!(true);
+    body["draft"]["meanings"]["sense_groups"] =
+        json!([{ "id":Uuid::now_v7(),"name_zh":"未保存区间","name_en":"unsaved" }]);
+    let (status, result) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/assistant"),
+        &bearer,
+        None,
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["usage"]["model_calls"], 1);
+    assert_eq!(result["usage"]["tool_calls"], 0);
+    assert!(result["context_summary"].is_string());
+    assert!(!result["field_refs"].as_array().unwrap().is_empty());
+    let inputs = stub.inputs.lock().await;
+    assert_eq!(
+        inputs[0]["tools"],
+        json!([
+            "check_draft",
+            "find_entries",
+            "read_lexicon",
+            "lookup_dictionary"
+        ])
+    );
+    let message = user_message(&inputs[0]);
+    assert_eq!(message["headword"], "bank");
+    let materials = &message["server_materials"];
+    assert_eq!(materials["validation"]["scope"], "当前未保存编辑");
+    assert!(
+        !materials["validation"]["result"]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["code"] == "sense_group_required")
+    );
+    assert!(
+        message["untrusted_unsaved_content"]
+            .to_string()
+            .contains("未保存区间")
+    );
+    let persisted: Value = sqlx::query_scalar(
+        "SELECT meanings FROM lexicon.entry_editor_projection WHERE entry_id=$1",
+    )
+    .bind(entry)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(!persisted.to_string().contains("未保存区间"));
+    assert!(
+        materials["validation"]["result"]["issue_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        materials["builtin_dictionary"]
+            .to_string()
+            .contains("financial institution")
+    );
+    assert_eq!(materials["catalog"]["scope"], "current_pos_details");
+    assert!(
+        materials["catalog"]["available_pos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["code"] == "verb")
+    );
+    assert!(
+        !materials["catalog"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["code"] == "verb")
+    );
+    assert!(message["untrusted_unsaved_content"]["forms"].is_object());
+    assert!(
+        !message["untrusted_unsaved_content"]
+            .to_string()
+            .contains("\"id\":")
+    );
+    for pos in word["forms"]["pos"].as_array().into_iter().flatten() {
+        assert!(
+            !message["untrusted_unsaved_content"]
+                .to_string()
+                .contains(pos["pos_id"].as_str().unwrap_or("absent-id"))
+        );
+    }
+    let sources = result["sources"].as_array().unwrap();
+    assert!(
+        sources
+            .iter()
+            .any(|source| source["kind"] == "builtin_dictionary")
+    );
+    assert!(
+        sources
+            .iter()
+            .any(|source| source["kind"] == "filling_rules")
+    );
+    server.abort();
+}
+
+#[sqlx::test]
+async fn save_during_answer_delivers_with_notice_instead_of_conflict(pool: PgPool) {
+    let (state, bearer, entry, stub, server) = setup(pool).await;
+    *stub.bump.lock().await = Some(entry);
+    stub.replies
+        .lock()
+        .await
+        .push_back(reply("建议补充河岸义项。", json!([])));
+    let (status, result) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/assistant"),
+        &bearer,
+        None,
+        Some(input(entry)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let answer = result["answer"].as_str().unwrap();
+    assert!(answer.starts_with("建议补充河岸义项。"));
+    assert!(answer.contains("回答期间词条已保存过"));
+    server.abort();
+}
+
+#[sqlx::test]
+async fn find_entries_matches_exact_spelling_of_other_entries(pool: PgPool) {
+    let (state, bearer, bank, stub, server) = setup(pool.clone()).await;
+    let forms: Value = serde_json::from_str(
+        &complete_v3_forms_fixture()
+            .to_string()
+            .replace("harbour", "colour")
+            .replace("harbor", "color"),
+    )
+    .unwrap();
+    let mut question = input(bank);
+    question["draft"] = json!({"forms":forms,"meanings":{"sense_groups":[],"pos":[]}});
+    stub.replies
+        .lock()
+        .await
+        .push_back(reply("核对双拼写。", json!([])));
+    let (status, result) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/assistant"),
+        &bearer,
+        None,
+        Some(question),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let prepared = user_message(&stub.inputs.lock().await[0]);
+    let terms: Vec<_> = prepared["server_materials"]["builtin_dictionary"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["spelling"].as_str().unwrap())
+        .collect();
+    assert_eq!(terms, vec!["colour", "color"]);
+    stub.inputs.lock().await.clear();
+    let river = create_legacy_v3_empty_skeleton(&state, &bearer, "river").await;
+    stub.replies.lock().await.extend([
+        reply(
+            "",
+            json!([{"id":"same","name":"find_entries","arguments":"{\"spelling\":\"bank\"}"}]),
+        ),
+        reply("库里已有 bank 词条。", json!([])),
+    ]);
+    let (status, result) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/assistant"),
+        &bearer,
+        None,
+        Some(input(river)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let inputs = stub.inputs.lock().await;
+    let tool = inputs[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(tool.contains(&bank.to_string()), "{tool}");
+    let prepared = user_message(&inputs[0]);
+    assert!(
+        !prepared["server_materials"]["same_spelling_entries"]
+            .to_string()
+            .contains(&river.to_string())
+    );
     server.abort();
 }

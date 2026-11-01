@@ -3318,24 +3318,6 @@ impl LexiconService {
         let mut word = self.get_v3(entry_id).await?;
         ensure_v3_active(&word)?;
         ensure_v3_revision(&word, input.base_revision)?;
-        let mut issues =
-            crate::lexicon::v3_contract::validate_forms(&word.forms, StepSaveIntent::Complete);
-        issues.extend(crate::lexicon::v3_contract::validate_meanings(
-            &word.meanings,
-            StepSaveIntent::Complete,
-        ));
-        issues.extend(
-            crate::lexicon::v3_contract::validate_complete_definition_grammar(&word.meanings),
-        );
-        issues.extend(crate::lexicon::v3_contract::validate_aggregate_node_limit(
-            &word.forms,
-            &word.meanings,
-        ));
-        issues.extend(crate::lexicon::v3_contract::validate_sense_form_groups(
-            &word.forms,
-            &word.meanings,
-            StepSaveIntent::Complete,
-        ));
         let mut transaction = self
             .repository
             .pool()
@@ -3345,12 +3327,12 @@ impl LexiconService {
         let catalog = self
             .catalog_context_for_reference(&mut transaction, &word.forms, v3_kind_string(word.kind))
             .await?;
-        issues.extend(validate_meanings(
+        let mut issues = crate::lexicon::validation::validate_publish_content(
             entry_id,
             &word.forms,
             &word.meanings,
             &catalog.sub_part_parents,
-        ));
+        );
         let reference_resolution = resolve_meaning_references(
             &mut transaction,
             entry_id,
