@@ -117,6 +117,7 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
         wordlist = runtime.client().roundtrip()
         runtime.stop_app()
         baseline_snapshot = runtime.snapshot()
+        baseline_columns = runtime.table_columns() if interval["versions"] else None
         fixture_before = runtime.sql("SELECT row_to_json(w) FROM wordlists w WHERE id='" + wordlist["id"] + "'")
         runtime.start_app(args.artifact)
         verify_ledger(info, runtime.ledger())
@@ -128,6 +129,9 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
         receipt["checks"]["upgrade_and_persistence"] = "passed"
         if interval["versions"]:
             before = runtime.snapshot()
+            # Capture candidate writes through the schema that the old binary will read.
+            # Full snapshots still protect new tables, refusal atomicity and sequences.
+            before_recovery_data = runtime.snapshot(projection=baseline_columns)
             try:
                 runtime.binary(args.artifact, "deploy-undo-migrations", str(interval["baseline_version"]), str(interval["candidate_version"]))
             except VerificationError as failure:
@@ -152,7 +156,7 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
                 if table not in restored:
                     if summary.get("rows", 0):
                         raise VerificationError("recovery_dropped_synthetic_data")
-                elif restored[table] != summary:
+                elif restored[table] != before_recovery_data[table]:
                     raise VerificationError("recovery_changed_synthetic_data")
             receipt["checks"]["bounded_down"] = "passed"
         else:

@@ -57,11 +57,43 @@ class MigrationRuntime(FakeRuntime):
     def sql(self, statement):
         return '{"id":"fixture","name":"preserved"}'
 
-    def snapshot(self):
+    def table_columns(self):
+        return {"public.fixture": ["id", "name"]}
+
+    def snapshot(self, *, projection=None):
         return {**self.snap, "public._sqlx_migrations": {"rows": len(self.rows), "digest": json.dumps(self.rows)}}
 
     def ledger(self):
         return copy.deepcopy(self.rows)
+
+
+class ColumnRuntime(MigrationRuntime):
+    def __init__(self, *, lose_data=False, new_rows=0):
+        super().__init__(new_interval())
+        self.business_digest = "baseline-data"
+        self.lose_data = lose_data
+        self.new_rows = new_rows
+
+    def roundtrip(self, *, wordlist=None):
+        if self.app_starts == 2:
+            self.business_digest = "updated-business-data"
+        return self.wordlist
+
+    def table_columns(self):
+        return {"public.fixture": ["id", "name"]}
+
+    def snapshot(self, *, projection=None):
+        result = super().snapshot()
+        upgraded = len(self.rows) > len(LEDGER)
+        digest = self.business_digest
+        if upgraded and projection is None:
+            digest += "+added-column-default"
+        if not upgraded and self.app_starts >= 2 and self.lose_data:
+            digest = "lost-business-data"
+        result["public.fixture"] = {"rows": 1, "digest": digest}
+        if upgraded:
+            result["public.new_table"] = {"rows": self.new_rows, "digest": "new-data"}
+        return result
 
 
 def args_fixture(root):
@@ -147,6 +179,31 @@ class MigrationCompatibilityTests(unittest.TestCase):
             self.assertEqual(result["checks"]["bounded_down"], "passed")
             self.assertEqual(result["checks"]["old_binary_after_recovery"], "passed")
             self.assertTrue(result["cleanup"]["complete"])
+
+    def test_added_column_default_does_not_hide_preserved_candidate_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = args_fixture(Path(directory))
+            runtime = ColumnRuntime()
+            result = rehearse(args, runtime_factory=lambda: runtime)
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["checks"]["bounded_down"], "passed")
+            self.assertTrue(result["cleanup"]["complete"])
+
+    def test_baseline_projection_still_rejects_old_column_data_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = args_fixture(Path(directory))
+            runtime = ColumnRuntime(lose_data=True)
+            with self.assertRaisesRegex(VerificationError, "recovery_changed_synthetic_data"):
+                rehearse(args, runtime_factory=lambda: runtime)
+            self.assertTrue(runtime.closed)
+
+    def test_baseline_projection_still_rejects_nonempty_new_table_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = args_fixture(Path(directory))
+            runtime = ColumnRuntime(new_rows=1)
+            with self.assertRaisesRegex(VerificationError, "recovery_dropped_synthetic_data"):
+                rehearse(args, runtime_factory=lambda: runtime)
+            self.assertTrue(runtime.closed)
 
     def test_guard_refusal_has_no_partial_changes_and_never_authorizes_rollback(self):
         for mutate in (False, True):
