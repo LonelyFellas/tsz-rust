@@ -10,6 +10,7 @@ struct ModelStub {
     inputs: Arc<AsyncMutex<Vec<Value>>>,
     revoke: Arc<AsyncMutex<Option<Uuid>>>,
     bump: Arc<AsyncMutex<Option<Uuid>>>,
+    header_delay: Arc<std::sync::atomic::AtomicBool>,
     hold: Arc<std::sync::atomic::AtomicBool>,
     gate: Arc<tokio::sync::Notify>,
     pool: PgPool,
@@ -58,6 +59,9 @@ async fn model_stream(
     Json(body): Json<Value>,
 ) -> impl axum::response::IntoResponse {
     let Json(reply) = model_step(State(stub.clone()), headers, Json(body)).await;
+    if stub.header_delay.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(3100)).await;
+    }
     let stream =
         futures_util::stream::unfold((stub, reply, 0), |(stub, reply, index)| async move {
             let event = match index {
@@ -112,6 +116,7 @@ async fn setup(
         inputs: Arc::new(AsyncMutex::new(Vec::new())),
         revoke: Arc::new(AsyncMutex::new(None)),
         bump: Arc::new(AsyncMutex::new(None)),
+        header_delay: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         gate: Arc::new(tokio::sync::Notify::new()),
         pool,
@@ -186,6 +191,41 @@ async fn assistant_stream_delivers_delta_before_upstream_completion(pool: PgPool
     assert!(received.contains("\"event\":\"complete\""));
     assert!(received.contains("\"requires_human_review\":true"));
     assert!(received.contains("回答期间词条已保存过"));
+    server.abort();
+}
+
+#[sqlx::test]
+async fn stream_rechecks_permission_after_waiting_for_headers(pool: PgPool) {
+    let (state, bearer, entry, stub, server) = setup(pool).await;
+    stub.header_delay
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let actor: Uuid =
+        sqlx::query_scalar("SELECT created_by_admin_id FROM lexicon.entries WHERE id=$1")
+            .bind(entry)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    *stub.revoke.lock().await = Some(actor);
+    stub.replies
+        .lock()
+        .await
+        .push_back(reply("撤权后不得交付的内容", json!([])));
+    let response = tsz_rust::router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{ROOT}/assistant/stream"))
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(input(entry).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let events = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(!events.contains("撤权后不得交付的内容"), "{events}");
+    assert!(events.contains("\"event\":\"failed\""), "{events}");
     server.abort();
 }
 

@@ -118,6 +118,8 @@ pub struct AiLedgerPage {
     pub page: u32,
     pub page_size: u32,
     pub summary: AiLedgerSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose_filter_supported: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -250,7 +252,8 @@ pub async fn list(
     require_super_admin(&state, &auth).await?;
     let (page, page_size) = pagination(&query)?;
     let bytes = read_agent(&state, "/v1/model-calls", Some(&query), extended(&headers)).await?;
-    let result: AiLedgerPage = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    let mut result: AiLedgerPage = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    if !extended(&headers) { result.purpose_filter_supported = None; }
     if result.page != page
         || result.page_size != page_size
         || result.items.len() > page_size as usize
@@ -327,7 +330,8 @@ pub async fn costs(
     require_super_admin(&state, &auth).await?;
     let (page, page_size) = pagination(&query)?;
     let bytes = read_agent(&state, "/v1/model-costs", Some(&query), extended(&headers)).await?;
-    let result: AiCostLedgerPage = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    let mut result: AiCostLedgerPage = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    if !extended(&headers) { result.ledger.purpose_filter_supported = None; }
     if result.ledger.page != page
         || result.ledger.page_size != page_size
         || result.ledger.items.len() > page_size as usize

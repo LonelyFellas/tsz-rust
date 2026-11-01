@@ -285,6 +285,7 @@ async fn agent_stream_request(
     sender: &tokio::sync::mpsc::Sender<LexiconAssistantEvent>,
 ) -> Result<ModelStep, AppError> {
     let config = state.vocabulary_agent.as_ref().ok_or_else(unavailable)?;
+    let mut authorized_at = std::time::Instant::now();
     let mut response = config
         .client
         .post(format!(
@@ -305,7 +306,6 @@ async fn agent_stream_request(
     let mut total = 0;
     let mut complete = None;
     let mut text = String::new();
-    let mut authorized_at = std::time::Instant::now();
     while let Some(chunk) = response.chunk().await.map_err(|_| unavailable())? {
         total += chunk.len();
         if total > 100000 {

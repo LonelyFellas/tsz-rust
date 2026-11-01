@@ -282,36 +282,55 @@ fn compress(mut value: Value, step: WordCreationStep, budget: usize) -> Value {
             }
         }
     }
-    for section in ["meanings", "forms"] {
-        let key = if section == "meanings" {
-            "senses"
-        } else {
-            "forms"
-        };
-        while chars(&value) > budget {
-            let mut removed = None;
-            if let Some(parts) = value[section]["pos"].as_array_mut() {
-                for part in parts.iter_mut().rev() {
-                    if let Some(nodes) = part[key].as_array_mut()
-                        && let Some(node) = nodes.pop()
-                    {
-                        removed = Some(node["location"].as_str().unwrap_or(key).to_owned());
-                        break;
+    // Count the remaining graph once. Each discarded node is measured once, so
+    // a large entry does not serialize the whole graph after every removal.
+    let mut size = chars(&value);
+    for (section, key) in [
+        ("meanings", "senses"),
+        ("meanings", "grammar_structures"),
+        ("forms", "forms"),
+        ("forms", "form_groups"),
+    ] {
+        if let Some(parts) = value[section]["pos"].as_array_mut() {
+            for part in parts.iter_mut().rev() {
+                if let Some(nodes) = part[key].as_array_mut() {
+                    while size > budget {
+                        let Some(node) = nodes.pop() else {
+                            break;
+                        };
+                        size = size.saturating_sub(chars(&node) + usize::from(!nodes.is_empty()));
+                        omitted.push(node["location"].as_str().unwrap_or(key).to_owned());
                     }
                 }
             }
-            let Some(label) = removed else {
-                break;
-            };
-            omitted.push(label);
         }
     }
-    if chars(&value) > budget {
-        for section in ["meanings", "forms"] {
-            if !value[section].is_null() {
-                value[section] = json!({"omitted":true});
-                omitted.push(format!("{section} 内容超出预算，未提供"));
-            }
+    if let Some(groups) = value["meanings"]["sense_groups"].as_array_mut() {
+        while size > budget {
+            let Some(group) = groups.pop() else {
+                break;
+            };
+            size = size.saturating_sub(chars(&group) + usize::from(!groups.is_empty()));
+            omitted.push(group["location"].as_str().unwrap_or("语义区间").to_owned());
+        }
+    }
+    // If metadata alone exceeds the budget, discard only the oversized section.
+    for section in [
+        minor,
+        if minor == "forms" {
+            "meanings"
+        } else {
+            "forms"
+        },
+    ] {
+        if size <= budget {
+            break;
+        }
+        let old = chars(&value[section]);
+        if old > 32 {
+            value[section] = json!({"omitted":true});
+            size = size.saturating_sub(old) + chars(&value[section]);
+            omitted.push(format!("{section} 元数据超出预算，未提供"));
         }
     }
     // Consecutive omitted items retain their readable positions, with a bounded list.
@@ -342,13 +361,27 @@ pub(super) async fn same_spelling(
         .map_err(|_| unavailable())?
         .key;
     let rows: Vec<(Uuid, Vec<String>)> = sqlx::query_as(
-        "SELECT s.entry_id, array_agg(DISTINCT s.content_scope ORDER BY s.content_scope)
-         FROM lexicon.surface_sources s JOIN lexicon.entries e ON e.id=s.entry_id
-         WHERE s.language='en' AND s.source_kind='form_variant' AND NOT s.is_deleted
-         AND s.content_schema_version=3 AND s.normalized_surface=$1
-         AND e.archived_at IS NULL AND e.content_schema_version=3
-         AND ($2::uuid IS NULL OR s.entry_id<>$2)
-         GROUP BY s.entry_id ORDER BY s.entry_id LIMIT $3",
+        "WITH hits AS (
+            SELECT s.entry_id, s.content_scope
+            FROM lexicon.surface_sources s
+            WHERE s.language='en' AND s.source_kind='form_variant' AND NOT s.is_deleted
+              AND s.content_schema_version=3 AND s.normalized_surface=$1
+            UNION ALL
+            SELECT state.entry_id, 'draft'::text
+            FROM lexicon.v3_entry_state state
+            JOIN lexicon.entries entry ON entry.id=state.entry_id
+            WHERE NOT EXISTS (SELECT 1 FROM lexicon.surface_sources s
+                              WHERE s.entry_id=state.entry_id AND NOT s.is_deleted)
+              AND (state.initial_headwords->>'common'=$1 OR state.initial_headwords->>'uk'=$1
+                   OR state.initial_headwords->>'us'=$1
+                   OR state.initial_headword_keys && ARRAY['common:'||$1,'uk:'||$1,'us:'||$1]
+                   OR (state.initial_headwords IS NULL AND state.initial_headword_keys IS NULL
+                       AND entry.detection_snapshot->>'normalized_surface'=$1))
+         ) SELECT hits.entry_id, array_agg(DISTINCT hits.content_scope ORDER BY hits.content_scope)
+         FROM hits JOIN lexicon.entries e ON e.id=hits.entry_id
+         WHERE e.archived_at IS NULL AND e.content_schema_version=3 AND e.language='en'
+           AND ($2::uuid IS NULL OR e.id<>$2)
+         GROUP BY hits.entry_id ORDER BY hits.entry_id LIMIT $3",
     )
     .bind(&key)
     .bind(exclude)
@@ -436,6 +469,20 @@ mod tests {
                 .any(|v| v.as_str().unwrap().contains("义项 1"))
         );
     }
+    #[test]
+    fn oversized_grammar_does_not_discard_unrelated_step() {
+        let value = json!({"forms":{"pos":[{"pos":"noun","forms":[{"location":"名词 · 词形 1","spelling":"bank"}]}]},"meanings":{"sense_groups":[{"location":"语义区间 1","name_zh":"核心"}],"pos":[{"pos_location":"名词","grammar_structures":[{"location":"名词 · 语法结构 1","content":"语法".repeat(5000)}],"senses":[]}]}});
+        let result = compress(value, WordCreationStep::Meanings, 800);
+        assert!(result["forms"]["summary"].is_array());
+        assert!(result["meanings"]["pos"].is_array());
+        assert!(
+            result["meanings"]["pos"][0]["grammar_structures"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn projection_preserves_readable_relationships_without_ids() {
         let ids = HashMap::from([

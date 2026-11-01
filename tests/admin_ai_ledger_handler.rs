@@ -57,6 +57,13 @@ async fn cost_endpoints_are_super_only_and_preserve_decimal_and_unknown_values(p
         "0.001392000000"
     );
     assert_eq!(costs.1["cache-control"], "no-store");
+    assert!(costs.2["ledger"].get("purpose_filter_supported").is_none());
+    let filtered=request(&state,Some(&super_token),"/costs?purpose=assistant").await;
+    assert!(filtered.2["ledger"].get("purpose_filter_supported").is_none());
+    mock.response.lock().await.1["ledger"]["purpose_filter_supported"]=json!(true);
+    let supported=request(&state,Some(&super_token),"/costs?purpose=assistant").await;
+    assert_eq!(supported.2["ledger"]["purpose_filter_supported"],true);
+    assert_eq!(mock.queries.lock().await.last().unwrap().get("purpose").unwrap(),"assistant");
     let mut period = summary.clone();
     period["start"] = Value::Null;
     period["end"] = json!("2026-10-28T04:00:00Z");
@@ -126,6 +133,7 @@ async fn request(
     if let Some(token) = token {
         builder = builder.header("Authorization", format!("Bearer {token}"));
     }
+    if query.contains("purpose=") { builder=builder.header("x-tsz-ledger-version","2"); }
     let response = tsz_rust::router(state.clone())
         .oneshot(builder.body(Body::empty()).unwrap())
         .await
