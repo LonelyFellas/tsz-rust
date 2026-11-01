@@ -229,6 +229,12 @@ impl AdminRefreshTokenRepository {
         &self,
         admin_id: &Uuid,
     ) -> Result<u64, AdminRefreshTokenError> {
+        let mut tx = self.pool.begin().await?;
+        // 与轮换统一先锁账号，撤销时才能看到等待期间提交的全部后继。
+        sqlx::query("SELECT id FROM admins WHERE id = $1 FOR UPDATE")
+            .bind(admin_id)
+            .execute(&mut *tx)
+            .await?;
         let row = sqlx::query!(
             r#"
             UPDATE admin_refresh_tokens SET revoked_at = NOW()
@@ -236,8 +242,9 @@ impl AdminRefreshTokenRepository {
             "#,
             admin_id
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(row.rows_affected())
     }
 }

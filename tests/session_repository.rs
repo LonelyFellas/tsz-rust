@@ -483,3 +483,77 @@ async fn consume_and_insert_rolls_back_old_when_insert_fails(pool: PgPool) {
     let got = repo.consume("old-hash").await.unwrap();
     assert_eq!(got, Some(user_id), "回滚后的旧枚应仍可消费");
 }
+
+/// 全量撤销必须覆盖账号锁内尚未提交的轮换后继。
+#[sqlx::test]
+async fn revoke_all_includes_successor_from_in_flight_rotation(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool.clone());
+    let old = repo
+        .insert(new_token(user_id, "pending-old"))
+        .await
+        .unwrap();
+
+    // 持有生产轮换使用的账号锁，暂存旧枚消费和后继创建。
+    let mut rotation = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+        .bind(user_id)
+        .execute(&mut *rotation)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE refresh_tokens SET rotated_at=NOW() WHERE id=$1")
+        .bind(old.id)
+        .execute(&mut *rotation)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO refresh_tokens(id,user_id,token_hash,expires_at) VALUES ($1,$2,$3,$4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(user_id)
+    .bind("pending-successor")
+    .bind(old.expires_at)
+    .execute(&mut *rotation)
+    .await
+    .unwrap();
+
+    let revocation_pool = pool.clone();
+    let revocation = tokio::spawn(async move {
+        RefreshTokenRepository::new(revocation_pool)
+            .revoke_all_by_user_id(user_id)
+            .await
+            .unwrap()
+    });
+    let waiting = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    // 即使等待断言失败也先释放测试锁，避免遗留后台任务。
+    rotation.commit().await.unwrap();
+    let revoked = tokio::time::timeout(std::time::Duration::from_secs(10), revocation)
+        .await
+        .unwrap()
+        .unwrap();
+    waiting.expect("撤销应实际等待未提交的轮换");
+    assert_eq!(revoked, 2, "全量撤销必须包含并发轮换的后继");
+    assert!(
+        repo.consume_and_insert(
+            "pending-successor",
+            "unexpected",
+            Uuid::now_v7(),
+            Utc::now() + Duration::days(30)
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "已撤销的后继不能再轮换"
+    );
+}
