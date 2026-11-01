@@ -70,6 +70,26 @@ pub enum RoutePolicy {
 }
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
+    (
+        "POST",
+        "/lexicon/assistant/form-candidates",
+        RoutePolicy::All(&["words.access", "words.edit"]),
+    ),
+    (
+        "POST",
+        "/lexicon/assistant/stream",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon/assistant",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/assistant/capability",
+        RoutePolicy::All(&["words.access"]),
+    ),
     ("GET", "/chatgpt", RoutePolicy::SuperAdmin),
     ("POST", "/chatgpt/login", RoutePolicy::SuperAdmin),
     (

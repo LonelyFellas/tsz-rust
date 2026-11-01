@@ -33,6 +33,10 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::lexicon::assistant::ask,
+        crate::lexicon::assistant::candidates::generate,
+        crate::lexicon::assistant::ask_stream,
+        crate::lexicon::assistant::capability,
         crate::admin::ai_ledger::list,
         crate::admin::opencode_models::probe_report,
         crate::admin::opencode_models::start_probes,

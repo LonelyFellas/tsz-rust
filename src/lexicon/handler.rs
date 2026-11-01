@@ -57,7 +57,7 @@ pub use query::{
     search_component_targets, stats, surface_match_snapshot_page,
 };
 
-fn service(state: &AppState) -> LexiconService {
+pub(crate) fn service(state: &AppState) -> LexiconService {
     LexiconService::new(
         LexiconRepository::new(state.pool.clone()),
         DetectionStore::new(state.redis.clone()),

@@ -135,6 +135,7 @@ pub enum ErrorCode {
     SpeechPreviewInProgress,
     SpeechProviderUnavailable,
     SpeechRateLimited,
+    LexiconAssistantRateLimited,
     SpeechStorageUnavailable,
     UnsupportedAudioContentType,
     AudioFileTooLarge,
@@ -163,7 +164,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 140] = [
+    pub const ALL: [Self; 141] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -286,6 +287,7 @@ impl ErrorCode {
         Self::SpeechPreviewInProgress,
         Self::SpeechProviderUnavailable,
         Self::SpeechRateLimited,
+        Self::LexiconAssistantRateLimited,
         Self::SpeechStorageUnavailable,
         Self::UnsupportedAudioContentType,
         Self::AudioFileTooLarge,
@@ -915,6 +917,11 @@ impl ErrorCode {
                 "speech_provider_unavailable",
                 "Speech provider unavailable",
                 StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::LexiconAssistantRateLimited => (
+                "lexicon_assistant_rate_limited",
+                "Lexicon assistant rate limited",
+                StatusCode::TOO_MANY_REQUESTS,
             ),
             Self::SpeechRateLimited => (
                 "speech_rate_limited",

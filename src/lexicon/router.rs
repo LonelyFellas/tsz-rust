@@ -63,6 +63,16 @@ pub fn router() -> Router<AppState> {
             "/entries/{entry_id}/sentences/{sentence_id}/visibility",
             axum::routing::put(super::shared_sentences::visibility::set_visibility),
         )
+        .route("/assistant", axum::routing::post(super::assistant::ask))
+        .route(
+            "/assistant/form-candidates",
+            axum::routing::post(super::assistant::candidates::generate),
+        )
+        .route(
+            "/assistant/stream",
+            axum::routing::post(super::assistant::ask_stream),
+        )
+        .route("/assistant/capability", get(super::assistant::capability))
         .route("/detections", axum::routing::post(handler::detect))
         .route(
             "/surface-match-snapshots/{snapshot_id}",
