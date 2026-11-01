@@ -17,6 +17,31 @@ use helpers::*;
 
 pub use meanings::validate_meanings;
 pub use structure::MAX_STEP_CONTENT_BODY_BYTES;
+
+/// Pure checks shared by publish validation and the assistant's unsaved snapshot.
+pub fn validate_publish_content(
+    entry_id: Uuid,
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+    sub_part_parents: &HashMap<String, String>,
+) -> Vec<DraftValidationIssue> {
+    use crate::lexicon::{dto::StepSaveIntent, v3_contract};
+    let intent = StepSaveIntent::Complete;
+    let mut issues = v3_contract::validate_forms(forms, intent);
+    issues.extend(v3_contract::validate_meanings(meanings, intent));
+    issues.extend(v3_contract::validate_complete_definition_grammar(meanings));
+    issues.extend(v3_contract::validate_aggregate_node_limit(forms, meanings));
+    issues.extend(v3_contract::validate_sense_form_groups(
+        forms, meanings, intent,
+    ));
+    issues.extend(validate_meanings(
+        entry_id,
+        forms,
+        meanings,
+        sub_part_parents,
+    ));
+    issues
+}
 pub(crate) use structure::{
     MAX_ENTRY_NODES, ProposedNode, proposed_meaning_nodes, validate_node_identities,
 };
