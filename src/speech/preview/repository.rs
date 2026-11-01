@@ -222,13 +222,25 @@ impl PreviewRepository {
     }
 
     pub async fn voice_by_alias(&self, alias: &str) -> Result<Option<VoiceRecord>, sqlx::Error> {
+        Ok(self
+            .lookup_voice(alias, false)
+            .await?
+            .map(|(voice, _)| voice))
+    }
+
+    pub(crate) async fn lookup_voice(
+        &self,
+        alias: &str,
+        include_disabled: bool,
+    ) -> Result<Option<(VoiceRecord, bool)>, sqlx::Error> {
         let Some(row) = sqlx::query(
             r#"SELECT id, alias, provider, provider_voice_id, locale, gender, styles,
                       min_rate_percent, max_rate_percent, min_pitch_semitones,
-                      max_pitch_semitones, provider_version
-               FROM speech.voices WHERE alias = $1 AND enabled"#,
+                      max_pitch_semitones, provider_version, enabled
+               FROM speech.voices WHERE alias = $1 AND (enabled OR $2)"#,
         )
         .bind(alias)
+        .bind(include_disabled)
         .fetch_optional(&self.pool)
         .await?
         else {
@@ -244,17 +256,20 @@ impl PreviewRepository {
             style_values,
         )
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-        Ok(Some(VoiceRecord {
-            id: row.get("id"),
-            alias: row.get("alias"),
-            provider_version: row.get("provider_version"),
-            voice,
-            min_rate_percent: row.get("min_rate_percent"),
-            max_rate_percent: row.get("max_rate_percent"),
-            min_pitch_semitones: row.get("min_pitch_semitones"),
-            max_pitch_semitones: row.get("max_pitch_semitones"),
-            gender: row.get("gender"),
-        }))
+        Ok(Some((
+            VoiceRecord {
+                id: row.get("id"),
+                alias: row.get("alias"),
+                provider_version: row.get("provider_version"),
+                voice,
+                min_rate_percent: row.get("min_rate_percent"),
+                max_rate_percent: row.get("max_rate_percent"),
+                min_pitch_semitones: row.get("min_pitch_semitones"),
+                max_pitch_semitones: row.get("max_pitch_semitones"),
+                gender: row.get("gender"),
+            },
+            row.get("enabled"),
+        )))
     }
 
     pub async fn active_cache(&self, hash: &[u8]) -> Result<Option<CacheRecord>, sqlx::Error> {

@@ -53,6 +53,7 @@ pub async fn entries(
     let mut projected = reading::read_entries_view(tx, ids, WordlistView::Full).await?;
     let mut publications = published::read_current_in(tx, ids).await?;
     let mut result = Vec::new();
+    let mut audio_catalog = None;
     for id in ids {
         let (Some(content), Some(publication)) = (projected.remove(id), publications.remove(id))
         else {
@@ -138,7 +139,7 @@ pub async fn entries(
                 std::mem::discriminant(&item.source_dialect),
             ))
         });
-        let audio = playable_audio(tx, audio).await?;
+        let audio = playable_audio_with_catalog(tx, audio, &mut audio_catalog).await?;
         result.push(DictionaryEntry {
             content,
             audio,
@@ -413,6 +414,14 @@ pub(crate) async fn playable_audio(
     tx: &mut Transaction<'_, Postgres>,
     audio: Vec<DictionaryAudio>,
 ) -> Result<Vec<DictionaryAudio>, AppError> {
+    playable_audio_with_catalog(tx, audio, &mut None).await
+}
+
+async fn playable_audio_with_catalog(
+    tx: &mut Transaction<'_, Postgres>,
+    audio: Vec<DictionaryAudio>,
+    catalog: &mut Option<Vec<sqlx::postgres::PgRow>>,
+) -> Result<Vec<DictionaryAudio>, AppError> {
     use sqlx::Row;
     if audio.is_empty() {
         return Ok(audio);
@@ -420,7 +429,6 @@ pub(crate) async fn playable_audio(
     let ids: Vec<_> = audio.iter().map(|item| item.asset_id).collect();
     let assets = sqlx::query("SELECT a.id,a.locale,g.state,g.resolved_content,g.source FROM lexicon.audio_assets a LEFT JOIN lexicon.audio_generations g ON g.asset_id=a.id WHERE a.id=ANY($1) AND a.reclamation_started_at IS NULL ORDER BY a.id FOR SHARE OF a")
         .bind(&ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
-    let catalog = crate::speech::dubbing::playback_catalog(tx).await?;
     let mut result = Vec::new();
     for mut item in audio {
         let Some(asset) = assets
@@ -436,6 +444,10 @@ pub(crate) async fn playable_audio(
             if asset.get::<Option<String>, _>("state").as_deref() != Some("ready") {
                 continue;
             }
+            let catalog = match catalog {
+                Some(catalog) => catalog,
+                None => catalog.insert(crate::speech::dubbing::playback_catalog(tx).await?),
+            };
             let Some(voice) = catalog
                 .iter()
                 .find(|row| row.get::<String, _>("alias") == setting.voice_id)
@@ -452,7 +464,7 @@ pub(crate) async fn playable_audio(
                 .map_err(AppError::internal)?;
             let source: serde_json::Value = asset.get("source");
             if !crate::speech::dubbing::setting_available(
-                &catalog,
+                catalog,
                 setting,
                 &accent,
                 &content,

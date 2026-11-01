@@ -571,6 +571,88 @@ async fn dictionary_prefers_active_speech_and_spelling_recordings_before_legacy_
     }
 }
 
+#[sqlx::test]
+async fn dictionary_batch_keeps_generated_audio_order_and_rechecks_disabled_voices(pool: PgPool) {
+    dictionary_batch_audio(&pool, true).await;
+}
+
+#[sqlx::test]
+async fn dictionary_batch_keeps_recordings_without_catalog_voices(pool: PgPool) {
+    dictionary_batch_audio(&pool, false).await;
+}
+
+async fn dictionary_batch_audio(pool: &PgPool, generated: bool) {
+    let (state, auth) = setup_bound(pool).await;
+    let mut expected = Vec::new();
+    for label in ["catalogbatcha", "catalogbatchb"] {
+        let id = full_entry(pool, label).await;
+        let assets = [Uuid::now_v7(), Uuid::now_v7()];
+        for asset in assets {
+            formal_audio_fixture(pool, id, asset, "sonia", "en-GB", generated).await;
+        }
+        let (publication, mut snapshot): (Uuid, Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1")
+            .bind(id).fetch_one(pool).await.unwrap();
+        let variant = &mut snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"];
+        let pronunciation = &mut variant["pronunciations"][0];
+        let target = pronunciation["id"].clone();
+        if generated {
+            let failed = Uuid::now_v7();
+            formal_audio_fixture(pool, id, failed, "sonia", "en-GB", true).await;
+            sqlx::query("UPDATE lexicon.audio_generations SET state='failed' WHERE asset_id=$1")
+                .bind(failed)
+                .execute(pool)
+                .await
+                .unwrap();
+            pronunciation["voice_profile"] = json!({"voices":([assets[1],failed,assets[0]].map(|asset|
+                json!({"voice_id":"sonia","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"saved","locale":"en-GB","audio_asset_id":asset})))});
+        } else {
+            pronunciation["audio_assets"] = json!(([assets[1],assets[0]].map(|asset|
+                json!({"id":asset,"locale":"en-GB","gender":"female","content_type":"audio/mpeg","size_bytes":3,"duration_ms":null,"original_name":"fixture.mp3","created_at":"2026-11-01T00:00:00Z"}))));
+        }
+        sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+            .bind(publication)
+            .bind(snapshot)
+            .execute(pool)
+            .await
+            .unwrap();
+        share_current_publication(pool, id).await;
+        expected.push((id, target, vec![assets[1], assets[0]]));
+    }
+    let path = "/api/v1/dictionary?q=catalogbatch";
+    let (status, body) = call(&state, &auth, "GET", path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), expected.len());
+    for (item, (id, target, assets)) in items.iter().zip(expected) {
+        assert_eq!(item["content"]["entry_id"], json!(id));
+        assert_eq!(
+            item["audio"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|audio| audio["target_id"] == target)
+                .map(|audio| audio["asset_id"].clone())
+                .collect::<Vec<_>>(),
+            assets.into_iter().map(|id| json!(id)).collect::<Vec<_>>()
+        );
+    }
+    if generated {
+        sqlx::query("UPDATE speech.voices SET enabled=false WHERE alias='sonia'")
+            .execute(pool)
+            .await
+            .unwrap();
+        let (status, body) = call(&state, &auth, "GET", path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["audio"] == json!([]))
+        );
+    }
+}
+
 // Explicit formal-asset prerequisites for publication fixtures. Read APIs never repair data.
 async fn formal_audio_fixture(
     pool: &PgPool,
