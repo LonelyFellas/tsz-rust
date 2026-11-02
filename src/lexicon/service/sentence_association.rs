@@ -642,30 +642,18 @@ fn association_senses(
 fn v3_form_variants(
     variants: &crate::lexicon::dto::WordRegionalVariantsV3,
 ) -> Vec<(Uuid, Dialect, &str, &[PhraseComponentUsageV3])> {
-    use crate::lexicon::dto::WordRegionalVariantsV3;
-
-    match variants {
-        WordRegionalVariantsV3::Common { common } => vec![(
-            common.id,
-            Dialect::Common,
-            common.spelling.as_str(),
-            &common.component_usages,
-        )],
-        WordRegionalVariantsV3::UkUs { uk, us } => vec![
+    variants
+        .variants()
+        .into_iter()
+        .map(|v| {
             (
-                uk.id,
-                Dialect::Uk,
-                uk.spelling.as_str(),
-                &uk.component_usages,
-            ),
-            (
-                us.id,
-                Dialect::Us,
-                us.spelling.as_str(),
-                &us.component_usages,
-            ),
-        ],
-    }
+                v.id,
+                v.dialect,
+                v.spelling.as_str(),
+                v.component_usages.as_slice(),
+            )
+        })
+        .collect()
 }
 
 fn parse_v3_form_type_name(value: &str) -> Option<WordFormTypeV3> {

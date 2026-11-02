@@ -102,7 +102,7 @@ pub async fn delete_draft(
     path = "/api/v1/admin/lexicon/entries/{id}/archive",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header, description = "v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 共享内容及绑定协议；无法无损展开时旧客户端收到 409 form_contents_client_upgrade_required。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header, description = "v1 且共享内容已启用时返回 form_content_reassignment 能力；缺省或未知值省略该字段，兼容旧页面。", example = "v1")),
+    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header, description = "v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 共享内容及绑定协议；无法无损展开时旧客户端收到 409 form_contents_client_upgrade_required。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header, description = "v1 且共享内容已启用时返回 form_content_reassignment 能力；缺省或未知值省略该字段，兼容旧页面。", example = "v1"), ("X-TSZ-Multiple-Spellings" = Option<String>, Header, description = "v1 支持英美独立有序拼写列表并返回 multiple_form_spellings 能力；含多条格式的读取及写入要求此请求头。", example = "v1")),
     request_body = EntryLifecycleInput,
     responses(
         (status = 200, description = "词条已归档且 publication 历史保持不变", body = AdminWordV3Envelope),
@@ -127,6 +127,11 @@ pub async fn archive(
     require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .archive(
             admin.id,
             request_id.as_uuid(),
@@ -147,7 +152,7 @@ pub async fn archive(
     path = "/api/v1/admin/lexicon/entries/{id}/restore",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header, description = "v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 共享内容及绑定协议；无法无损展开时旧客户端收到 409 form_contents_client_upgrade_required。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header, description = "v1 且共享内容已启用时返回 form_content_reassignment 能力；缺省或未知值省略该字段，兼容旧页面。", example = "v1")),
+    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header, description = "v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 共享内容及绑定协议；无法无损展开时旧客户端收到 409 form_contents_client_upgrade_required。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header, description = "v1 且共享内容已启用时返回 form_content_reassignment 能力；缺省或未知值省略该字段，兼容旧页面。", example = "v1"), ("X-TSZ-Multiple-Spellings" = Option<String>, Header, description = "v1 支持英美独立有序拼写列表并返回 multiple_form_spellings 能力；含多条格式的读取及写入要求此请求头。", example = "v1")),
     request_body = EntryRestoreInput,
     responses(
         (status = 200, description = "词条已恢复为草稿，不自动公开，publication 历史保持不变", body = AdminWordV3Envelope),
@@ -174,6 +179,11 @@ pub async fn restore(
     require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .restore(
             admin.id,
             request_id.as_uuid(),
@@ -241,7 +251,7 @@ pub async fn delete_batch(
     path = "/api/v1/admin/lexicon/entries/archive-batch",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "批量归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header, description = "v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 共享内容及绑定协议；无法无损展开时旧客户端收到 409 form_contents_client_upgrade_required。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header, description = "v1 且共享内容已启用时返回 form_content_reassignment 能力；缺省或未知值省略该字段，兼容旧页面。", example = "v1")),
+    params(("Idempotency-Key" = Uuid, Header, description = "批量归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header, description = "v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 共享内容及绑定协议；无法无损展开时旧客户端收到 409 form_contents_client_upgrade_required。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header, description = "v1 且共享内容已启用时返回 form_content_reassignment 能力；缺省或未知值省略该字段，兼容旧页面。", example = "v1"), ("X-TSZ-Multiple-Spellings" = Option<String>, Header, description = "v1 支持英美独立有序拼写列表并返回 multiple_form_spellings 能力；含多条格式的读取及写入要求此请求头。", example = "v1")),
     request_body = EntryLifecycleBatchInput,
     responses(
         (status = 200, description = "原子批量归档结果", body = EntryLifecycleBatchResponse),
@@ -270,6 +280,11 @@ pub async fn archive_batch(
     require_lifecycle_v3_capabilities(&state, &entry_ids).await?;
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .archive_batch(
             admin.id,
             request_id.as_uuid(),
@@ -291,7 +306,7 @@ pub async fn archive_batch(
     path = "/api/v1/admin/lexicon/entries/restore-batch",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "批量恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header, description = "v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 共享内容及绑定协议；无法无损展开时旧客户端收到 409 form_contents_client_upgrade_required。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header, description = "v1 且共享内容已启用时返回 form_content_reassignment 能力；缺省或未知值省略该字段，兼容旧页面。", example = "v1")),
+    params(("Idempotency-Key" = Uuid, Header, description = "批量恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header, description = "v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本；v2 另返回正式音频引用。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 共享内容及绑定协议；无法无损展开时旧客户端收到 409 form_contents_client_upgrade_required。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header, description = "v1 且共享内容已启用时返回 form_content_reassignment 能力；缺省或未知值省略该字段，兼容旧页面。", example = "v1"), ("X-TSZ-Multiple-Spellings" = Option<String>, Header, description = "v1 支持英美独立有序拼写列表并返回 multiple_form_spellings 能力；含多条格式的读取及写入要求此请求头。", example = "v1")),
     request_body = EntryRestoreBatchInput,
     responses(
         (status = 200, description = "原子批量恢复结果", body = EntryLifecycleBatchResponse),
@@ -322,6 +337,11 @@ pub async fn restore_batch(
     require_lifecycle_v3_capabilities(&state, &entry_ids).await?;
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .restore_batch(
             admin.id,
             request_id.as_uuid(),

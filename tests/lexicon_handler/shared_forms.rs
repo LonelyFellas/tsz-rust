@@ -2315,3 +2315,228 @@ async fn shared_forms_publication_freezes_graph_and_restore_recovers_sharing(poo
     .await;
     assert_eq!(fresh["word"]["forms"], snapshot["forms"]);
 }
+
+async fn multiple_spelling_call(
+    state: &AppState,
+    bearer: &str,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("X-TSZ-Form-Contents", "v1")
+        .header("X-TSZ-Multiple-Spellings", "v1")
+        .header("Idempotency-Key", Uuid::now_v7().to_string())
+        .header("X-TSZ-Spelling-Markup", "v1")
+        .header("X-TSZ-Spelling-Speech", "v1")
+        .header("X-TSZ-Phoneme-Speech", "v1")
+        .body(body.map_or_else(Body::empty, |value| {
+            Body::from(serde_json::to_vec(&value).unwrap())
+        }))
+        .unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    (status, value)
+}
+
+#[sqlx::test]
+async fn independent_multiple_spellings_persist_reload_reorder_and_remove(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = fixture_state(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let (id, forms) = create_v3_phrase_draft(&state, &bearer, "independent spelling").await;
+    let (_, saved) = save_v3_forms_after_impact(&state, &bearer, &id, 1, "save", forms).await;
+    let path = format!("{ROOT}/entries/{id}");
+    let (status, read) = multiple_spelling_call(&state, &bearer, Method::GET, &path, None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    let mut rollback_check = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261102090000_multiple_dialect_spellings.down.sql"
+    ))
+    .execute(&mut *rollback_check)
+    .await
+    .unwrap();
+    rollback_check.rollback().await.unwrap();
+    let mut content = read["word"]["forms"].clone();
+    let content_id = content["contents"][0]["id"].clone();
+    let first = content["contents"][0]["regional_variants"].clone();
+    content["contents"][0]["pronunciation_slots"] = json!([{"id":Uuid::now_v7(),"uk":{"id":first["uk"]["pronunciations"][0]["id"],"variant_slot_id":first["uk"]["id"]},"us":{"id":first["us"]["pronunciations"][0]["id"],"variant_slot_id":first["us"]["id"]}}]);
+
+    let mut uk = vec![first["uk"].clone()];
+    let mut us = vec![first["us"].clone()];
+    let binding = content["pos"][0]["forms"][0]["regional_bindings"].clone();
+    let mut uk_refs = vec![binding["uk"].clone()];
+    let mut us_refs = vec![binding["us"].clone()];
+    for (side, count, values, refs) in [
+        ("uk", 1, &mut uk, &mut uk_refs),
+        ("us", 2, &mut us, &mut us_refs),
+    ] {
+        for index in 0..count {
+            let slot = Uuid::now_v7();
+            let pronunciation_slot = Uuid::now_v7();
+            values.push(json!({"id":slot,"spelling":format!("independent {side} spelling {index}"),"origin":"manual","pronunciations":[{"id":pronunciation_slot,"dict_phonetic":"test","actual_pron":"own reading","style":"normal"}]}));
+            refs.push(json!({"id":Uuid::now_v7(),"content_slot_id":slot,"is_regular":true,"component_usages":[],"pronunciations":[{"id":Uuid::now_v7(),"content_slot_id":pronunciation_slot}]}));
+        }
+    }
+    content["contents"][0]["regional_variants"] = json!({"mode":"uk_us_many","uk":uk,"us":us});
+    content["contents"][0]["dialect_rules"] =
+        json!({"spelling_mode":"distinguish","phonetic_mode":"distinguish"});
+    content["pos"][0]["forms"][0]["regional_bindings"] =
+        json!({"mode":"uk_us_many","uk":uk_refs,"us":us_refs});
+    let target_form_id =
+        Uuid::parse_str(content["pos"][0]["forms"][0]["id"].as_str().unwrap()).unwrap();
+    let mut revision = saved["word"]["revision"].as_i64().unwrap();
+    for iteration in 0..5 {
+        let (status, impact) = multiple_spelling_call(
+            &state,
+            &bearer,
+            Method::POST,
+            &format!("{path}/steps/forms/impact"),
+            Some(json!({"schema_version":3,"base_revision":revision,"content":content})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "iteration {iteration}: {impact}");
+        let mut input =
+            json!({"schema_version":3,"base_revision":revision,"intent":"save","content":content});
+        if let Some(token) = impact["confirmation_token"].as_str() {
+            input["confirmed_impact_token"] = json!(token);
+        }
+        if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+            input["confirmed_surface_match_token"] = json!(token);
+        }
+        let (status, result) = multiple_spelling_call(
+            &state,
+            &bearer,
+            Method::PUT,
+            &format!("{path}/steps/forms"),
+            Some(input),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "iteration {iteration}: {result}");
+        revision = result["word"]["revision"].as_i64().unwrap();
+        let (status, fresh) =
+            multiple_spelling_call(&state, &bearer, Method::GET, &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{fresh}");
+        assert_eq!(fresh["word"]["forms"], content);
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_form_variants WHERE form_id=$1")
+                .bind(target_form_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, [5, 5, 4, 2, 2][iteration]);
+        assert_eq!(fresh["word"]["forms"]["contents"][0]["id"], content_id);
+        if iteration == 0 {
+            for (suffix, batch) in [("archive", false), ("archive-batch", true)] {
+                let rejected_key = Uuid::now_v7();
+                let input = if batch {
+                    json!({"entries":[{"id":id,"base_revision":revision,"base_lifecycle_revision":fresh["word"]["lifecycle_revision"]}]})
+                } else {
+                    json!({"base_revision":revision,"base_lifecycle_revision":fresh["word"]["lifecycle_revision"]})
+                };
+                let endpoint = if batch {
+                    format!("{ROOT}/entries/{suffix}")
+                } else {
+                    format!("{path}/{suffix}")
+                };
+                let (status, rejected) = call_with_form_capability(
+                    &state,
+                    Method::POST,
+                    &endpoint,
+                    &bearer,
+                    Some(rejected_key),
+                    Some(input),
+                    (true, true, true, true),
+                    true,
+                )
+                .await;
+                assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+                let (_, unchanged) =
+                    multiple_spelling_call(&state, &bearer, Method::GET, &path, None).await;
+                assert_eq!(unchanged["word"]["revision"], revision);
+                assert_eq!(unchanged["word"]["status"], fresh["word"]["status"]);
+                let cached: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM platform.idempotency_records WHERE idempotency_key=$1",
+                )
+                .bind(rejected_key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(
+                    cached, 0,
+                    "rejected old-client command must not be committed"
+                );
+            }
+        }
+        if iteration == 0 {
+            content["contents"][0]["regional_variants"]["uk"]
+                .as_array_mut()
+                .unwrap()
+                .reverse();
+            content["pos"][0]["forms"][0]["regional_bindings"]["uk"]
+                .as_array_mut()
+                .unwrap()
+                .reverse();
+        } else if iteration == 1 {
+            let removed = content["contents"][0]["regional_variants"]["us"]
+                .as_array_mut()
+                .unwrap()
+                .pop()
+                .unwrap();
+            content["pos"][0]["forms"][0]["regional_bindings"]["us"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|row| row["content_slot_id"] != removed["id"]);
+        } else if iteration == 2 {
+            for side in ["uk", "us"] {
+                let rows = content["contents"][0]["regional_variants"][side]
+                    .as_array_mut()
+                    .unwrap();
+                rows.truncate(1);
+                let slot = rows[0]["id"].clone();
+                content["pos"][0]["forms"][0]["regional_bindings"][side]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|row| row["content_slot_id"] == slot);
+            }
+        } else if iteration == 3 {
+            let regional = &mut content["contents"][0]["regional_variants"];
+            *regional = json!({"mode":"uk_us","uk":regional["uk"][0],"us":regional["us"][0]});
+            let regional = &mut content["pos"][0]["forms"][0]["regional_bindings"];
+            *regional = json!({"mode":"uk_us","uk":regional["uk"][0],"us":regional["us"][0]});
+        }
+    }
+    let mut rollback_check = pool.begin().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261102090000_multiple_dialect_spellings.down.sql"
+        ))
+        .execute(&mut *rollback_check)
+        .await
+        .is_err()
+    );
+    rollback_check.rollback().await.unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_form_variants WHERE form_id=$1")
+            .bind(target_form_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 2, "unsafe rollback must leave all variants intact");
+    let (status, _) = shared_call(&state, &bearer, Method::GET, &path, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "explicitly collapsed legacy pair remains readable"
+    );
+}

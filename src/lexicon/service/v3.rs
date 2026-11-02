@@ -388,12 +388,11 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
     for pos in &mut forms.pos {
         let has_suggested_base = pos.forms.iter().any(|form| {
             form.form_type == "base"
-                && match &form.regional_variants {
-                    WordRegionalVariantsV3::Common { common } => !common.spelling.is_empty(),
-                    WordRegionalVariantsV3::UkUs { uk, us } => {
-                        !uk.spelling.is_empty() || !us.spelling.is_empty()
-                    }
-                }
+                && form
+                    .regional_variants
+                    .variants()
+                    .iter()
+                    .any(|v| !v.spelling.is_empty())
         });
         if !has_suggested_base {
             continue;
@@ -490,6 +489,7 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                 continue;
             }
             match (headwords, &mut form.regional_variants) {
+                (_, WordRegionalVariantsV3::UkUsMany { .. }) => {}
                 (
                     WordHeadwordsV2::Unified { common },
                     WordRegionalVariantsV3::Common { common: variant },
@@ -681,14 +681,8 @@ fn normalize_form_regularity(
     if let Some(current) = current {
         for pos in &current.pos {
             for form in &pos.forms {
-                match &form.regional_variants {
-                    WordRegionalVariantsV3::Common { common } => {
-                        stored.insert(common.id, common.is_regular);
-                    }
-                    WordRegionalVariantsV3::UkUs { uk, us } => {
-                        stored.insert(uk.id, uk.is_regular);
-                        stored.insert(us.id, us.is_regular);
-                    }
+                for variant in form.regional_variants.variants() {
+                    stored.insert(variant.id, *variant.is_regular);
                 }
             }
         }
@@ -705,14 +699,8 @@ fn normalize_form_regularity(
                     *value = Some(stored.get(&id).copied().flatten().unwrap_or(legacy));
                 }
             };
-            match &mut form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => {
-                    resolve(common.id, &mut common.is_regular)
-                }
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    resolve(uk.id, &mut uk.is_regular);
-                    resolve(us.id, &mut us.is_regular);
-                }
+            for variant in form.regional_variants.variants_mut() {
+                resolve(variant.id, variant.is_regular);
             }
         }
     }
@@ -730,39 +718,21 @@ fn preserve_missing_spelling_rich(
     };
     let mut stored = HashMap::new();
     for form in current.pos.iter().flat_map(|pos| &pos.forms) {
-        match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                stored.insert(
-                    (
-                        current_ids
-                            .get(&common.id)
-                            .copied()
-                            .unwrap_or((common.id, common.id)),
-                        Dialect::Common,
-                    ),
-                    (
-                        &common.spelling,
-                        &common.spelling_rich,
-                        &common.spelling_speech,
-                    ),
-                );
-            }
-            WordRegionalVariantsV3::UkUs { uk, us } => {
-                stored.insert(
-                    (
-                        current_ids.get(&uk.id).copied().unwrap_or((uk.id, uk.id)),
-                        Dialect::Uk,
-                    ),
-                    (&uk.spelling, &uk.spelling_rich, &uk.spelling_speech),
-                );
-                stored.insert(
-                    (
-                        current_ids.get(&us.id).copied().unwrap_or((us.id, us.id)),
-                        Dialect::Us,
-                    ),
-                    (&us.spelling, &us.spelling_rich, &us.spelling_speech),
-                );
-            }
+        for variant in form.regional_variants.variants() {
+            stored.insert(
+                (
+                    current_ids
+                        .get(&variant.id)
+                        .copied()
+                        .unwrap_or((variant.id, variant.id)),
+                    variant.dialect,
+                ),
+                (
+                    variant.spelling,
+                    variant.spelling_rich,
+                    variant.spelling_speech,
+                ),
+            );
         }
     }
     let preserve =
@@ -785,30 +755,14 @@ fn preserve_missing_spelling_rich(
             }
         };
     for form in proposed.pos.iter_mut().flat_map(|pos| &mut pos.forms) {
-        match &mut form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => preserve(
-                common.id,
-                Dialect::Common,
-                &common.spelling,
-                &mut common.spelling_rich,
-                &mut common.spelling_speech,
-            ),
-            WordRegionalVariantsV3::UkUs { uk, us } => {
-                preserve(
-                    uk.id,
-                    Dialect::Uk,
-                    &uk.spelling,
-                    &mut uk.spelling_rich,
-                    &mut uk.spelling_speech,
-                );
-                preserve(
-                    us.id,
-                    Dialect::Us,
-                    &us.spelling,
-                    &mut us.spelling_rich,
-                    &mut us.spelling_speech,
-                );
-            }
+        for variant in form.regional_variants.variants_mut() {
+            preserve(
+                variant.id,
+                variant.dialect,
+                variant.spelling,
+                variant.spelling_rich,
+                variant.spelling_speech,
+            );
         }
     }
 }
@@ -825,18 +779,19 @@ fn preserve_missing_phoneme_speech(
     };
     let mut stored = HashMap::new();
     for form in current.pos.iter().flat_map(|pos| &pos.forms) {
-        let variants = match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => vec![(
-                common.id,
-                Dialect::Common,
-                &common.spelling,
-                &common.pronunciations,
-            )],
-            WordRegionalVariantsV3::UkUs { uk, us } => vec![
-                (uk.id, Dialect::Uk, &uk.spelling, &uk.pronunciations),
-                (us.id, Dialect::Us, &us.spelling, &us.pronunciations),
-            ],
-        };
+        let variants = form
+            .regional_variants
+            .variants()
+            .into_iter()
+            .map(|variant| {
+                (
+                    variant.id,
+                    variant.dialect,
+                    variant.spelling,
+                    variant.pronunciations,
+                )
+            })
+            .collect::<Vec<_>>();
         for (id, dialect, spelling, pronunciations) in variants {
             for pronunciation in pronunciations {
                 stored.insert(
@@ -854,18 +809,19 @@ fn preserve_missing_phoneme_speech(
         }
     }
     for form in proposed.pos.iter_mut().flat_map(|pos| &mut pos.forms) {
-        let variants = match &mut form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => vec![(
-                common.id,
-                Dialect::Common,
-                &common.spelling,
-                &mut common.pronunciations,
-            )],
-            WordRegionalVariantsV3::UkUs { uk, us } => vec![
-                (uk.id, Dialect::Uk, &uk.spelling, &mut uk.pronunciations),
-                (us.id, Dialect::Us, &us.spelling, &mut us.pronunciations),
-            ],
-        };
+        let variants = form
+            .regional_variants
+            .variants_mut()
+            .into_iter()
+            .map(|variant| {
+                (
+                    variant.id,
+                    variant.dialect,
+                    variant.spelling as &String,
+                    variant.pronunciations,
+                )
+            })
+            .collect::<Vec<_>>();
         for (id, dialect, spelling, pronunciations) in variants {
             for pronunciation in pronunciations {
                 let identity = proposed_ids.get(&id).copied().unwrap_or((id, id));
@@ -910,47 +866,23 @@ fn preserve_missing_component_usages(
     preserve_missing_phoneme_speech(proposed, current);
     let mut current_by_variant = HashMap::<Uuid, (Dialect, Vec<PhraseComponentUsageV3>)>::new();
     for form in current.pos.iter().flat_map(|pos| &pos.forms) {
-        match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                current_by_variant.insert(
-                    common.id,
-                    (Dialect::Common, common.component_usages.to_vec()),
-                );
-            }
-            WordRegionalVariantsV3::UkUs { uk, us } => {
-                current_by_variant.insert(uk.id, (Dialect::Uk, uk.component_usages.to_vec()));
-                current_by_variant.insert(us.id, (Dialect::Us, us.component_usages.to_vec()));
-            }
+        for variant in form.regional_variants.variants() {
+            current_by_variant.insert(
+                variant.id,
+                (variant.dialect, variant.component_usages.to_vec()),
+            );
         }
     }
     let mut proposed_by_variant = HashMap::<Uuid, (Dialect, bool)>::new();
     for form in proposed.pos.iter_mut().flat_map(|pos| &mut pos.forms) {
-        match &mut form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                let was_present = common.component_usages.was_present();
-                proposed_by_variant.insert(common.id, (Dialect::Common, was_present));
-                common.component_usages.preserve_missing_from(
-                    current_by_variant
-                        .get(&common.id)
-                        .map_or(&[], |(_, values)| values.as_slice()),
-                );
-            }
-            WordRegionalVariantsV3::UkUs { uk, us } => {
-                let uk_was_present = uk.component_usages.was_present();
-                let us_was_present = us.component_usages.was_present();
-                proposed_by_variant.insert(uk.id, (Dialect::Uk, uk_was_present));
-                proposed_by_variant.insert(us.id, (Dialect::Us, us_was_present));
-                uk.component_usages.preserve_missing_from(
-                    current_by_variant
-                        .get(&uk.id)
-                        .map_or(&[], |(_, values)| values.as_slice()),
-                );
-                us.component_usages.preserve_missing_from(
-                    current_by_variant
-                        .get(&us.id)
-                        .map_or(&[], |(_, values)| values.as_slice()),
-                );
-            }
+        for variant in form.regional_variants.variants_mut() {
+            let was_present = variant.component_usages.was_present();
+            proposed_by_variant.insert(variant.id, (variant.dialect, was_present));
+            variant.component_usages.preserve_missing_from(
+                current_by_variant
+                    .get(&variant.id)
+                    .map_or(&[], |(_, values)| values.as_slice()),
+            );
         }
     }
     for (variant_id, (current_dialect, components)) in current_by_variant {
@@ -1083,9 +1015,7 @@ impl LexiconService {
         let mut forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
         normalize_form_regularity(&mut forms, None);
-        if !self.form_contents_supported && !forms.legacy_readable() {
-            return Err(crate::lexicon::shared_forms::upgrade_error().into());
-        }
+        self.ensure_form_contents_supported(&forms)?;
         let mut meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
@@ -1146,6 +1076,7 @@ impl LexiconService {
             capabilities: AdminWordV3Capabilities {
                 shared_form_contents: None,
                 form_content_reassignment: None,
+                multiple_form_spellings: None,
                 atomic_form_sense_bindings: Some(true),
                 multi_group_sense_bindings: Some(true),
                 text_links: Some(true),
@@ -1842,6 +1773,7 @@ impl LexiconService {
             capabilities: AdminWordV3Capabilities {
                 shared_form_contents: None,
                 form_content_reassignment: None,
+                multiple_form_spellings: None,
                 atomic_form_sense_bindings: Some(true),
                 multi_group_sense_bindings: Some(true),
                 text_links: Some(true),
@@ -2111,9 +2043,7 @@ impl LexiconService {
                 error
             )))
         })?;
-        if !self.form_contents_supported && !forms.legacy_readable() {
-            return Err(crate::lexicon::shared_forms::upgrade_error().into());
-        }
+        self.ensure_form_contents_supported(&forms)?;
         crate::lexicon::shared_forms::preserve_pronunciation_slots(&mut tx, entry_id, &mut forms)
             .await?;
         let mut meanings = historical.meanings;
@@ -2993,9 +2923,7 @@ impl LexiconService {
         }
         let forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
-        if !self.form_contents_supported && !forms.legacy_readable() {
-            return Err(crate::lexicon::shared_forms::upgrade_error().into());
-        }
+        self.ensure_form_contents_supported(&forms)?;
         let entry_kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
         let presentation =
             Self::v3_presentation_on(&mut *transaction, entry_id, record.revision, &forms).await?;
@@ -3474,17 +3402,12 @@ fn ensure_phrase_component_ownership(
     if kind == WordEntryKindV3::Phrase {
         return Ok(());
     }
-    let has_component_usages =
-        content
-            .pos
+    let has_component_usages = content.pos.iter().flat_map(|pos| &pos.forms).any(|form| {
+        form.regional_variants
+            .variants()
             .iter()
-            .flat_map(|pos| &pos.forms)
-            .any(|form| match &form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => !common.component_usages.is_empty(),
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    !uk.component_usages.is_empty() || !us.component_usages.is_empty()
-                }
-            });
+            .any(|variant| !variant.component_usages.is_empty())
+    });
     if has_component_usages {
         Err(LexiconServiceError::InvalidField {
             field: "component_usages",
@@ -3519,12 +3442,11 @@ pub(super) async fn validate_phrase_components_in(
     }
 
     for form in content.pos.iter().flat_map(|pos| &pos.forms) {
-        let within_limit = match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => common.component_usages.len() <= 100,
-            WordRegionalVariantsV3::UkUs { uk, us } => {
-                uk.component_usages.len() <= 100 && us.component_usages.len() <= 100
-            }
-        };
+        let within_limit = form
+            .regional_variants
+            .variants()
+            .iter()
+            .all(|variant| variant.component_usages.len() <= 100);
         if !within_limit {
             return Err(invalid_phrase_component());
         }
@@ -3610,11 +3532,11 @@ fn form_component_usages(
         .pos
         .iter()
         .flat_map(|pos| &pos.forms)
-        .flat_map(|form| match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => vec![&common.component_usages],
-            WordRegionalVariantsV3::UkUs { uk, us } => {
-                vec![&uk.component_usages, &us.component_usages]
-            }
+        .flat_map(|form| {
+            form.regional_variants
+                .variants()
+                .into_iter()
+                .map(|variant| variant.component_usages)
         })
         .flat_map(|usages| usages.iter())
 }
@@ -3626,11 +3548,11 @@ fn form_component_usage_slots(
         .pos
         .iter_mut()
         .flat_map(|pos| &mut pos.forms)
-        .flat_map(|form| match &mut form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => vec![&mut common.component_usages],
-            WordRegionalVariantsV3::UkUs { uk, us } => {
-                vec![&mut uk.component_usages, &mut us.component_usages]
-            }
+        .flat_map(|form| {
+            form.regional_variants
+                .variants_mut()
+                .into_iter()
+                .map(|variant| variant.component_usages)
         })
 }
 
@@ -3752,15 +3674,11 @@ fn phrase_component_resolved_target_ids(word: &ComponentTargetWord) -> Vec<Uuid>
         .pos
         .iter()
         .flat_map(|pos| &pos.forms)
-        .flat_map(|form| match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                common.component_usages.iter().collect::<Vec<_>>()
-            }
-            WordRegionalVariantsV3::UkUs { uk, us } => uk
-                .component_usages
-                .iter()
-                .chain(&us.component_usages)
-                .collect(),
+        .flat_map(|form| {
+            form.regional_variants
+                .variants()
+                .into_iter()
+                .flat_map(|variant| variant.component_usages.iter())
         });
     let from_meanings = word
         .meanings
@@ -3806,22 +3724,17 @@ pub(super) fn component_target_gloss(
 
 /// 变体实例 id 快速路径：同结构保存、存量引用按旧口径命中，行为不变。
 fn variant_id_matches(form: &WordConcreteFormV3, target_variant_id: Uuid) -> bool {
-    match &form.regional_variants {
-        WordRegionalVariantsV3::Common { common } => common.id == target_variant_id,
-        WordRegionalVariantsV3::UkUs { uk, us } => {
-            uk.id == target_variant_id || us.id == target_variant_id
-        }
-    }
+    form.regional_variants
+        .variants()
+        .iter()
+        .any(|variant| variant.id == target_variant_id)
 }
 
 /// 目标方言侧在当前结构下是否可定位。变体实例 id 会随「英美通用 ↔ 英/美」结构切换而换，
 /// 但方言与结构的映射是双向的：common 结构任一引用方言都能落到它；uk/us 结构能接 common 引用
 /// 与自己的方言。两者均无法定位时才视为失效。
 ///
-/// 注意 `Dialect` 当前只有 common/uk/us 三值，第二个分支已列全剩余取值，本函数**恒为 true**；
-/// 也就是说成分引用的有效性实际由 form / base / sense 的存在性决定，`target_variant_id` 仅作
-/// 记录、不再参与判定（绑定坐标是「form + 方言侧」，见 design.md §2.2）。保留这个 match 是给
-/// 方言集合扩张留的编译期兜底：新增 `Dialect` 变体会让它不再穷尽，必须显式补齐映射。
+/// 多拼写模式保留旧 common 引用的语义坐标；新英美引用指向明确拼写，删除后不能重解析到另一条。
 fn dialect_side_available(form: &WordConcreteFormV3, target_dialect: Dialect) -> bool {
     match (&form.regional_variants, target_dialect) {
         // 通用结构：单一拼写，任何目标方言都落它。
@@ -3829,6 +3742,8 @@ fn dialect_side_available(form: &WordConcreteFormV3, target_dialect: Dialect) ->
         // 分离结构：uk/us 侧都在。这里只判「该侧存在」；具体落到哪一侧属于业务口径——
         // 例句路径另有拼写校验，成分路径没有，只认 form / base / sense 存在性。
         (WordRegionalVariantsV3::UkUs { .. }, Dialect::Common | Dialect::Uk | Dialect::Us) => true,
+        (WordRegionalVariantsV3::UkUsMany { .. }, Dialect::Common) => true,
+        (WordRegionalVariantsV3::UkUsMany { .. }, Dialect::Uk | Dialect::Us) => false,
     }
 }
 
@@ -3867,8 +3782,8 @@ pub(super) fn phrase_component_matches_target(
     }
     // 变体定位：先走 id 快速路径（同结构、存量引用完全不变）；未命中时按方言侧重解析。
     // 结构漂移（common ↔ uk_us）会换掉变体实例 id，而 common/uk/us 之间双向可映射
-    // （见 dialect_side_available：该判定当前恒为 true），因此漂移不构成失效；真正的失效由
-    // form / base / sense 的存在性判（见下方 base 校验与 target_content_gloss）。
+    // 因此旧 common 引用仍可按词形定位；多拼写模式中明确英美侧的引用还必须保留具体拼写 ID。
+    // form / base / sense 的存在性仍按下方 base 校验与 target_content_gloss 判断。
     if !variant_id_matches(form, target_variant_id) && !dialect_side_available(form, target_dialect)
     {
         return false;
@@ -4391,13 +4306,11 @@ pub(super) fn pronunciation_rows(forms: &DraftFormsStepContentV3) -> Vec<&WordPr
         .pos
         .iter()
         .flat_map(|pos| &pos.forms)
-        .flat_map(|form| match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                common.pronunciations.iter().collect::<Vec<_>>()
-            }
-            WordRegionalVariantsV3::UkUs { uk, us } => {
-                uk.pronunciations.iter().chain(&us.pronunciations).collect()
-            }
+        .flat_map(|form| {
+            form.regional_variants
+                .variants()
+                .into_iter()
+                .flat_map(|variant| variant.pronunciations.iter())
         })
         .collect()
 }
@@ -4407,15 +4320,11 @@ fn pronunciation_rows_mut(forms: &mut DraftFormsStepContentV3) -> Vec<&mut WordP
         .pos
         .iter_mut()
         .flat_map(|pos| &mut pos.forms)
-        .flat_map(|form| match &mut form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                common.pronunciations.iter_mut().collect::<Vec<_>>()
-            }
-            WordRegionalVariantsV3::UkUs { uk, us } => uk
-                .pronunciations
-                .iter_mut()
-                .chain(&mut us.pronunciations)
-                .collect(),
+        .flat_map(|form| {
+            form.regional_variants
+                .variants_mut()
+                .into_iter()
+                .flat_map(|variant| variant.pronunciations.iter_mut())
         })
         .collect()
 }
@@ -4425,14 +4334,11 @@ fn spelling_speeches(forms: &DraftFormsStepContentV3) -> Vec<(Uuid, &SpellingSpe
         .pos
         .iter()
         .flat_map(|pos| &pos.forms)
-        .flat_map(|form| match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                vec![(common.id, common.spelling_speech.as_deref())]
-            }
-            WordRegionalVariantsV3::UkUs { uk, us } => vec![
-                (uk.id, uk.spelling_speech.as_deref()),
-                (us.id, us.spelling_speech.as_deref()),
-            ],
+        .flat_map(|form| {
+            form.regional_variants
+                .variants()
+                .into_iter()
+                .map(|variant| (variant.id, variant.spelling_speech.as_deref()))
         })
         .filter_map(|(id, speech)| speech.map(|speech| (id, speech)))
         .collect()
@@ -4443,14 +4349,11 @@ fn spelling_speeches_mut(forms: &mut DraftFormsStepContentV3) -> Vec<&mut Spelli
         .pos
         .iter_mut()
         .flat_map(|pos| &mut pos.forms)
-        .flat_map(|form| match &mut form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                vec![common.spelling_speech.as_deref_mut()]
-            }
-            WordRegionalVariantsV3::UkUs { uk, us } => vec![
-                uk.spelling_speech.as_deref_mut(),
-                us.spelling_speech.as_deref_mut(),
-            ],
+        .flat_map(|form| {
+            form.regional_variants
+                .variants_mut()
+                .into_iter()
+                .map(|variant| variant.spelling_speech.as_deref_mut())
         })
         .flatten()
         .collect()
@@ -5294,42 +5197,18 @@ fn v3_form_proposed_nodes(content: &DraftFormsStepContentV3) -> Vec<ProposedNode
                 node_role: "forms.concrete_form".to_owned(),
                 stable_slot: false,
             });
-            match &form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => push_v3_form_variant_nodes(
+            for variant in form.regional_variants.variants() {
+                push_v3_form_variant_nodes(
                     &mut nodes,
                     form.id,
-                    common.id,
-                    "common",
-                    common.pronunciations.iter().map(|value| value.id),
-                    common.component_usages.iter().map(|value| match value {
+                    variant.id,
+                    variant.dialect.as_str(),
+                    variant.pronunciations.iter().map(|row| row.id),
+                    variant.component_usages.iter().map(|row| match row {
                         PhraseComponentUsageV3::Unresolved { id, .. }
                         | PhraseComponentUsageV3::Resolved { id, .. } => *id,
                     }),
-                ),
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    push_v3_form_variant_nodes(
-                        &mut nodes,
-                        form.id,
-                        uk.id,
-                        "uk",
-                        uk.pronunciations.iter().map(|value| value.id),
-                        uk.component_usages.iter().map(|value| match value {
-                            PhraseComponentUsageV3::Unresolved { id, .. }
-                            | PhraseComponentUsageV3::Resolved { id, .. } => *id,
-                        }),
-                    );
-                    push_v3_form_variant_nodes(
-                        &mut nodes,
-                        form.id,
-                        us.id,
-                        "us",
-                        us.pronunciations.iter().map(|value| value.id),
-                        us.component_usages.iter().map(|value| match value {
-                            PhraseComponentUsageV3::Unresolved { id, .. }
-                            | PhraseComponentUsageV3::Resolved { id, .. } => *id,
-                        }),
-                    );
-                }
+                );
             }
         }
     }
@@ -5447,49 +5326,19 @@ fn v3_form_node_types(content: &DraftFormsStepContentV3) -> HashMap<Uuid, FormsI
         }
         for form in &pos.forms {
             nodes.insert(form.id, FormsImpactNodeTypeV3::Form);
-            match &form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => {
-                    nodes.insert(common.id, FormsImpactNodeTypeV3::Variant);
-                    for pronunciation in &common.pronunciations {
-                        nodes.insert(pronunciation.id, FormsImpactNodeTypeV3::Pronunciation);
-                    }
-                    for component in &common.component_usages {
-                        nodes.insert(
-                            match component {
-                                PhraseComponentUsageV3::Unresolved { id, .. }
-                                | PhraseComponentUsageV3::Resolved { id, .. } => *id,
-                            },
-                            FormsImpactNodeTypeV3::PhraseComponentUsage,
-                        );
-                    }
+            for variant in form.regional_variants.variants() {
+                nodes.insert(variant.id, FormsImpactNodeTypeV3::Variant);
+                for row in variant.pronunciations {
+                    nodes.insert(row.id, FormsImpactNodeTypeV3::Pronunciation);
                 }
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    nodes.insert(uk.id, FormsImpactNodeTypeV3::Variant);
-                    for pronunciation in &uk.pronunciations {
-                        nodes.insert(pronunciation.id, FormsImpactNodeTypeV3::Pronunciation);
-                    }
-                    for component in &uk.component_usages {
-                        nodes.insert(
-                            match component {
-                                PhraseComponentUsageV3::Unresolved { id, .. }
-                                | PhraseComponentUsageV3::Resolved { id, .. } => *id,
-                            },
-                            FormsImpactNodeTypeV3::PhraseComponentUsage,
-                        );
-                    }
-                    nodes.insert(us.id, FormsImpactNodeTypeV3::Variant);
-                    for pronunciation in &us.pronunciations {
-                        nodes.insert(pronunciation.id, FormsImpactNodeTypeV3::Pronunciation);
-                    }
-                    for component in &us.component_usages {
-                        nodes.insert(
-                            match component {
-                                PhraseComponentUsageV3::Unresolved { id, .. }
-                                | PhraseComponentUsageV3::Resolved { id, .. } => *id,
-                            },
-                            FormsImpactNodeTypeV3::PhraseComponentUsage,
-                        );
-                    }
+                for row in variant.component_usages {
+                    nodes.insert(
+                        match row {
+                            PhraseComponentUsageV3::Unresolved { id, .. }
+                            | PhraseComponentUsageV3::Resolved { id, .. } => *id,
+                        },
+                        FormsImpactNodeTypeV3::PhraseComponentUsage,
+                    );
                 }
             }
         }
@@ -5729,50 +5578,20 @@ async fn replace_v3_forms(
             .execute(&mut **tx)
             .await
             .map_err(database_error)?;
-            match &form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => {
-                    insert_v3_variant(
-                        tx,
-                        entry_id,
-                        form.id,
-                        "common",
-                        common.id,
-                        &common.spelling,
-                        common.is_regular,
-                        common.origin,
-                        &common.pronunciations,
-                        &common.component_usages,
-                    )
-                    .await?;
-                }
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    insert_v3_variant(
-                        tx,
-                        entry_id,
-                        form.id,
-                        "uk",
-                        uk.id,
-                        &uk.spelling,
-                        uk.is_regular,
-                        uk.origin,
-                        &uk.pronunciations,
-                        &uk.component_usages,
-                    )
-                    .await?;
-                    insert_v3_variant(
-                        tx,
-                        entry_id,
-                        form.id,
-                        "us",
-                        us.id,
-                        &us.spelling,
-                        us.is_regular,
-                        us.origin,
-                        &us.pronunciations,
-                        &us.component_usages,
-                    )
-                    .await?;
-                }
+            for variant in form.regional_variants.variants() {
+                insert_v3_variant(
+                    tx,
+                    entry_id,
+                    form.id,
+                    variant.dialect.as_str(),
+                    variant.id,
+                    variant.spelling,
+                    *variant.is_regular,
+                    *variant.origin,
+                    variant.pronunciations,
+                    variant.component_usages,
+                )
+                .await?;
             }
         }
         for group in &pos.form_groups {
@@ -5994,7 +5813,7 @@ async fn upsert_v3_node(
         node_role,
         "forms.form_variant:common" | "forms.form_variant:uk" | "forms.form_variant:us"
     );
-    if stable_slot {
+    if stable_slot && node_role == "forms.form_variant:common" {
         let existing = sqlx::query_scalar::<_, Uuid>(
             r#"
             SELECT id
@@ -6196,37 +6015,13 @@ const fn pronunciation_style_name(value: PronunciationStyle) -> &'static str {
 fn canonicalize_v3_forms(content: &mut DraftFormsStepContentV3) -> Result<(), LexiconServiceError> {
     for pos in &mut content.pos {
         for form in &mut pos.forms {
-            match &mut form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => {
-                    canonicalize_v3_spelling(&mut common.spelling)?;
-                    if let Some(rich) = &mut common.spelling_rich {
-                        crate::lexicon::rich_text::canonicalize_spelling(rich);
-                    }
-                    if let Some(speech) = &mut common.spelling_speech {
-                        crate::lexicon::rich_text::canonicalize_spelling_speech(
-                            &mut speech.content,
-                        );
-                    }
+            for variant in form.regional_variants.variants_mut() {
+                canonicalize_v3_spelling(variant.spelling)?;
+                if let Some(rich) = variant.spelling_rich {
+                    crate::lexicon::rich_text::canonicalize_spelling(rich);
                 }
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    canonicalize_v3_spelling(&mut uk.spelling)?;
-                    if let Some(rich) = &mut uk.spelling_rich {
-                        crate::lexicon::rich_text::canonicalize_spelling(rich);
-                    }
-                    if let Some(speech) = &mut uk.spelling_speech {
-                        crate::lexicon::rich_text::canonicalize_spelling_speech(
-                            &mut speech.content,
-                        );
-                    }
-                    canonicalize_v3_spelling(&mut us.spelling)?;
-                    if let Some(rich) = &mut us.spelling_rich {
-                        crate::lexicon::rich_text::canonicalize_spelling(rich);
-                    }
-                    if let Some(speech) = &mut us.spelling_speech {
-                        crate::lexicon::rich_text::canonicalize_spelling_speech(
-                            &mut speech.content,
-                        );
-                    }
+                if let Some(speech) = variant.spelling_speech {
+                    crate::lexicon::rich_text::canonicalize_spelling_speech(&mut speech.content);
                 }
             }
         }
@@ -6269,14 +6064,8 @@ fn canonicalize_pronunciation_extensions(pronunciations: &mut [WordPronunciation
 pub(crate) fn canonicalize_forms_pronunciation_extensions(content: &mut DraftFormsStepContentV3) {
     for pos in &mut content.pos {
         for form in &mut pos.forms {
-            match &mut form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => {
-                    canonicalize_pronunciation_extensions(&mut common.pronunciations);
-                }
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    canonicalize_pronunciation_extensions(&mut uk.pronunciations);
-                    canonicalize_pronunciation_extensions(&mut us.pronunciations);
-                }
+            for variant in form.regional_variants.variants_mut() {
+                canonicalize_pronunciation_extensions(variant.pronunciations);
             }
         }
     }

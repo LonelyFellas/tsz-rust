@@ -566,6 +566,90 @@ pub enum WordRegionalVariantsV3 {
         uk: WordUkFormVariantV3,
         us: WordUsFormVariantV3,
     },
+    /// Independent ordered spelling lists. IDs follow spellings when reordered.
+    UkUsMany {
+        #[schema(min_items = 1, max_items = 2000)]
+        uk: Vec<WordUkFormVariantV3>,
+        #[schema(min_items = 1, max_items = 2000)]
+        us: Vec<WordUsFormVariantV3>,
+    },
+}
+
+pub(crate) struct WordFormVariantRefV3<'a> {
+    pub id: Uuid,
+    pub dialect: Dialect,
+    pub spelling: &'a String,
+    pub spelling_rich: &'a Option<RichTextV2V3>,
+    pub spelling_speech: &'a Option<Box<SpellingSpeechV3>>,
+    pub is_regular: &'a Option<bool>,
+    pub origin: &'a TextOrigin,
+    pub pronunciations: &'a Vec<WordPronunciationV3>,
+    pub component_usages: &'a PresenceAwareVec<PhraseComponentUsageV3>,
+}
+
+pub(crate) struct WordFormVariantMutV3<'a> {
+    pub id: Uuid,
+    pub dialect: Dialect,
+    pub spelling: &'a mut String,
+    pub spelling_rich: &'a mut Option<RichTextV2V3>,
+    pub spelling_speech: &'a mut Option<Box<SpellingSpeechV3>>,
+    pub is_regular: &'a mut Option<bool>,
+    pub pronunciations: &'a mut Vec<WordPronunciationV3>,
+    pub component_usages: &'a mut PresenceAwareVec<PhraseComponentUsageV3>,
+}
+
+impl WordRegionalVariantsV3 {
+    pub(crate) fn variants(&self) -> Vec<WordFormVariantRefV3<'_>> {
+        macro_rules! view {
+            ($row:expr, $dialect:expr) => {
+                WordFormVariantRefV3 {
+                    id: $row.id,
+                    dialect: $dialect,
+                    spelling: &$row.spelling,
+                    spelling_rich: &$row.spelling_rich,
+                    spelling_speech: &$row.spelling_speech,
+                    is_regular: &$row.is_regular,
+                    origin: &$row.origin,
+                    pronunciations: &$row.pronunciations,
+                    component_usages: &$row.component_usages,
+                }
+            };
+        }
+        match self {
+            Self::Common { common } => vec![view!(common, Dialect::Common)],
+            Self::UkUs { uk, us } => vec![view!(uk, Dialect::Uk), view!(us, Dialect::Us)],
+            Self::UkUsMany { uk, us } => uk
+                .iter()
+                .map(|row| view!(row, Dialect::Uk))
+                .chain(us.iter().map(|row| view!(row, Dialect::Us)))
+                .collect(),
+        }
+    }
+    pub(crate) fn variants_mut(&mut self) -> Vec<WordFormVariantMutV3<'_>> {
+        macro_rules! view {
+            ($row:expr, $dialect:expr) => {
+                WordFormVariantMutV3 {
+                    id: $row.id,
+                    dialect: $dialect,
+                    spelling: &mut $row.spelling,
+                    spelling_rich: &mut $row.spelling_rich,
+                    spelling_speech: &mut $row.spelling_speech,
+                    is_regular: &mut $row.is_regular,
+                    pronunciations: &mut $row.pronunciations,
+                    component_usages: &mut $row.component_usages,
+                }
+            };
+        }
+        match self {
+            Self::Common { common } => vec![view!(common, Dialect::Common)],
+            Self::UkUs { uk, us } => vec![view!(uk, Dialect::Uk), view!(us, Dialect::Us)],
+            Self::UkUsMany { uk, us } => uk
+                .iter_mut()
+                .map(|row| view!(row, Dialect::Uk))
+                .chain(us.iter_mut().map(|row| view!(row, Dialect::Us)))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1651,6 +1735,9 @@ pub struct AdminWordV3Capabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub form_content_reassignment: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub multiple_form_spellings: Option<bool>,
     /// 支持在词形影响预览及保存中原子更新既有词义绑定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]

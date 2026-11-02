@@ -2717,7 +2717,7 @@ mod tests {
         let regional = schemas["WordRegionalVariantsV3"]["oneOf"]
             .as_array()
             .expect("地区形状应为 oneOf");
-        assert_eq!(regional.len(), 2);
+        assert_eq!(regional.len(), 3);
         assert!(
             regional
                 .iter()
@@ -2735,6 +2735,34 @@ mod tests {
             regional[1]["required"],
             serde_json::json!(["uk", "us", "mode"])
         );
+
+        assert_eq!(
+            regional[2]["properties"]["mode"]["enum"],
+            serde_json::json!(["uk_us_many"])
+        );
+        assert_eq!(
+            regional[2]["required"],
+            serde_json::json!(["uk", "us", "mode"])
+        );
+        for name in [
+            "WordRegionalVariantsV3",
+            "FormContentRegionalVariantsV3",
+            "FormRegionalBindingsV3",
+        ] {
+            let branches = schemas[name]["oneOf"].as_array().unwrap();
+            let many = branches
+                .iter()
+                .find(|branch| {
+                    branch["properties"]["mode"]["enum"] == serde_json::json!(["uk_us_many"])
+                })
+                .unwrap();
+            assert_eq!(many["additionalProperties"], false);
+            for side in ["uk", "us"] {
+                assert_eq!(many["properties"][side]["type"], "array");
+                assert_eq!(many["properties"][side]["minItems"], 1);
+                assert_eq!(many["properties"][side]["maxItems"], 2000);
+            }
+        }
 
         let paths = &json["paths"];
         assert_eq!(

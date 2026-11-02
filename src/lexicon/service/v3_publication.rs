@@ -15,7 +15,6 @@ use crate::lexicon::dto::{
     AdminWordStatus, AdminWordV3, AdminWordV3Envelope, DraftFormsStepContentV3,
     DraftMeaningsStepContentV3, PersistedWordStep, PhraseComponentUsageV3, PublishAdminWordV3Input,
     RollbackPublicationV3Input, SentenceAssociationsStateV2, StepSaveIntent,
-    WordRegionalVariantsV3,
 };
 use crate::lexicon::model::{
     NewPublicationSenseReference, PublicationSenseReferenceKind, PublicationTargetContentScope,
@@ -1241,14 +1240,12 @@ pub(super) fn all_component_usages(
         .pos
         .iter()
         .flat_map(|pos| &pos.forms)
-        .flat_map(|form| match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => common.component_usages.clone(),
-            WordRegionalVariantsV3::UkUs { uk, us } => uk
-                .component_usages
-                .iter()
-                .chain(&us.component_usages)
-                .cloned()
-                .collect(),
+        .flat_map(|form| {
+            form.regional_variants
+                .variants()
+                .into_iter()
+                .flat_map(|v| v.component_usages.iter().cloned())
+                .collect::<Vec<_>>()
         })
         .chain(
             meanings
@@ -1544,35 +1541,15 @@ async fn insert_v3_publication_nodes(
     .map_err(database_error)?;
     for pos in &word.forms.pos {
         for form in &pos.forms {
-            match &form.regional_variants {
-                crate::lexicon::dto::WordRegionalVariantsV3::Common { common } => {
-                    update_v3_pronunciation_hashes(
-                        tx,
-                        publication_id,
-                        &common.spelling,
-                        "common",
-                        &common.pronunciations,
-                    )
-                    .await?;
-                }
-                crate::lexicon::dto::WordRegionalVariantsV3::UkUs { uk, us } => {
-                    update_v3_pronunciation_hashes(
-                        tx,
-                        publication_id,
-                        &uk.spelling,
-                        "uk",
-                        &uk.pronunciations,
-                    )
-                    .await?;
-                    update_v3_pronunciation_hashes(
-                        tx,
-                        publication_id,
-                        &us.spelling,
-                        "us",
-                        &us.pronunciations,
-                    )
-                    .await?;
-                }
+            for v in form.regional_variants.variants() {
+                update_v3_pronunciation_hashes(
+                    tx,
+                    publication_id,
+                    v.spelling,
+                    v.dialect.as_str(),
+                    v.pronunciations,
+                )
+                .await?;
             }
         }
     }

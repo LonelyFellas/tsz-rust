@@ -37,6 +37,22 @@ pub(crate) fn ensure_write(
     current: &DraftFormsStepContentV3,
     proposed: &DraftFormsStepContentV3,
 ) -> Result<(), crate::lexicon::service::LexiconServiceError> {
+    for before in current.pos.iter().flat_map(|pos| &pos.forms) {
+        if let WordRegionalVariantsV3::UkUsMany { uk, us } = &before.regional_variants
+            && (uk.len() > 1 || us.len() > 1)
+            && let Some(after) = proposed
+                .pos
+                .iter()
+                .flat_map(|pos| &pos.forms)
+                .find(|row| row.id == before.id)
+            && !matches!(
+                after.regional_variants,
+                WordRegionalVariantsV3::UkUsMany { .. }
+            )
+        {
+            return Err(upgrade_error().into());
+        }
+    }
     if current.shared.is_some() && proposed.shared.is_none() {
         return Err(upgrade_error().into());
     }
@@ -51,6 +67,21 @@ pub(crate) fn require_request_capability(
         .get("content")
         .and_then(|content| content.get("forms_format"))
         .is_some();
+    fn contains_multiple(value: &Value) -> bool {
+        value.get("mode").and_then(Value::as_str) == Some("uk_us_many")
+            || match value {
+                Value::Object(rows) => rows.values().any(contains_multiple),
+                Value::Array(rows) => rows.iter().any(contains_multiple),
+                _ => false,
+            }
+    }
+    if contains_multiple(input)
+        && !headers
+            .get("x-tsz-multiple-spellings")
+            .is_some_and(|value| value == "v1")
+    {
+        return Err(upgrade_error());
+    }
     if shared != supported(headers) {
         return Err(upgrade_error());
     }
@@ -61,6 +92,13 @@ pub(crate) fn project_response(
     headers: &axum::http::HeaderMap,
     value: &mut Value,
 ) -> Result<(), crate::error::AppError> {
+    if value.get("mode").and_then(Value::as_str) == Some("uk_us_many")
+        && !headers
+            .get("x-tsz-multiple-spellings")
+            .is_some_and(|value| value == "v1")
+    {
+        return Err(upgrade_error());
+    }
     match value {
         Value::Object(object) => {
             if !supported(headers) {
@@ -82,6 +120,17 @@ pub(crate) fn project_response(
                 let mut forms: DraftFormsStepContentV3 =
                     serde_json::from_value(forms_value.clone())
                         .map_err(crate::error::AppError::internal)?;
+                if forms.pos.iter().flat_map(|pos| &pos.forms).any(|form| {
+                    matches!(
+                        form.regional_variants,
+                        WordRegionalVariantsV3::UkUsMany { .. }
+                    )
+                }) && !headers
+                    .get("x-tsz-multiple-spellings")
+                    .is_some_and(|value| value == "v1")
+                {
+                    return Err(upgrade_error());
+                }
                 if supported(headers) {
                     *forms_value =
                         serde_json::to_value(forms.shared_representation().map_err(|error| {
@@ -90,6 +139,18 @@ pub(crate) fn project_response(
                         .map_err(crate::error::AppError::internal)?;
                     let capabilities = object.get_mut("capabilities").expect("capabilities exists");
                     capabilities["shared_form_contents"] = serde_json::json!(true);
+                    if headers
+                        .get("x-tsz-multiple-spellings")
+                        .is_some_and(|value| value == "v1")
+                    {
+                        capabilities["multiple_form_spellings"] = serde_json::json!(true);
+                    } else {
+                        capabilities
+                            .as_object_mut()
+                            .expect("capabilities object")
+                            .remove("multiple_form_spellings");
+                    }
+
                     if headers
                         .get("x-tsz-form-content-reassignment")
                         .is_some_and(|value| value == "v1")
@@ -148,6 +209,21 @@ fn variants(regional: &WordRegionalVariantsV3) -> Vec<(&str, Value)> {
                 serde_json::to_value(us).expect("serializable variant"),
             ),
         ],
+        WordRegionalVariantsV3::UkUsMany { uk, us } => uk
+            .iter()
+            .map(|row| {
+                (
+                    "uk",
+                    serde_json::to_value(row).expect("serializable variant"),
+                )
+            })
+            .chain(us.iter().map(|row| {
+                (
+                    "us",
+                    serde_json::to_value(row).expect("serializable variant"),
+                )
+            }))
+            .collect(),
     }
 }
 
@@ -212,10 +288,7 @@ fn extract_variant(
 }
 
 fn binding_variants(regional: &FormRegionalBindingsV3) -> Vec<(&str, &FormVariantBindingV3)> {
-    match regional {
-        FormRegionalBindingsV3::Common { common } => vec![("common", common)],
-        FormRegionalBindingsV3::UkUs { uk, us } => vec![("uk", uk), ("us", us)],
-    }
+    regional.variants()
 }
 
 impl DraftFormsStepContentV3 {
@@ -258,37 +331,69 @@ impl DraftFormsStepContentV3 {
                 let previous_variants: HashMap<_, _> = previous
                     .into_iter()
                     .flat_map(|binding| binding_variants(&binding.regional_bindings))
+                    .map(|(_, row)| (row.id, row))
                     .collect();
                 let extracted = variants(&form.regional_variants)
                     .into_iter()
                     .map(|(dialect, value)| {
                         extract_variant(
                             &value,
-                            previous_variants.get(dialect).copied(),
+                            previous_variants
+                                .get(
+                                    &serde_json::from_value::<Uuid>(value["id"].clone())
+                                        .map_err(|e| e.to_string())?,
+                                )
+                                .copied(),
                             group.is_regular,
                         )
+                        .map(|(content, binding)| (dialect, content, binding))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let (regional_variants, regional_bindings) = match extracted.as_slice() {
-                    [(content, binding)] => (
+                let (regional_variants, regional_bindings) = match &form.regional_variants {
+                    WordRegionalVariantsV3::Common { .. } => (
                         FormContentRegionalVariantsV3::Common {
-                            common: content.clone(),
+                            common: extracted[0].1.clone(),
                         },
                         FormRegionalBindingsV3::Common {
-                            common: binding.clone(),
+                            common: extracted[0].2.clone(),
                         },
                     ),
-                    [(uk, uk_binding), (us, us_binding)] => (
+                    WordRegionalVariantsV3::UkUs { .. } => (
                         FormContentRegionalVariantsV3::UkUs {
-                            uk: uk.clone(),
-                            us: us.clone(),
+                            uk: extracted[0].1.clone(),
+                            us: extracted[1].1.clone(),
                         },
                         FormRegionalBindingsV3::UkUs {
-                            uk: uk_binding.clone(),
-                            us: us_binding.clone(),
+                            uk: extracted[0].2.clone(),
+                            us: extracted[1].2.clone(),
                         },
                     ),
-                    _ => return Err("invalid regional shape".into()),
+                    WordRegionalVariantsV3::UkUsMany { .. } => (
+                        FormContentRegionalVariantsV3::UkUsMany {
+                            uk: extracted
+                                .iter()
+                                .filter(|row| row.0 == "uk")
+                                .map(|row| row.1.clone())
+                                .collect(),
+                            us: extracted
+                                .iter()
+                                .filter(|row| row.0 == "us")
+                                .map(|row| row.1.clone())
+                                .collect(),
+                        },
+                        FormRegionalBindingsV3::UkUsMany {
+                            uk: extracted
+                                .iter()
+                                .filter(|row| row.0 == "uk")
+                                .map(|row| row.2.clone())
+                                .collect(),
+                            us: extracted
+                                .iter()
+                                .filter(|row| row.0 == "us")
+                                .map(|row| row.2.clone())
+                                .collect(),
+                        },
+                    ),
                 };
                 let content = FormContentV3 {
                     id: content_id,
@@ -370,14 +475,12 @@ impl DraftFormsStepContentV3 {
         } else {
             for form in self.pos.iter().flat_map(|pos| &pos.forms) {
                 let content_id = legacy_slot("content", form.id);
-                let variants = match &form.regional_variants {
-                    WordRegionalVariantsV3::Common { common } => {
-                        vec![(common.id, &common.pronunciations)]
-                    }
-                    WordRegionalVariantsV3::UkUs { uk, us } => {
-                        vec![(uk.id, &uk.pronunciations), (us.id, &us.pronunciations)]
-                    }
-                };
+                let variants = form
+                    .regional_variants
+                    .variants()
+                    .into_iter()
+                    .map(|row| (row.id, row.pronunciations))
+                    .collect::<Vec<_>>();
                 for (id, rows) in variants {
                     ids.insert(id, (content_id, legacy_slot("variant", id)));
                     for row in rows {
@@ -581,10 +684,12 @@ impl SharedFormsStepContentV3 {
                     format!("invalid content {}", content.id),
                 ));
             }
-            let variants = match &content.regional_variants {
-                FormContentRegionalVariantsV3::Common { common } => vec![common],
-                FormContentRegionalVariantsV3::UkUs { uk, us } => vec![uk, us],
-            };
+            let variants = content
+                .regional_variants
+                .variants()
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect::<Vec<_>>();
             for variant in variants {
                 if !slots.insert(variant.id)
                     || variant
@@ -603,10 +708,7 @@ impl SharedFormsStepContentV3 {
         let mut identities = HashMap::new();
         for content in &self.contents {
             identities.insert(content.id, (content.id, None, "content"));
-            let variants = match &content.regional_variants {
-                FormContentRegionalVariantsV3::Common { common } => vec![("common", common)],
-                FormContentRegionalVariantsV3::UkUs { uk, us } => vec![("uk", uk), ("us", us)],
-            };
+            let variants = content.regional_variants.variants();
             for (side, variant) in variants {
                 identities.insert(variant.id, (content.id, Some(content.id), side));
                 for row in &variant.pronunciations {
@@ -623,14 +725,6 @@ impl SharedFormsStepContentV3 {
                     "too many pronunciation mappings".into(),
                 ));
             }
-            let mut regions = match &content.regional_variants {
-                FormContentRegionalVariantsV3::Common { common } => {
-                    HashMap::from([("common", common.id)])
-                }
-                FormContentRegionalVariantsV3::UkUs { uk, us } => {
-                    HashMap::from([("uk", uk.id), ("us", us.id)])
-                }
-            };
             for mapping in &content.pronunciation_slots {
                 if !mapping_ids.insert(mapping.id) {
                     return Err(content_error(
@@ -641,11 +735,7 @@ impl SharedFormsStepContentV3 {
                 let mut sides = 0;
                 for (side, slot) in pronunciation_slots(mapping) {
                     sides += 1;
-                    if !mapping_slots.insert(slot.id)
-                        || regions
-                            .insert(side, slot.variant_slot_id)
-                            .is_some_and(|id| id != slot.variant_slot_id)
-                    {
+                    if !mapping_slots.insert(slot.id) {
                         return Err(content_error(
                             content.id,
                             "invalid pronunciation slot correspondence".into(),
@@ -742,6 +832,44 @@ impl SharedFormsStepContentV3 {
                         "common",
                         vec![("common", expand(common, reference, "common", &mut nodes)?)],
                     ),
+                    (
+                        FormContentRegionalVariantsV3::UkUsMany { uk, us },
+                        FormRegionalBindingsV3::UkUsMany {
+                            uk: uk_ref,
+                            us: us_ref,
+                        },
+                    ) => {
+                        let mut values = Vec::new();
+                        for (side, source, references) in [("uk", uk, uk_ref), ("us", us, us_ref)] {
+                            if source.is_empty()
+                                || source.len() > 2000
+                                || source.len() != references.len()
+                            {
+                                return Err(error(
+                                    "each dialect requires a complete nonempty spelling list"
+                                        .into(),
+                                ));
+                            }
+                            let references: HashMap<_, _> = references
+                                .iter()
+                                .map(|row| (row.content_slot_id, row))
+                                .collect();
+                            if references.len() != source.len() {
+                                return Err(error("duplicate spelling mapping".into()));
+                            }
+                            let rows = source
+                                .iter()
+                                .map(|row| {
+                                    let reference = references
+                                        .get(&row.id)
+                                        .ok_or_else(|| error("missing spelling mapping".into()))?;
+                                    expand(row, reference, side, &mut nodes)
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            values.push((side, Value::Array(rows)));
+                        }
+                        ("uk_us_many", values)
+                    }
                     (
                         FormContentRegionalVariantsV3::UkUs { uk, us },
                         FormRegionalBindingsV3::UkUs {
@@ -935,10 +1063,7 @@ pub(crate) async fn preflight_identities(
             content.id,
             (entry_id, content.id, None, "content".to_owned()),
         );
-        let variants = match &content.regional_variants {
-            FormContentRegionalVariantsV3::Common { common } => vec![("common", common)],
-            FormContentRegionalVariantsV3::UkUs { uk, us } => vec![("uk", uk), ("us", us)],
-        };
+        let variants = content.regional_variants.variants();
         for (side, variant) in variants {
             slots.insert(
                 variant.id,
@@ -990,9 +1115,32 @@ pub(crate) async fn preflight_identities(
     let slot_ids: Vec<_> = slots.keys().copied().collect();
     let existing: Vec<(Uuid, Uuid, Uuid, Option<Uuid>, String, bool)> = sqlx::query_as("SELECT id,entry_id,content_id,parent_slot_id,role,retired_at IS NULL FROM lexicon.v3_form_content_slots WHERE id=ANY($1) OR (content_id=ANY($2) AND role IN ('common','uk','us'))")
         .bind(&slot_ids).bind(&content_ids).fetch_all(&mut **tx).await.map_err(db)?;
+    let multiple_contents: HashSet<_> = shared
+        .contents
+        .iter()
+        .filter(|content| {
+            matches!(
+                content.regional_variants,
+                FormContentRegionalVariantsV3::UkUsMany { .. }
+            )
+        })
+        .map(|content| content.id)
+        .collect();
+    let mut region_counts = HashMap::<_, usize>::new();
+    for (_, entry, content, _, role, _) in &existing {
+        if *entry == entry_id && matches!(role.as_str(), "common" | "uk" | "us") {
+            *region_counts.entry((*content, role.clone())).or_default() += 1;
+        }
+    }
     let regions: HashMap<_, _> = slots
         .iter()
-        .filter(|(_, (_, _, _, role))| matches!(role.as_str(), "common" | "uk" | "us"))
+        .filter(|(_, (_, content, _, role))| {
+            !multiple_contents.contains(content)
+                && region_counts
+                    .get(&(*content, role.clone()))
+                    .is_none_or(|count| *count <= 1)
+                && matches!(role.as_str(), "common" | "uk" | "us")
+        })
         .map(|(id, (_, content, _, role))| ((*content, role.clone()), *id))
         .collect();
     let mut known_contents = HashSet::new();
@@ -1173,10 +1321,7 @@ pub(crate) async fn persist(
             .await
             .map_err(db)?;
         let mut slots = vec![(content.id, None, "content")];
-        let variants = match &content.regional_variants {
-            FormContentRegionalVariantsV3::Common { common } => vec![("common", common)],
-            FormContentRegionalVariantsV3::UkUs { uk, us } => vec![("uk", uk), ("us", us)],
-        };
+        let variants = content.regional_variants.variants();
         for (dialect, variant) in variants {
             slots.push((variant.id, Some(content.id), dialect));
             slots.extend(

@@ -372,3 +372,141 @@ fn mappings_reject_duplicate_reference_ids_dangling_slots_and_orphans() {
     invalid.pos.clear();
     assert!(invalid.resolve().is_err());
 }
+
+fn multiple_spellings() -> DraftFormsStepContentV3 {
+    let mut forms = legacy();
+    forms.pos[0].form_groups[0].dialect_rules = DialectRulesV3::DISTINGUISH;
+    let variant = |side: &str, spelling: &str| json!({"id":Uuid::now_v7(),"dialect":side,"spelling":spelling,"origin":"manual","is_regular":true,"pronunciations":[{"id":Uuid::now_v7(),"dict_phonetic":"test","actual_pron":spelling,"style":"normal"}]});
+    forms.pos[0].forms[0].regional_variants = serde_json::from_value(json!({"mode":"uk_us_many","uk":[variant("uk","centre"),variant("uk","center")],"us":[variant("us","center"),variant("us","centre"),variant("us","centres")]})).unwrap();
+    forms
+}
+
+#[test]
+fn multiple_spellings_roundtrip_reorder_and_validate_every_independent_slot() {
+    let source = multiple_spellings();
+    let surfaces =
+        super::super::v3_projection::form_variant_sources(Uuid::now_v7(), &source).unwrap();
+    assert_eq!(surfaces.len(), 5);
+    let names =
+        super::super::v3_projection::name_variants_from_native_forms(&source, None).unwrap();
+    assert!(
+        names
+            .iter()
+            .any(|name| name.text == "centres" && name.dialects == vec![Dialect::Us])
+    );
+    let mut shared = source.shared_representation().unwrap();
+    let original = shared.clone();
+    let FormContentRegionalVariantsV3::UkUsMany { uk, us } =
+        &mut shared.contents[0].regional_variants
+    else {
+        panic!("multiple");
+    };
+    assert_eq!((uk.len(), us.len()), (2, 3));
+    uk.reverse();
+    let resolved = shared.clone().resolve().unwrap();
+    assert!(
+        super::super::v3_contract::validate_forms(&resolved, StepSaveIntent::Complete).is_empty()
+    );
+    let values = resolved.pos[0].forms[0].regional_variants.variants();
+    assert_eq!(values[0].spelling, "center");
+    assert_eq!(
+        values[0].id,
+        source.pos[0].forms[0].regional_variants.variants()[1].id
+    );
+    assert_eq!(
+        values[0].pronunciations,
+        source.pos[0].forms[0].regional_variants.variants()[1].pronunciations
+    );
+    let restored: DraftFormsStepContentV3 =
+        serde_json::from_value(serde_json::to_value(&resolved).unwrap()).unwrap();
+    assert_eq!(restored.pos, resolved.pos);
+    assert_eq!(
+        restored.shared_representation().unwrap().contents,
+        shared.contents
+    );
+    let mut broken = original.clone();
+    let FormRegionalBindingsV3::UkUsMany { us, .. } = &mut broken.pos[0].forms[0].regional_bindings
+    else {
+        panic!("multiple");
+    };
+    us.pop();
+    assert!(broken.resolve().is_err());
+    let mut broken = original;
+    let FormContentRegionalVariantsV3::UkUsMany { uk, .. } =
+        &mut broken.contents[0].regional_variants
+    else {
+        panic!("multiple");
+    };
+    uk.clear();
+    assert!(broken.resolve().is_err());
+}
+
+#[test]
+fn multiple_spellings_require_capability_and_prevent_lossy_old_writes() {
+    let forms = multiple_spellings();
+    let input = json!({"content":forms.shared_representation().unwrap()});
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("x-tsz-form-contents", "v1".parse().unwrap());
+    assert!(require_request_capability(&headers, &input).is_err());
+    let mut response = json!({"word":{"schema_version":3,"forms":forms,"capabilities":{}}});
+    assert!(project_response(&headers, &mut response).is_err());
+    headers.insert("x-tsz-multiple-spellings", "v1".parse().unwrap());
+    assert!(require_request_capability(&headers, &input).is_ok());
+    let mut response =
+        json!({"word":{"schema_version":3,"forms":multiple_spellings(),"capabilities":{}}});
+    project_response(&headers, &mut response).unwrap();
+    assert_eq!(
+        response["word"]["capabilities"]["multiple_form_spellings"],
+        true
+    );
+    let mut old = forms.clone();
+    let WordRegionalVariantsV3::UkUsMany { uk, us } = old.pos[0].forms[0].regional_variants.clone()
+    else {
+        panic!("multiple");
+    };
+    old.pos[0].forms[0].regional_variants = WordRegionalVariantsV3::UkUs {
+        uk: uk[0].clone(),
+        us: us[0].clone(),
+    };
+    assert!(ensure_write(&forms, &old).is_err());
+}
+
+#[test]
+fn singleton_pair_keeps_correspondence_to_retired_spelling_after_multiple_lists() {
+    let mut shared = multiple_spellings().shared_representation().unwrap();
+    let FormContentRegionalVariantsV3::UkUsMany { uk, us } = &shared.contents[0].regional_variants
+    else {
+        panic!("multiple");
+    };
+    let old = &uk[0];
+    let next_uk = uk[1].clone();
+    let next_us = us[0].clone();
+    shared.contents[0].pronunciation_slots = vec![FormPronunciationSlotsV3 {
+        id: Uuid::now_v7(),
+        common: None,
+        uk: Some(FormPronunciationSlotV3 {
+            id: old.pronunciations[0].id,
+            variant_slot_id: old.id,
+        }),
+        us: Some(FormPronunciationSlotV3 {
+            id: next_us.pronunciations[0].id,
+            variant_slot_id: next_us.id,
+        }),
+    }];
+    shared.contents[0].regional_variants = FormContentRegionalVariantsV3::UkUs {
+        uk: next_uk,
+        us: next_us,
+    };
+    shared.contents[0].dialect_rules = DialectRulesV3::UNIFIED_DISTINGUISH;
+    let FormRegionalBindingsV3::UkUsMany { uk, us } = &shared.pos[0].forms[0].regional_bindings
+    else {
+        panic!("multiple");
+    };
+    shared.pos[0].forms[0].regional_bindings = FormRegionalBindingsV3::UkUs {
+        uk: uk[1].clone(),
+        us: us[0].clone(),
+    };
+    let resolved = shared.clone().resolve().unwrap();
+    assert!(super::super::v3_contract::validate_forms(&resolved, StepSaveIntent::Save).is_empty());
+    assert_eq!(resolved.shared_representation().unwrap(), shared);
+}

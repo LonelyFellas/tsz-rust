@@ -4,7 +4,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::lexicon::dto::{DraftFormsStepContentV3, WordRegionalVariantsV3};
+use crate::lexicon::dto::DraftFormsStepContentV3;
 
 const HEADER: &str = "x-tsz-spelling-markup";
 const SPEECH_HEADER: &str = "x-tsz-spelling-speech";
@@ -21,12 +21,12 @@ pub(super) fn project_spelling_markup(headers: &HeaderMap, forms: &mut DraftForm
         .is_some_and(|value| value == "v1");
     for form in forms.pos.iter_mut().flat_map(|pos| &mut pos.forms) {
         if !phoneme_speech {
-            let pronunciations = match &mut form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => vec![&mut common.pronunciations],
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    vec![&mut uk.pronunciations, &mut us.pronunciations]
-                }
-            };
+            let pronunciations = form
+                .regional_variants
+                .variants_mut()
+                .into_iter()
+                .map(|v| v.pronunciations)
+                .collect::<Vec<_>>();
             for pronunciation in pronunciations.into_iter().flatten() {
                 if let Some(synthesis) = &mut pronunciation.synthesis {
                     for candidate in [&mut synthesis.uk, &mut synthesis.us].into_iter().flatten() {
@@ -36,24 +36,12 @@ pub(super) fn project_spelling_markup(headers: &HeaderMap, forms: &mut DraftForm
                 }
             }
         }
-        match &mut form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                if !markup {
-                    common.spelling_rich = None;
-                }
-                if !speech {
-                    common.spelling_speech = None;
-                }
+        for v in form.regional_variants.variants_mut() {
+            if !markup {
+                *v.spelling_rich = None;
             }
-            WordRegionalVariantsV3::UkUs { uk, us } => {
-                if !markup {
-                    uk.spelling_rich = None;
-                    us.spelling_rich = None;
-                }
-                if !speech {
-                    uk.spelling_speech = None;
-                    us.spelling_speech = None;
-                }
+            if !speech {
+                *v.spelling_speech = None;
             }
         }
     }
@@ -70,7 +58,7 @@ pub(super) fn spelling_markup_response<T: Serialize>(
     response.headers_mut().insert(
         header::VARY,
         axum::http::HeaderValue::from_static(
-            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment, x-tsz-voice-versions, x-tsz-voice-locales, x-tsz-voice-models",
+            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment, x-tsz-multiple-spellings, x-tsz-voice-versions, x-tsz-voice-locales, x-tsz-voice-models",
         ),
     );
     Ok(response)

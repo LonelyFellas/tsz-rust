@@ -123,21 +123,11 @@ pub(crate) fn target_variant(
         .forms
         .iter()
         .find(|form| form.id == link.target_form_id)?;
-    match &form.regional_variants {
-        WordRegionalVariantsV3::Common { common } if common.id == link.target_variant_id => {
-            Some((common.id, Dialect::Common, common.pronunciations.clone()))
-        }
-        WordRegionalVariantsV3::Common { .. } => None,
-        WordRegionalVariantsV3::UkUs { uk, us } => {
-            if uk.id == link.target_variant_id {
-                Some((uk.id, Dialect::Uk, uk.pronunciations.clone()))
-            } else if us.id == link.target_variant_id {
-                Some((us.id, Dialect::Us, us.pronunciations.clone()))
-            } else {
-                None
-            }
-        }
-    }
+    form.regional_variants
+        .variants()
+        .into_iter()
+        .find(|v| v.id == link.target_variant_id)
+        .map(|v| (v.id, v.dialect, v.pronunciations.clone()))
 }
 
 pub(crate) fn reading_revision(

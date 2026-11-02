@@ -155,20 +155,12 @@ pub(crate) fn own_audio(native: &published::PublishedContentV3) -> Vec<Dictionar
     let mut audio = Vec::new();
     for pos in &native.forms.pos {
         for form in &pos.forms {
-            let variants = match &form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => {
-                    vec![(
-                        common.id,
-                        Dialect::Common,
-                        &common.spelling_speech,
-                        &common.pronunciations,
-                    )]
-                }
-                WordRegionalVariantsV3::UkUs { uk, us } => vec![
-                    (uk.id, Dialect::Uk, &uk.spelling_speech, &uk.pronunciations),
-                    (us.id, Dialect::Us, &us.spelling_speech, &us.pronunciations),
-                ],
-            };
+            let variants = form
+                .regional_variants
+                .variants()
+                .into_iter()
+                .map(|v| (v.id, v.dialect, v.spelling_speech, v.pronunciations))
+                .collect::<Vec<_>>();
             for (variant_id, source_dialect, spelling_speech, pronunciations) in variants {
                 if let Some(speech) = spelling_speech {
                     generated_audio(
