@@ -394,6 +394,9 @@ async fn source_access(
     })
 }
 impl SourceAccess {
+    pub fn can_practice(&self, q: &QuestionRow) -> bool {
+        self.available(q) && super::question::valid_question(q)
+    }
     pub fn available(&self, q: &QuestionRow) -> bool {
         if let Some(item) = q.custom_item_id {
             let Ok(snapshot) = serde_json::from_value::<AnswerSnapshot>(q.answer_snapshot.clone())
@@ -493,7 +496,7 @@ pub fn question_view(
     a: Option<&AnswerRow>,
     access: &SourceAccess,
 ) -> Result<LearningQuestion, AppError> {
-    let visible = access.available(q);
+    let visible = access.available(q) && (a.is_some() || super::question::valid_question(q));
     let feedback = if visible {
         a.map(|a| {
             let snapshot: AnswerSnapshot =
@@ -559,8 +562,9 @@ pub async fn run_view(
         .await
         .map_err(AppError::internal)?;
     let state = if row.state == LearningRunState::Active {
-        if (row.cycle_id.is_none() || row.practice_mode.is_some())
-            && qs.iter().any(|q| !access.available(q))
+        if qs.iter().any(|q| !super::question::valid_question(q))
+            || ((row.cycle_id.is_none() || row.practice_mode.is_some())
+                && qs.iter().any(|q| !access.available(q)))
         {
             LearningRunState::Invalidated
         } else if row.expires_at.is_some_and(|e| e <= time) {

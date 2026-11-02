@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tsz_rust::{auth::extract::AuthUser, state::AppState};
 use uuid::Uuid;
+mod regressions;
 #[sqlx::test]
 async fn mixed_custom_questions_are_included_in_platform_archive_impact(pool: PgPool) {
     use crate::wordlists_support::{admin, admin_call};
@@ -254,6 +255,95 @@ async fn custom_content_edits_hide_old_questions_and_block_stale_answers(pool: P
         get(&state, &auth, &plan).await["current_cycle"]["blocked_count"],
         1
     );
+}
+#[sqlx::test]
+async fn zh_to_en_plans_never_use_english_definitions_as_prompts(pool: PgPool) {
+    let (state, auth, list) = fixture(&pool, 1).await;
+    let (publication, mut snapshot): (Uuid, Value) = sqlx::query_as(
+        "SELECT p.id,p.snapshot FROM wordlist_items i JOIN lexicon.entries e ON e.id=i.entry_id JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE i.wordlist_id=$1",
+    )
+    .bind(list)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut chinese = snapshot["meanings"]["pos"][0]["senses"][0]["definitions"][0].clone();
+    chinese["level"] = json!("C2");
+    chinese["content"]["text"] = json!("苹果");
+    let mut english = chinese.clone();
+    english["id"] = json!(Uuid::now_v7());
+    english.as_object_mut().unwrap().remove("content_id");
+    english["definition_mode"] = json!("en_definition");
+    english["level"] = json!("A1");
+    english["content"] = json!({"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":{"version":1,"text":"a round fruit","spans":[],"liaisons":[]}}});
+    snapshot["meanings"]["pos"][0]["senses"][0]["definitions"] = json!([english.clone()]);
+    let _: tsz_rust::lexicon::dto::AdminWordV3 = serde_json::from_value(snapshot.clone()).unwrap();
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+        .bind(publication)
+        .bind(&snapshot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for count in [Some(2), None] {
+        let preview = call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/learning-plans/preview",
+            preview_body(list, count),
+        )
+        .await;
+        assert_eq!(preview.0, 200, "{}", preview.1);
+        assert_eq!(
+            preview.1["eligible_count"], 0,
+            "English-only content must not become a zh_to_en question: {}",
+            preview.1
+        );
+        assert_eq!(preview.1["exclusions"]["no_chinese_definition"], 1);
+        assert_eq!(preview.1["can_create"], false);
+        let mut mixed = preview_body(list, count);
+        mixed["question_type"] = json!("choice_zh_to_en");
+        let mixed = tsz_rust::learning_tasks::plans::preview(
+            &pool,
+            &auth,
+            serde_json::from_value(mixed).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mixed.eligible_count, 0);
+        assert_eq!(mixed.exclusions.no_chinese_definition, 1);
+        assert!(!mixed.can_create);
+        assert!(
+            mixed
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("没有可出题内容")),
+            "{:?}",
+            mixed.reasons
+        );
+    }
+    snapshot["meanings"]["pos"][0]["senses"][0]["definitions"] = json!([english, chinese]);
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+        .bind(publication)
+        .bind(snapshot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for count in [Some(2), None] {
+        let (plan, _) = create_plan(&state, &auth, list, count).await;
+        let run = open(&state, &auth, &plan).await;
+        let page = questions(&state, &auth, &run).await;
+        assert_eq!(page["items"][0]["prompt"]["definition"], "苹果");
+        let answer = call(
+            &state,
+            &auth,
+            "POST",
+            &answer_path(&run),
+            answer_body(&page["items"][0], "apple"),
+        )
+        .await;
+        assert_eq!(answer.0, 200, "{}", answer.1);
+        assert_eq!(answer.1["is_correct"], true);
+    }
 }
 #[sqlx::test]
 async fn level_and_context_do_not_exclude_private_wordlist_content(pool: PgPool) {

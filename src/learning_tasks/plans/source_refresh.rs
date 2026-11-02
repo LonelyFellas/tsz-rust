@@ -74,7 +74,7 @@ pub(super) async fn preview_in(
         &settings,
         t.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE),
         true,
-        m.choice_policy.is_some(),
+        m.choice_policy.as_deref(),
     )
     .await?;
     let candidates: Vec<_> = pool
@@ -197,7 +197,7 @@ pub(super) async fn ensure_sources(
         .map(|u| &u.question)
         .collect();
     let access = sources_for_units(tx, auth, lists, &refs).await?;
-    if refs.len() != ids.len() || refs.iter().any(|q| !access.available(q)) {
+    if refs.len() != ids.len() || refs.iter().any(|q| !access.can_practice(q)) {
         return Err(unavailable());
     }
     Ok(())

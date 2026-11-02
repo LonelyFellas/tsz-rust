@@ -46,7 +46,7 @@ pub(super) async fn create_receipt(
     h: &[u8],
 ) -> Result<Option<Uuid>, AppError> {
     let old: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
-        "SELECT id,create_hash FROM learning_tasks WHERE user_id=$1 AND create_key=$2",
+        "SELECT id,create_hash FROM learning_tasks WHERE user_id=$1 AND create_key=$2 UNION ALL SELECT task_id,request_hash FROM learning_plan_reuse_receipts WHERE user_id=$1 AND request_key=$2 LIMIT 1",
     )
     .bind(auth.subject)
     .bind(key)
@@ -73,16 +73,16 @@ pub(super) async fn pool_for_type(
     ids: &[Uuid],
     choice: bool,
 ) -> Result<(CandidatePool, i64, LearningContext), AppError> {
-    pool_for_policy(tx, auth, ids, choice, false, false).await
+    pool_for_policy(tx, auth, ids, choice, false, None).await
 }
 pub(super) async fn pool_for_plan(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     ids: &[Uuid],
     choice: bool,
-    strict: bool,
+    policy: Option<&str>,
 ) -> Result<(CandidatePool, i64, LearningContext), AppError> {
-    pool_for_policy(tx, auth, ids, choice, true, strict).await
+    pool_for_policy(tx, auth, ids, choice, true, policy).await
 }
 async fn pool_for_policy(
     tx: &mut Tx<'_>,
@@ -90,7 +90,7 @@ async fn pool_for_policy(
     ids: &[Uuid],
     choice: bool,
     wordlist: bool,
-    strict: bool,
+    policy: Option<&str>,
 ) -> Result<(CandidatePool, i64, LearningContext), AppError> {
     let context = learner(tx, auth).await?;
     let access = sources(tx, auth, ids).await?;
@@ -102,7 +102,7 @@ async fn pool_for_policy(
         return Err(invalid("来源超过 1000 个词条，请拆分任务"));
     }
     let candidates =
-        candidates_for_sources(tx, &access, &context, choice, wordlist, strict).await?;
+        candidates_for_sources(tx, &access, &context, choice, wordlist, policy).await?;
     if candidates.candidates.len() > 2000 {
         return Err(invalid("候选超过 2000 题，请拆分任务"));
     }
@@ -114,12 +114,17 @@ pub(super) async fn candidates_for_sources(
     context: &LearningContext,
     choice: bool,
     wordlist: bool,
-    strict: bool,
+    policy: Option<&str>,
 ) -> Result<CandidatePool, AppError> {
     let entries: HashSet<_> = access.ordered.iter().map(|(_, e)| e).collect();
     let mut candidates = if choice {
-        crate::question_bank::learning::build_pool(tx, &access.learning_sources()?, context, strict)
-            .await?
+        crate::question_bank::learning::build_pool(
+            tx,
+            &access.learning_sources()?,
+            context,
+            policy.is_some(),
+        )
+        .await?
     } else if wordlist {
         build_wordlist_candidates(&access.learning_sources()?, context)?
     } else {
@@ -129,7 +134,7 @@ pub(super) async fn candidates_for_sources(
         .iter()
         .filter(|e| !access.entries.contains_key(e))
         .count() as i64;
-    if strict {
+    if crate::question_bank::learning::is_strict(policy) {
         strict_choice_preview(&mut candidates, access, context)?;
         return Ok(candidates);
     }
@@ -151,10 +156,9 @@ pub(super) async fn candidates_for_sources(
     if wordlist {
         for source in &access.custom {
             if let Some((revision, generation)) = access.lists.get(&source.wordlist_id) {
-                if let Some(candidate) = custom_candidate(source, *revision, *generation) {
-                    candidates.candidates.push(candidate);
-                } else {
-                    candidates.exclusions.no_base_form += 1;
+                match custom_candidate(source, *revision, *generation) {
+                    Ok(candidate) => candidates.candidates.push(candidate),
+                    Err(reason) => reason.record(&mut candidates.exclusions),
                 }
             }
         }
@@ -172,10 +176,11 @@ fn strict_choice_preview(
     };
     let mut base = build_wordlist_candidates(&access.learning_sources()?, context)?;
     for source in &access.custom {
-        if let Some((revision, generation)) = access.lists.get(&source.wordlist_id)
-            && let Some(candidate) = custom_candidate(source, *revision, *generation)
-        {
-            base.candidates.push(candidate);
+        if let Some((revision, generation)) = access.lists.get(&source.wordlist_id) {
+            match custom_candidate(source, *revision, *generation) {
+                Ok(candidate) => base.candidates.push(candidate),
+                Err(reason) => reason.record(&mut base.exclusions),
+            }
         }
     }
     let selected: HashSet<_> = pool
@@ -672,7 +677,7 @@ pub async fn answer(
     let view = run_view(&mut tx, &row, &qs, &access).await?;
     if view.state != LearningRunState::Active
         || t.state != LearningTaskState::Active
-        || !access.available(q)
+        || !access.can_practice(q)
         || row.grading_version
             != if row.generation_version == WORDLIST_GENERATION_VERSION
                 && row.question_type == crate::question_bank::learning::CHOICE
@@ -705,7 +710,7 @@ pub async fn answer(
         let remaining = qs
             .iter()
             .filter(|other| {
-                other.id != q.id && !ans.contains_key(&other.id) && access.available(other)
+                other.id != q.id && !ans.contains_key(&other.id) && access.can_practice(other)
             })
             .count();
         if !correct && super::mastery::retry(&mut tx, &row, q, remaining).await? {
@@ -740,7 +745,7 @@ pub async fn answer(
     }
     // Source owners can cross their deletion deadline while locks are held.
     let final_access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
-    if !final_access.available(q)
+    if !final_access.can_practice(q)
         || (row.cycle_id.is_none() && qs.iter().any(|q| !final_access.available(q)))
     {
         return Err(unavailable());
@@ -767,7 +772,7 @@ pub async fn answer(
     if completed && !access.grace.is_empty() {
         super::plans::cancel_cycles(&mut tx, task_id).await?;
     }
-    if memory_enabled && row.question_type == "spelling_zh_to_en" && q.practice_kind != "retry" {
+    if memory_enabled && snapshot.choice.is_none() && q.practice_kind != "retry" {
         crate::learning_memory::record_answer(
             &mut tx,
             auth.subject,
