@@ -11933,6 +11933,89 @@ async fn definition_links_keep_changed_draft_spelling_until_matching_publication
 }
 
 #[sqlx::test]
+async fn component_target_search_draft_only_excludes_deleted_published_senses(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = fixture_state(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let (published, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "harbour club", json!([])).await;
+    let mut meanings = writable_v3_meanings(&published);
+    let removed = meanings["pos"][0]["senses"][0].clone();
+    fn renew_node_ids(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                for key in ["id", "content_id", "zh_text_id"] {
+                    if fields.contains_key(key) {
+                        fields.insert(key.into(), json!(Uuid::now_v7()));
+                    }
+                }
+                for value in fields.values_mut() {
+                    renew_node_ids(value);
+                }
+            }
+            Value::Array(items) => {
+                for value in items {
+                    renew_node_ids(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    renew_node_ids(&mut meanings["pos"][0]["senses"][0]);
+    save_v3_meanings(&state, &bearer, &published, meanings).await;
+
+    let (status, legacy) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version":3,"q":"harbour club","match":"exact","include_drafts":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{legacy}");
+    assert!(
+        legacy["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["senses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|sense| sense["sense_id"] == removed["id"])),
+        "发布快照仍保留已删词义：{legacy}"
+    );
+
+    let (status, current) = search_component_targets(
+        &state, &bearer,
+        json!({"schema_version":3,"q":"harbour club","match":"exact","draft_only":true,"page_size":1}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{current}");
+    assert!(
+        !current["matches"].as_array().unwrap().is_empty(),
+        "{current}"
+    );
+    for candidate in current["matches"].as_array().unwrap() {
+        assert!(candidate.get("publication_id").is_none(), "{candidate}");
+        assert!(
+            candidate["senses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|sense| sense["sense_id"] != removed["id"]),
+            "{candidate}"
+        );
+    }
+    if let Some(cursor) = current["next_cursor"].as_str() {
+        let (status, rejected) = search_component_targets(
+            &state, &bearer,
+            json!({"schema_version":3,"q":"harbour club","match":"exact","include_drafts":true,"page_size":1,"cursor":cursor}),
+        ).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["field"], "cursor");
+    }
+}
+
+#[sqlx::test]
 async fn component_target_search_excludes_drafts_by_default_and_binds_search_scope(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

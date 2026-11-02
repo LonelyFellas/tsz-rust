@@ -505,6 +505,9 @@ pub struct SearchComponentTargetsV3Input {
     /// 同时查询已保存的草稿节点；缺省仅查询已发布内容。
     #[serde(default)]
     pub include_drafts: bool,
+    /// 仅查询当前已保存草稿，供共享例句选择可保存的词形和词义。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
