@@ -17,6 +17,7 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
+        .route("/chatgpt/setup", get(admin::chatgpt::setup))
         .route("/chatgpt", get(admin::chatgpt::accounts))
         .route("/chatgpt/login", post(admin::chatgpt::login))
         .route(

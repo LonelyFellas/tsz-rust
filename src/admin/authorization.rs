@@ -90,6 +90,7 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         "/lexicon/assistant/capability",
         RoutePolicy::All(&["words.access"]),
     ),
+    ("GET", "/chatgpt/setup", RoutePolicy::SuperAdmin),
     ("GET", "/chatgpt", RoutePolicy::SuperAdmin),
     ("POST", "/chatgpt/login", RoutePolicy::SuperAdmin),
     (
