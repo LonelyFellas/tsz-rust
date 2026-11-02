@@ -18,6 +18,19 @@ use crate::{
 };
 
 #[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatGPTLoginMethod {
+    Local,
+    Ssh,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChatGPTSetup {
+    pub login_method: ChatGPTLoginMethod,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChatGPTAccount {
     pub client_id: String,
@@ -132,6 +145,10 @@ async fn call<T: DeserializeOwned>(
             .body(serde_json::to_vec(&body).map_err(|_| invalid())?);
     }
     let mut response = request.send().await.map_err(|_| unavailable())?;
+    if response.status() == StatusCode::NOT_FOUND && path == "/v1/chatgpt/setup" {
+        return serde_json::from_value(serde_json::json!({"login_method":"local"}))
+            .map_err(|_| unavailable());
+    }
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
         return Err(invalid());
     }
@@ -184,6 +201,20 @@ fn valid_authorization_url(value: &str) -> bool {
                 && callback.query().is_none()
                 && callback.fragment().is_none()
         })
+}
+
+#[utoipa::path(get, path="/api/v1/admin/chatgpt/setup", tag="admin", security(("bearer_auth"=[])),
+    responses((status=200,body=ChatGPTSetup),(status=401,description="会话失效"),(status=403,description="仅超管可访问"),(status=503,description="账号服务不可用")))]
+pub async fn setup(State(state): State<AppState>, auth: AdminAuth) -> Result<Response, AppError> {
+    require_super_admin(&state, &auth).await?;
+    if state.vocabulary_agent.is_none() {
+        return Ok(no_store(ChatGPTSetup {
+            login_method: ChatGPTLoginMethod::Local,
+        }));
+    }
+    Ok(no_store(
+        call::<ChatGPTSetup>(&state, Method::GET, "/v1/chatgpt/setup", None).await?,
+    ))
 }
 
 #[utoipa::path(get, path="/api/v1/admin/chatgpt", tag="admin", security(("bearer_auth"=[])),

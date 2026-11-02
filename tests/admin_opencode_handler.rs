@@ -38,6 +38,7 @@ async fn chatgpt_accounts_login_and_model_selection_are_super_only(pool: PgPool)
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             count.fetch_add(1, Ordering::SeqCst);
             let result = match request.uri().path() {
+                "/v1/chatgpt/setup" => json!({"login_method":"ssh"}),
                 "/v1/chatgpt/accounts" | "/v1/chatgpt/account" => json!({"configured":true,"active":"oaiapp_fixture","accounts":[{"client_id":"oaiapp_fixture","email":"fixture@example.test","signed_in":true,"plan_enabled":true}],"pending_login":null}),
                 "/v1/chatgpt/login" => json!({"attempt_id":id,"authorization_url":"https://auth.openai.com/api/accounts/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback","expires_at":"2026-10-29T08:00:00Z"}),
                 "/v1/chatgpt/accounts/oaiapp_fixture" => json!({"remote_revoked":false}),
@@ -61,6 +62,7 @@ async fn chatgpt_accounts_login_and_model_selection_are_super_only(pool: PgPool)
             .unwrap(),
     }));
     let routes = [
+        (Method::GET, "/chatgpt/setup".to_owned()),
         (Method::GET, "/chatgpt".to_owned()),
         (Method::POST, "/chatgpt/login".to_owned()),
         (Method::GET, format!("/chatgpt/login/{id}")),
@@ -108,6 +110,79 @@ async fn chatgpt_accounts_login_and_model_selection_are_super_only(pool: PgPool)
             } else {
                 assert_eq!(calls.load(Ordering::SeqCst), before);
             }
+        }
+    }
+    server.abort();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn chatgpt_setup_supports_legacy_agent_and_rejects_unexpected_fields(pool: PgPool) {
+    let mut state = AppState::for_test(pool);
+    let (_, token) = seed(&state, AdminRole::SuperAdmin).await;
+    let reply = Arc::new(Mutex::new((
+        StatusCode::NOT_FOUND,
+        json!({"code":"not_found"}),
+    )));
+    let upstream = reply.clone();
+    let agent = Router::new().fallback(move || {
+        let upstream = upstream.clone();
+        async move {
+            let (status, body) = upstream.lock().await.clone();
+            (status, Json(body))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, agent).await.unwrap();
+    });
+    state.vocabulary_agent = Some(Arc::new(tsz_rust::question_bank::worker::AgentConfig {
+        base_url: format!("http://{address}"),
+        outbound_token: "fixture-only-not-a-real-service-token".into(),
+        client: reqwest::Client::new(),
+    }));
+    for (status, body, expected) in [
+        (
+            StatusCode::NOT_FOUND,
+            json!({"code":"not_found"}),
+            StatusCode::OK,
+        ),
+        (
+            StatusCode::OK,
+            json!({"login_method":"ssh","access_token":"private-upstream-value"}),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            StatusCode::OK,
+            json!({"login_method":"unknown"}),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"detail":"private-upstream-value"}),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        *reply.lock().await = (status, body);
+        let response = tsz_rust::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/chatgpt/setup")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!value.contains("private-upstream-value"));
+        if expected == StatusCode::OK {
+            assert_eq!(
+                serde_json::from_str::<Value>(&value).unwrap(),
+                json!({"login_method":"local"})
+            );
         }
     }
     server.abort();
