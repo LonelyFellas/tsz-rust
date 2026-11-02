@@ -50,6 +50,14 @@ fn voice_editor_target_search_keeps_full_node_identity() {
     );
     let input = &spec["components"]["schemas"]["SearchComponentTargetsV3Input"];
     assert_eq!(input["properties"]["include_drafts"]["type"], "boolean");
+    assert_eq!(input["properties"]["draft_only"]["type"], "boolean");
+    assert!(
+        !input["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "draft_only")
+    );
     assert!(
         !input["required"]
             .as_array()

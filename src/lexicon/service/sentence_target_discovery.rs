@@ -105,9 +105,10 @@ impl LexiconService {
     /// 成分目标检索按请求包含草稿，游标绑定查询范围和稳定节点排序键。
     pub async fn search_component_targets_v3(
         &self,
-        input: SearchComponentTargetsV3Input,
+        mut input: SearchComponentTargetsV3Input,
         allow_v3: bool,
     ) -> Result<SearchComponentTargetsV3Response, LexiconServiceError> {
+        input.include_drafts |= input.draft_only;
         if !allow_v3 {
             return Err(LexiconServiceError::V3StorageUnavailable);
         }
@@ -132,6 +133,7 @@ impl LexiconService {
             match_mode,
             input.entry_id,
             input.include_drafts,
+            input.draft_only,
         )?;
         // 关键字检索没有句子，也就没有 source dialect 可依；英美两个 scope 都查。
         let dialect_scopes = discovery_scopes(Dialect::Common);
@@ -156,10 +158,13 @@ impl LexiconService {
         };
         let mut candidate_index =
             HashMap::<PublishedAssociationCandidateKey, ComponentTargetCandidateIndex>::new();
-        for drafts in [false, true]
-            .into_iter()
-            .filter(|drafts| !drafts || input.include_drafts)
-        {
+        for drafts in [false, true].into_iter().filter(|drafts| {
+            if input.draft_only {
+                *drafts
+            } else {
+                !drafts || input.include_drafts
+            }
+        }) {
             let entries = LexiconRepository::component_target_entry_matches(
                 &mut transaction,
                 &dialect_scopes,
@@ -243,10 +248,13 @@ impl LexiconService {
             .map(|key| key.entry_id)
             .collect::<BTreeSet<_>>();
         let mut materialized = Vec::new();
-        for drafts in [false, true]
-            .into_iter()
-            .filter(|drafts| !drafts || input.include_drafts)
-        {
+        for drafts in [false, true].into_iter().filter(|drafts| {
+            if input.draft_only {
+                *drafts
+            } else {
+                !drafts || input.include_drafts
+            }
+        }) {
             let ids = page_keys
                 .iter()
                 .filter(|key| key.publication_id.is_none() == drafts)
@@ -347,8 +355,11 @@ fn component_target_cursor_digest(
     match_mode: ComponentTargetMatchV3,
     entry_id: Option<Uuid>,
     include_drafts: bool,
+    draft_only: bool,
 ) -> Result<String, LexiconServiceError> {
-    let digest = if include_drafts {
+    let digest = if draft_only {
+        sha256_json(&(q, kind, match_mode, entry_id, include_drafts, draft_only))
+    } else if include_drafts {
         sha256_json(&(q, kind, match_mode, entry_id, include_drafts))
     } else {
         // 非草稿模式保留旧版摘要，已有游标及回退版本均依赖此格式。
@@ -474,12 +485,18 @@ mod tests {
         ] {
             let legacy_digest = hex_digest(&sha256_json(&(q, kind, match_mode, entry_id)).unwrap());
             let published_digest =
-                component_target_cursor_digest(q, kind, match_mode, entry_id, false).unwrap();
+                component_target_cursor_digest(q, kind, match_mode, entry_id, false, false)
+                    .unwrap();
             assert_eq!(published_digest, legacy_digest);
             assert_ne!(
-                component_target_cursor_digest(q, kind, match_mode, entry_id, true).unwrap(),
+                component_target_cursor_digest(q, kind, match_mode, entry_id, true, false).unwrap(),
                 legacy_digest,
                 "草稿模式不能复用旧版发布候选游标"
+            );
+            assert_ne!(
+                component_target_cursor_digest(q, kind, match_mode, entry_id, true, false).unwrap(),
+                component_target_cursor_digest(q, kind, match_mode, entry_id, true, true).unwrap(),
+                "仅当前草稿不能复用混合发布候选游标"
             );
         }
     }
@@ -492,6 +509,7 @@ mod tests {
             ComponentTargetMatchV3::Contains,
             None,
             false,
+            false,
         )
         .unwrap();
         assert_ne!(
@@ -501,6 +519,7 @@ mod tests {
                 Some(EntryKind::Phrase),
                 ComponentTargetMatchV3::Contains,
                 None,
+                false,
                 false
             )
             .unwrap(),
@@ -513,6 +532,7 @@ mod tests {
                 None,
                 ComponentTargetMatchV3::Contains,
                 None,
+                false,
                 false
             )
             .unwrap()
@@ -524,6 +544,7 @@ mod tests {
                 None,
                 ComponentTargetMatchV3::Exact,
                 None,
+                false,
                 false
             )
             .unwrap(),
@@ -536,6 +557,7 @@ mod tests {
                 None,
                 ComponentTargetMatchV3::Contains,
                 Some(Uuid::now_v7()),
+                false,
                 false
             )
             .unwrap(),
