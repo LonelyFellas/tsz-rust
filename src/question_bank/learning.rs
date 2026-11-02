@@ -20,6 +20,16 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use uuid::Uuid;
 pub const STRICT_POLICY: &str = "strict_tiered_v1";
+pub const MIXED_POLICY: &str = "mixed_tiered_v1";
+pub fn practice_config_capable(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-tsz-learning-capabilities")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|s| s.trim() == "practice-config-v1"))
+}
+pub fn is_strict(policy: Option<&str>) -> bool {
+    policy == Some(STRICT_POLICY)
+}
 pub const STRATEGY_VERSION: &str = "tiered_v1";
 pub fn strict_capable(headers: &HeaderMap) -> bool {
     headers
@@ -28,11 +38,14 @@ pub fn strict_capable(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.split(',').any(|s| s.trim() == "strict-choice-v1"))
 }
 pub fn require_strict(headers: &HeaderMap, policy: Option<&str>) -> Result<(), AppError> {
-    if policy.is_some_and(|p| p != STRICT_POLICY) {
+    if policy.is_some_and(|p| ![STRICT_POLICY, MIXED_POLICY].contains(&p)) {
         return Err(super::invalid("单选策略无效"));
     }
     if policy.is_some() && !strict_capable(headers) {
         return Err(super::conflict("请更新客户端后使用严格单选任务"));
+    }
+    if policy == Some(MIXED_POLICY) && !practice_config_capable(headers) {
+        return Err(super::conflict("请更新客户端后使用组合题型"));
     }
     Ok(())
 }
@@ -96,7 +109,8 @@ pub async fn capability_guard(
     let mastery_capable = crate::learning_tasks::mastery::capable(request.headers());
     let spelling_capable = wordlist_capable(request.headers());
     let strict = strict_capable(request.headers());
-    if choice_capable && mastery_capable && spelling_capable && strict {
+    let configured = practice_config_capable(request.headers());
+    if choice_capable && mastery_capable && spelling_capable && strict && configured {
         return Ok(run_with_vary(request, next).await);
     }
     let path = request.uri().path();
@@ -113,6 +127,23 @@ pub async fn capability_guard(
     let creates_cycle = path.contains("/cycles");
     let (mut request_parts, body) = request.into_parts();
     let auth = AuthUser::from_request_parts(&mut request_parts, &state).await?;
+    if !configured {
+        let sql = if is_run {
+            "SELECT t.choice_policy FROM learning_runs r JOIN learning_tasks t ON t.id=r.task_id WHERE r.id=$1 AND r.user_id=$2"
+        } else {
+            "SELECT choice_policy FROM learning_tasks WHERE id=$1 AND user_id=$2"
+        };
+        let policy: Option<String> = sqlx::query_scalar(sql)
+            .bind(id)
+            .bind(auth.subject)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(AppError::internal)?
+            .flatten();
+        if policy.as_deref() == Some(MIXED_POLICY) {
+            return Err(super::conflict("请更新客户端后继续组合题型练习"));
+        }
+    }
     if creates_cycle && !strict {
         let policy: Option<String> = sqlx::query_scalar(
             "SELECT choice_policy FROM learning_tasks WHERE id=$1 AND user_id=$2",
@@ -305,7 +336,7 @@ pub async fn materialize(
                 ));
             }
             answer.choice = None;
-            answer.wordlist_fallback = true;
+            // Missing distractors do not change the target's existing spelling qualification.
             sqlx::query("UPDATE learning_cycle_units SET answer_snapshot=$2 WHERE id=$1")
                 .bind(unit.id)
                 .bind(serde_json::to_value(answer).map_err(AppError::internal)?)
