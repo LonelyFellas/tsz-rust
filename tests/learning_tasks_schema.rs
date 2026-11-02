@@ -37,6 +37,12 @@ async fn wordlist_practice_migration_roundtrip_refuses_custom_fact_loss(pool: Pg
 #[sqlx::test]
 async fn empty_down_up_roundtrip(pool: PgPool) {
     sqlx::raw_sql(include_str!(
+        "../migrations/20261102010000_practice_configuration.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20261031120000_learning_audio.down.sql"
     ))
     .execute(&pool)

@@ -216,7 +216,11 @@ pub(crate) async fn record_answer(
         } else {
             &run.generation_version
         },
-        &run.grading_version,
+        if run.generation_version == crate::learning_tasks::question::WORDLIST_GENERATION_VERSION {
+            GRADING_VERSION
+        } else {
+            &run.grading_version
+        },
     )?;
     let current_signature = current_signature(question, &context, access)?;
     let current: Option<Memory> = sqlx::query_as("SELECT id,memory_epoch,content_signature,stage,interval_step,due_at,last_feedback_at,revision FROM learning_memories WHERE user_id=$1 AND entry_id=$2 AND pos_id=$3 AND sense_id=$4 AND skill=$5 AND answer_profile=$6 FOR UPDATE")

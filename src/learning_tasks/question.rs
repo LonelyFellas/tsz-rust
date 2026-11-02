@@ -89,17 +89,13 @@ fn select_definition<'a>(
     let max = rank(level)?;
     let best = definitions
         .iter()
+        .filter(|d| chinese(d))
         .filter_map(|d| rank(definition_level(d)))
         .filter(|r| *r <= max)
         .max()?;
     definitions
         .iter()
         .find(|d| rank(definition_level(d)) == Some(best) && chinese(d))
-        .or_else(|| {
-            definitions
-                .iter()
-                .find(|d| rank(definition_level(d)) == Some(best))
-        })
 }
 pub(crate) fn leaks(prompt: &str, key: &str) -> bool {
     // Latin word boundaries allow “cat” in “category” but reject “猫 cat / cat 猫”.
@@ -133,39 +129,47 @@ pub fn build_wordlist_candidates(
     build_with_policy(sources, context, true)
 }
 
-fn definition_text<'a>(
-    definition: &'a WordDefinitionV3,
-    context: &LearningContext,
-) -> Option<(Uuid, &'a str)> {
-    use crate::lexicon::dto::{DialectVariantRichTextSlotV3, EnglishTextV3};
+fn definition_text(definition: &WordDefinitionV3) -> Option<(Uuid, &str)> {
     let (id, text) = match definition {
         WordDefinitionV3::ZhDefinition { id, content, .. }
         | WordDefinitionV3::ZhSentence { id, content, .. } => (*id, content.text()),
-        WordDefinitionV3::EnDefinition { id, content, .. }
-        | WordDefinitionV3::EnSentence { id, content, .. } => {
-            let value = match content {
-                EnglishTextV3::Unified { common } => &common.value,
-                EnglishTextV3::Distinguish { uk, us, .. } => {
-                    let slots = if context.english_variant == "BrE" {
-                        [uk, us]
-                    } else {
-                        [us, uk]
-                    };
-                    slots.into_iter().find_map(|slot| match slot {
-                        DialectVariantRichTextSlotV3::Ready { variant }
-                            if !variant.value.text().trim().is_empty() =>
-                        {
-                            Some(&variant.value)
-                        }
-                        _ => None,
-                    })?
-                }
-            };
-            (*id, value.text())
-        }
+        WordDefinitionV3::EnDefinition { .. } | WordDefinitionV3::EnSentence { .. } => return None,
     };
     let text = text.trim();
-    (!text.is_empty()).then_some((id, text))
+    chinese_prompt(text).then_some((id, text))
+}
+
+pub(crate) fn chinese_prompt(text: &str) -> bool {
+    static HAN: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\p{Script=Han}").expect("Han script"));
+    HAN.is_match(text)
+}
+
+pub(crate) fn english_spelling(text: &str) -> bool {
+    static LATIN: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\p{Script=Latin}").expect("Latin script"));
+    static SPELLING: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^[\p{Script=Latin}\p{Mark}\p{Number}\p{Punctuation}\p{Zs}+&#]+$")
+            .expect("English spelling characters")
+    });
+    LATIN.is_match(text) && SPELLING.is_match(text)
+}
+
+pub(crate) fn valid_question(q: &super::repository::QuestionRow) -> bool {
+    let Ok(prompt) = serde_json::from_value::<LearningPrompt>(q.prompt_snapshot.clone()) else {
+        return false;
+    };
+    let Ok(answer) = serde_json::from_value::<AnswerSnapshot>(q.answer_snapshot.clone()) else {
+        return false;
+    };
+    chinese_prompt(&prompt.definition)
+        && !answer.answers.is_empty()
+        && answer.answers.iter().all(|s| english_spelling(s))
+        && !answer.keys.iter().any(|key| leaks(&prompt.definition, key))
+        && answer
+            .choice
+            .as_ref()
+            .is_none_or(|choice| choice.options.iter().all(|o| english_spelling(&o.spelling)))
 }
 
 fn build_with_policy(
@@ -203,7 +207,7 @@ fn build_with_policy(
                 let standard_definition =
                     select_definition(&sense.definitions, &context.cefr_level)
                         .filter(|d| matches!(d, WordDefinitionV3::ZhDefinition { .. }))
-                        .and_then(|d| definition_text(d, context));
+                        .and_then(definition_text);
                 let selected = standard_definition.or_else(|| {
                     if !all_content {
                         return None;
@@ -212,13 +216,7 @@ fn build_with_policy(
                         .definitions
                         .iter()
                         .filter(|d| chinese(d))
-                        .find_map(|d| definition_text(d, context))
-                        .or_else(|| {
-                            sense
-                                .definitions
-                                .iter()
-                                .find_map(|d| definition_text(d, context))
-                        })
+                        .find_map(definition_text)
                 });
                 let Some((definition_id, text)) = selected else {
                     pool.exclusions.no_chinese_definition += 1;
@@ -256,7 +254,9 @@ fn build_with_policy(
                             }
                         }
                     };
-                    if let Some((display, key)) = normalize_answer_v1(spelling) {
+                    if let Some((display, key)) = normalize_answer_v1(spelling)
+                        && english_spelling(&display)
+                    {
                         form_ids.push(form.id);
                         if !answer.keys.contains(&key) {
                             answer.answers.push(display);
@@ -269,7 +269,7 @@ fn build_with_policy(
                     continue;
                 }
                 let contains_answer = answer.keys.iter().any(|key| leaks(text, key));
-                if contains_answer && !all_content {
+                if contains_answer {
                     pool.exclusions.answer_in_prompt += 1;
                     continue;
                 }
@@ -307,10 +307,18 @@ pub fn custom_candidate(
     source: &super::repository::CustomSource,
     revision: i64,
     generation: Option<i64>,
-) -> Option<Candidate> {
+) -> Result<Candidate, CustomExclusion> {
     let word = &source.custom_word.0;
-    let (answer, key) = normalize_answer_v1(&display_v1(&word.word))?;
-    Some(Candidate {
+    if !chinese_prompt(&word.definition) {
+        return Err(CustomExclusion::NoChineseDefinition);
+    }
+    let (answer, key) = normalize_answer_v1(&display_v1(&word.word))
+        .filter(|(answer, _)| english_spelling(answer))
+        .ok_or(CustomExclusion::NoBaseForm)?;
+    if leaks(&word.definition, &key) {
+        return Err(CustomExclusion::AnswerInPrompt);
+    }
+    Ok(Candidate {
         custom_item_id: Some(source.item_id),
         source_wordlist_id: source.wordlist_id,
         source_revision: revision,
@@ -337,6 +345,22 @@ pub fn custom_candidate(
             normalization_version: ANSWER_NORMALIZATION_VERSION,
         },
     })
+}
+
+#[derive(Debug)]
+pub enum CustomExclusion {
+    NoChineseDefinition,
+    NoBaseForm,
+    AnswerInPrompt,
+}
+impl CustomExclusion {
+    pub fn record(self, exclusions: &mut LearningExclusions) {
+        match self {
+            Self::NoChineseDefinition => exclusions.no_chinese_definition += 1,
+            Self::NoBaseForm => exclusions.no_base_form += 1,
+            Self::AnswerInPrompt => exclusions.answer_in_prompt += 1,
+        }
+    }
 }
 
 fn normalize_answer_v1(value: &str) -> Option<(String, String)> {
@@ -387,6 +411,26 @@ pub fn business_window(at: DateTime<Utc>) -> (NaiveDate, DateTime<Utc>, DateTime
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn direction_checks_accept_english_words_phrases_and_borrowed_spellings() {
+        for text in [
+            "apple",
+            "don't",
+            "ice cream",
+            "café",
+            "cafe\u{301}",
+            "3-D",
+            "C++",
+            "B&B",
+        ] {
+            assert!(english_spelling(text), "{text}");
+        }
+        for text in ["苹果", "apple苹果", "123", "", "apple\n"] {
+            assert!(!english_spelling(text), "{text}");
+        }
+        assert!(chinese_prompt("苹果；一种水果"));
+        assert!(!chinese_prompt("a round fruit"));
+    }
     #[test]
     fn boundary_and_exact_grading() {
         let before = "2026-10-07T19:59:59Z".parse().unwrap();

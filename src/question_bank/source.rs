@@ -149,6 +149,17 @@ pub async fn candidates(
                             form_type: "base".into(),
                             teaching_eligible: true,
                         };
+                        if !crate::learning_tasks::question::english_spelling(&candidate.spelling)
+                            || !candidate
+                                .accepted_spellings
+                                .iter()
+                                .all(|s| crate::learning_tasks::question::english_spelling(s))
+                            || !crate::learning_tasks::question::chinese_prompt(
+                                &candidate.definition,
+                            )
+                        {
+                            continue;
+                        }
                         candidate.content_fingerprint = Sha256::digest(
                             serde_json::to_vec(&candidate).map_err(AppError::internal)?,
                         )

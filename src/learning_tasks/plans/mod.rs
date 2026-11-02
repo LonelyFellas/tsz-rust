@@ -69,7 +69,11 @@ fn digest(value: &impl serde::Serialize) -> Result<String, AppError> {
 }
 fn validate(input: &PreviewLearningPlan) -> Result<(), AppError> {
     if input.choice_policy.as_deref().is_some_and(|p| {
-        p != crate::question_bank::learning::STRICT_POLICY
+        ![
+            crate::question_bank::learning::STRICT_POLICY,
+            crate::question_bank::learning::MIXED_POLICY,
+        ]
+        .contains(&p)
             || input.question_type.as_deref() != Some(crate::question_bank::learning::CHOICE)
     }) {
         return Err(invalid("严格单选策略只适用于单选任务"));
@@ -134,7 +138,7 @@ async fn preview_in(
         auth,
         &input.wordlist_ids,
         input.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE),
-        input.choice_policy.is_some(),
+        input.choice_policy.as_deref(),
     )
     .await?;
     let custom_word_count: i64 = sqlx::query_scalar(
@@ -157,10 +161,15 @@ async fn preview_in(
     let mut reasons = vec![];
     if count == 0 {
         reasons.push(
-            if input.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE) {
-                "所选词表、级别与英美档位没有足够可靠且不含已知歧义的干扰项，暂不可出单选题"
+            if crate::question_bank::learning::is_strict(input.choice_policy.as_deref())
+                && pool
+                    .choice_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.total_count > 0)
+            {
+                "所选内容暂不可出单选题，请查看暂不可用内容与原因"
             } else {
-                "词表中没有可出题内容，请先添加词条和释义"
+                "词表中没有可出题内容，请检查中文释义和英文词面"
             }
             .into(),
         );
@@ -261,6 +270,13 @@ pub async fn create(
     }
     plan_name(&input.name)?;
     validate(&input.preview())?;
+    if input.reuse_active
+        && (input.task_type != LearningTaskType::Longterm
+            || input.wordlist_ids.len() != 1
+            || input.schedule.is_some())
+    {
+        return Err(invalid("词表续练仅支持单份词表的长期练习"));
+    }
     let mut tx = begin(pool, auth, &input.wordlist_ids).await?;
     if let Some(id) = service::create_receipt(&mut tx, auth, input.idempotency_key, &h).await? {
         tx.commit().await.map_err(AppError::internal)?;
@@ -278,10 +294,41 @@ pub async fn create(
     if !p.can_create {
         return Err(invalid(&p.reasons.join("；")));
     }
+    let direct_key = if input.reuse_active {
+        let scope: Vec<_> = candidates
+            .iter()
+            .cloned()
+            .map(|mut candidate| {
+                candidate.answer.choice = None;
+                candidate
+            })
+            .collect();
+        Some(hash(&(&input.preview(), &p.settings, &scope))?)
+    } else {
+        None
+    };
+    if let Some(key) = &direct_key {
+        let prior: Option<Uuid> = sqlx::query_scalar("SELECT id FROM learning_tasks WHERE user_id=$1 AND state='active' AND direct_practice_key=$2 FOR UPDATE")
+            .bind(auth.subject).bind(key).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
+        if let Some(id) = prior {
+            sqlx::query("INSERT INTO learning_plan_reuse_receipts(user_id,request_key,request_hash,task_id) VALUES($1,$2,$3,$4)")
+                .bind(auth.subject).bind(input.idempotency_key).bind(&h).bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+            tx.commit().await.map_err(AppError::internal)?;
+            return detail(pool, auth, id).await;
+        }
+    }
     let id = Uuid::now_v7();
     let s = input.schedule.as_ref();
     sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,daily_question_count,ends_at,create_key,create_hash,generation_policy,start_date,end_date,question_type,choice_policy) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$13,$10,$11,$12,$14)")
  .bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.task_type).bind(&input.wordlist_ids).bind(input.daily_question_count).bind(s.map(|s|boundary(s.end_date+Duration::days(1)))).bind(input.idempotency_key).bind(h).bind(s.map(|s|s.start_date)).bind(s.map(|s|s.end_date)).bind(input.question_type.as_deref().unwrap_or("spelling_zh_to_en")).bind(input.practice_mode.as_deref().unwrap_or("coverage_v1")).bind(input.choice_policy.as_deref()).execute(&mut *tx).await.map_err(AppError::internal)?;
+    if let Some(key) = direct_key {
+        sqlx::query("UPDATE learning_tasks SET direct_practice_key=$2 WHERE id=$1")
+            .bind(id)
+            .bind(key)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+    }
     let cycle_id = write_cycle(
         &mut tx,
         auth,
@@ -311,7 +358,7 @@ async fn ensure_cycle_sources(
     let rows = units(tx, id).await?;
     let refs: Vec<_> = rows.iter().map(|u| &u.question).collect();
     let access = super::repository::sources_for_units(tx, auth, lists, &refs).await?;
-    if rows.iter().any(|u| !access.available(&u.question)) {
+    if rows.iter().any(|u| !access.can_practice(&u.question)) {
         return Err(unavailable());
     }
     Ok(())
@@ -391,10 +438,10 @@ async fn summarize(
             u.covered_answer_id.is_none()
         }
     }) {
-        if access.available(&u.question)
+        if access.can_practice(&u.question)
             || grace.as_ref().is_some_and(|(qs, a)| {
                 qs.iter()
-                    .any(|q| q.cycle_unit_id == Some(u.question.id) && a.available(q))
+                    .any(|q| q.cycle_unit_id == Some(u.question.id) && a.can_practice(q))
             })
         {
             available += 1;
@@ -511,7 +558,7 @@ pub async fn detail(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Learning
             .iter()
             .filter(|id| {
                 rows.iter()
-                    .any(|u| u.question.id == **id && access.available(&u.question))
+                    .any(|u| u.question.id == **id && access.can_practice(&u.question))
             })
             .count() as i64;
         let active = current_run
@@ -571,7 +618,7 @@ pub async fn detail(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Learning
                 let access = sources_for_questions(&mut tx, auth, &lists, row, &qs).await?;
                 a = qs
                     .iter()
-                    .filter(|q| !ans.contains_key(&q.id) && access.available(q))
+                    .filter(|q| !ans.contains_key(&q.id) && access.can_practice(q))
                     .count() as i64;
             } else {
                 a = c
@@ -648,7 +695,21 @@ pub async fn detail(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Learning
     let cards = source_cards(&mut tx, auth, &t).await?;
     learner(&mut tx, auth).await?;
     tx.commit().await.map_err(AppError::internal)?;
+    let choice = t.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE);
+    let mixed = choice
+        && !crate::question_bank::learning::is_strict(m.choice_policy.as_deref())
+        && (m.choice_policy.as_deref() == Some(crate::question_bank::learning::MIXED_POLICY)
+            || c.as_ref()
+                .is_some_and(|c| c.generation_version == WORDLIST_GENERATION_VERSION));
+    let question_types = if mixed {
+        vec!["spelling_zh_to_en".into(), "choice_zh_to_en".into()]
+    } else if choice {
+        vec!["choice_zh_to_en".into()]
+    } else {
+        vec!["spelling_zh_to_en".into()]
+    };
     Ok(LearningPlan {
+        question_types: Some(question_types),
         mastery,
         task: t,
         mode: m.generation_policy.clone(),
@@ -677,20 +738,22 @@ pub async fn list(
     query: LearningPageQuery,
     include_choice: bool,
     include_mastery: bool,
+    include_configured: bool,
 ) -> Result<LearningPlanPage, AppError> {
     let (p, s) = page(&query)?;
     let mut tx = begin(pool, auth, &[]).await?;
     let state = query.state.unwrap_or(LearningTaskState::Active);
     let total: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($3 OR question_type='spelling_zh_to_en') AND ($4 OR generation_policy<>'mastery_v1')")
+        sqlx::query_scalar("SELECT count(*) FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($3 OR question_type='spelling_zh_to_en') AND ($4 OR generation_policy<>'mastery_v1') AND ($5 OR choice_policy IS DISTINCT FROM 'mixed_tiered_v1')")
             .bind(auth.subject)
             .bind(state)
             .bind(include_choice)
             .bind(include_mastery)
+            .bind(include_configured)
             .fetch_one(&mut *tx)
             .await
             .map_err(AppError::internal)?;
-    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($5 OR question_type='spelling_zh_to_en') AND ($6 OR generation_policy<>'mastery_v1') ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4").bind(auth.subject).bind(state).bind(i64::from(s)).bind(i64::from(p-1)*i64::from(s)).bind(include_choice).bind(include_mastery).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($5 OR question_type='spelling_zh_to_en') AND ($6 OR generation_policy<>'mastery_v1') AND ($7 OR choice_policy IS DISTINCT FROM 'mixed_tiered_v1') ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4").bind(auth.subject).bind(state).bind(i64::from(s)).bind(i64::from(p-1)*i64::from(s)).bind(include_choice).bind(include_mastery).bind(include_configured).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
     let mut items = vec![];
     for id in ids {
@@ -825,7 +888,7 @@ pub async fn start(
         let access = super::repository::sources_for_units(&mut tx, auth, &lists, &refs).await?;
         let pending: Vec<_> = rows
             .iter()
-            .filter(|u| u.covered_answer_id.is_none() && access.available(&u.question))
+            .filter(|u| u.covered_answer_id.is_none() && access.can_practice(&u.question))
             .collect();
         if pending.is_empty() && m.generation_policy != super::mastery::MODE {
             return Err(conflict("来源不可用，已保留本轮进度，请检查来源"));
@@ -838,7 +901,7 @@ pub async fn start(
                 .into_iter()
                 .filter(|id| {
                     rows.iter().find(|u| u.question.id == *id).is_some_and(|u| {
-                        access.available(&u.question)
+                        access.can_practice(&u.question)
                             && seen.insert((
                                 u.question.entry_id,
                                 u.question
@@ -856,7 +919,11 @@ pub async fn start(
                 .map(|u| u.question.id)
                 .collect()
         } else {
-            rows.iter().map(|u| u.question.id).collect()
+            // Retain source-loss checks during materialization; exclude only invalid question content.
+            rows.iter()
+                .filter(|u| valid_question(&u.question))
+                .map(|u| u.question.id)
+                .collect()
         };
         if selected.is_empty() {
             return Err(conflict("本次已无新词或到期复习，请按下次复习日期继续"));
@@ -873,7 +940,8 @@ pub async fn start(
                 &mut tx,
                 &selected_units,
                 &settings,
-                c.generation_version == WORDLIST_GENERATION_VERSION && m.choice_policy.is_none(),
+                c.generation_version == WORDLIST_GENERATION_VERSION
+                    && !crate::question_bank::learning::is_strict(m.choice_policy.as_deref()),
             )
             .await?;
         }
@@ -891,7 +959,7 @@ pub async fn start(
     if row.state == LearningRunState::Active
         && !qs
             .iter()
-            .any(|q| !ans.contains_key(&q.id) && access.available(q))
+            .any(|q| !ans.contains_key(&q.id) && access.can_practice(q))
     {
         return Err(unavailable());
     }

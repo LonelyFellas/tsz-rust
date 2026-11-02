@@ -36,6 +36,8 @@ pub struct PreviewLearningPlan {
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLearningPlan {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reuse_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub choice_policy: Option<String>,
@@ -204,6 +206,9 @@ pub struct LearningPlanSource {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningPlan {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub question_types: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub mastery: Option<super::super::mastery::MasterySummary>,

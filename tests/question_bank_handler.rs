@@ -215,6 +215,173 @@ async fn strict_plan(f: &Fixture) -> Value {
     p.1
 }
 #[sqlx::test]
+async fn configured_mixed_practice_uses_tiered_choices_and_records_actual_skills(pool: PgPool) {
+    const CAPS: &str =
+        "choice-v1,mastery-v1,wordlist-spelling-v1,strict-choice-v1,practice-config-v1";
+    let mut f = fixture(&pool).await;
+    f.state.learning_memory_enabled = true;
+    sqlx::query("INSERT INTO learning_memory_enrollments(user_id,enabled) VALUES($1,true)")
+        .bind(f.auth.subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE dictionary.entry_contents SET senses=(SELECT jsonb_agg(s-'hypernyms') FROM jsonb_array_elements(senses)s)").execute(&pool).await.unwrap();
+    let spelling = wordlists_support::full_entry(&pool, "teach").await;
+    let mut snapshot: Value = sqlx::query_scalar("SELECT p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(spelling).fetch_one(&pool).await.unwrap();
+    snapshot["meanings"]["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(1);
+    snapshot["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
+        json!("教；教授");
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=(SELECT current_publication_id FROM lexicon.entries WHERE id=$1)").bind(spelling).bind(snapshot).execute(&pool).await.unwrap();
+    let target = f.entries[0];
+    fixture_list(&mut f, &[target, spelling]).await;
+    let mut input = json!({"question_type":"choice_zh_to_en","choice_policy":"mixed_tiered_v1","practice_mode":"mastery_v1","task_type":"longterm","wordlist_ids":[f.list],"daily_question_count":null,"schedule":null});
+    let preview_input = input.clone();
+    let preview = call_with_capabilities(
+        &f,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        input.clone(),
+        CAPS,
+    )
+    .await;
+    assert_eq!(preview.0, 200, "{}", preview.1);
+    assert_eq!(preview.1["eligible_count"], 2);
+    input["reuse_active"] = json!(true);
+    input["idempotency_key"] = json!(Uuid::now_v7());
+    input["name"] = json!("安全单选与真实拼写");
+    input["preview_fingerprint"] = preview.1["preview_fingerprint"].clone();
+    let plan =
+        call_with_capabilities(&f, "POST", "/api/v1/me/learning-plans", input.clone(), CAPS).await;
+    assert_eq!(plan.0, 200, "{}", plan.1);
+    assert_eq!(
+        plan.1["question_types"],
+        json!(["spelling_zh_to_en", "choice_zh_to_en"])
+    );
+    sqlx::query("UPDATE lexicon.entries SET archived_at=clock_timestamp() WHERE id=$1")
+        .bind(f.entries[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let changed = call_with_capabilities(
+        &f,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        preview_input,
+        CAPS,
+    )
+    .await;
+    assert_eq!(changed.0, 200, "{}", changed.1);
+    assert_eq!(changed.1["eligible_count"], 2);
+    input["idempotency_key"] = json!(Uuid::now_v7());
+    input["preview_fingerprint"] = changed.1["preview_fingerprint"].clone();
+    let reused =
+        call_with_capabilities(&f, "POST", "/api/v1/me/learning-plans", input.clone(), CAPS).await;
+    assert_eq!(reused.0, 200, "{}", reused.1);
+    assert_eq!(
+        reused.1["task"]["id"], plan.1["task"]["id"],
+        "Changing distractors must not reset the learning scope"
+    );
+    sqlx::query("UPDATE lexicon.entries SET archived_at=NULL WHERE id=$1")
+        .bind(f.entries[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let replay = call_with_capabilities(&f, "POST", "/api/v1/me/learning-plans", input, CAPS).await;
+    assert_eq!(replay.0, 200, "{}", replay.1);
+    assert_eq!(replay.1["task"]["id"], plan.1["task"]["id"]);
+    let path = format!(
+        "/api/v1/me/learning-plans/{}",
+        plan.1["task"]["id"].as_str().unwrap()
+    );
+    assert_eq!(call(&f, "GET", &path, Value::Null).await.0, 409);
+    let old_list = call(&f, "GET", "/api/v1/me/learning-plans", Value::Null).await;
+    assert_eq!(old_list.0, 200);
+    assert_eq!(old_list.1["pagination"]["total"], 0);
+    let opened = call_with_capabilities(
+        &f,
+        "POST",
+        &format!("{path}/runs"),
+        learning_tasks_support::start_body(None),
+        CAPS,
+    )
+    .await;
+    assert_eq!(opened.0, 200, "{}", opened.1);
+    let run = opened.1;
+    let run_id: Uuid = run["id"].as_str().unwrap().parse().unwrap();
+    let question_path = format!("/api/v1/me/learning-runs/{run_id}/questions");
+    let mut types = Vec::new();
+    for _ in 0..2 {
+        let page = call_with_capabilities(&f, "GET", &question_path, Value::Null, CAPS).await;
+        let question = page.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["answered"] == false)
+            .unwrap();
+        let choice = question.get("options").is_some();
+        let answer = if choice {
+            assert_eq!(question["options"].as_array().unwrap().len(), 4);
+            let metadata: Value = sqlx::query_scalar(
+                "SELECT answer_snapshot->'choice' FROM learning_questions WHERE id=$1",
+            )
+            .bind(question["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(metadata["strategy_version"], "tiered_v1");
+            assert_eq!(
+                metadata["supplemental_entries"].as_array().unwrap().len(),
+                3
+            );
+            metadata["correct_option_id"].as_str().unwrap().to_owned()
+        } else {
+            assert_eq!(question["prompt"]["definition"], "教；教授");
+            "teach".into()
+        };
+        types.push(choice);
+        let answered = call_with_capabilities(
+            &f,
+            "POST",
+            &format!("/api/v1/me/learning-runs/{run_id}/answers"),
+            learning_tasks_support::answer_body(question, &answer),
+            CAPS,
+        )
+        .await;
+        assert_eq!(answered.0, 200, "{}", answered.1);
+        assert_eq!(answered.1["is_correct"], true);
+    }
+    assert_eq!(types, vec![true, false]);
+    let grades: Vec<(String, i64)> = sqlx::query_as("SELECT grading_version,count(*) FROM learning_answers WHERE run_id=$1 GROUP BY grading_version ORDER BY grading_version").bind(run_id).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        grades,
+        vec![("choice_id_v1".into(), 1), ("spelling_exact_v1".into(), 1)]
+    );
+    let memories: Vec<Uuid> = sqlx::query_scalar("SELECT entry_id FROM learning_memories")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(memories, vec![spelling]);
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261102010000_practice_configuration.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM learning_answers WHERE run_id=$1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+}
+#[sqlx::test]
 async fn strict_choice_supplements_unrelated_safe_words_without_spelling(pool: PgPool) {
     let f = fixture(&pool).await;
     sqlx::query("UPDATE dictionary.entry_contents SET senses=(SELECT jsonb_agg(s-'hypernyms') FROM jsonb_array_elements(senses)s)")
