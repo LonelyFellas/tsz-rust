@@ -69,6 +69,11 @@ pub async fn create(
     }
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .create_v3(
             admin.id,
             admin.is_super_admin(),
@@ -175,6 +180,11 @@ pub async fn save_forms(
     }
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(&headers))
         .with_voice_versions_support(crate::lexicon::voice_versions::supported(&headers))
         .with_dubbing_support(crate::lexicon::voice_versions::dubbing_supported(&headers))
@@ -243,6 +253,11 @@ pub async fn save_meanings(
     }
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(&headers))
         .with_voice_versions_support(crate::lexicon::voice_versions::supported(&headers))
         .with_dubbing_support(crate::lexicon::voice_versions::dubbing_supported(&headers))
@@ -349,6 +364,11 @@ pub async fn publish(
     }
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .publish_v3(
             crate::speech::publication_audio::review::Reviewer {
                 actor_id: admin.id,
@@ -415,6 +435,11 @@ pub async fn rollback_publication(
     }
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .rollback_publication_v3(
             admin.id,
             request_id.as_uuid(),
@@ -479,6 +504,11 @@ pub async fn restore_draft_from_publication(
     }
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(&headers))
         .with_voice_versions_support(crate::lexicon::voice_versions::supported(&headers))
         .with_dubbing_support(crate::lexicon::voice_versions::dubbing_supported(&headers))
@@ -575,6 +605,11 @@ pub async fn publish_batch(
     }
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .publish_batch_v3(
             crate::speech::publication_audio::review::Reviewer {
                 actor_id: admin.id,

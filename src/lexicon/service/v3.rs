@@ -1015,9 +1015,7 @@ impl LexiconService {
         let mut forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
         normalize_form_regularity(&mut forms, None);
-        if !self.form_contents_supported && !forms.legacy_readable() {
-            return Err(crate::lexicon::shared_forms::upgrade_error().into());
-        }
+        self.ensure_form_contents_supported(&forms)?;
         let mut meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
@@ -2045,9 +2043,7 @@ impl LexiconService {
                 error
             )))
         })?;
-        if !self.form_contents_supported && !forms.legacy_readable() {
-            return Err(crate::lexicon::shared_forms::upgrade_error().into());
-        }
+        self.ensure_form_contents_supported(&forms)?;
         crate::lexicon::shared_forms::preserve_pronunciation_slots(&mut tx, entry_id, &mut forms)
             .await?;
         let mut meanings = historical.meanings;
@@ -2927,9 +2923,7 @@ impl LexiconService {
         }
         let forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
-        if !self.form_contents_supported && !forms.legacy_readable() {
-            return Err(crate::lexicon::shared_forms::upgrade_error().into());
-        }
+        self.ensure_form_contents_supported(&forms)?;
         let entry_kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
         let presentation =
             Self::v3_presentation_on(&mut *transaction, entry_id, record.revision, &forms).await?;

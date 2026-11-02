@@ -127,6 +127,11 @@ pub async fn archive(
     require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .archive(
             admin.id,
             request_id.as_uuid(),
@@ -174,6 +179,11 @@ pub async fn restore(
     require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .restore(
             admin.id,
             request_id.as_uuid(),
@@ -270,6 +280,11 @@ pub async fn archive_batch(
     require_lifecycle_v3_capabilities(&state, &entry_ids).await?;
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .archive_batch(
             admin.id,
             request_id.as_uuid(),
@@ -322,6 +337,11 @@ pub async fn restore_batch(
     require_lifecycle_v3_capabilities(&state, &entry_ids).await?;
     let mut response = service(&state)
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+        .with_multiple_spellings_support(
+            headers
+                .get("x-tsz-multiple-spellings")
+                .is_some_and(|value| value == "v1"),
+        )
         .restore_batch(
             admin.id,
             request_id.as_uuid(),

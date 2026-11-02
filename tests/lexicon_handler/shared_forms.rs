@@ -2330,6 +2330,7 @@ async fn multiple_spelling_call(
         .header(header::CONTENT_TYPE, "application/json")
         .header("X-TSZ-Form-Contents", "v1")
         .header("X-TSZ-Multiple-Spellings", "v1")
+        .header("Idempotency-Key", Uuid::now_v7().to_string())
         .header("X-TSZ-Spelling-Markup", "v1")
         .header("X-TSZ-Spelling-Speech", "v1")
         .header("X-TSZ-Phoneme-Speech", "v1")
@@ -2369,6 +2370,8 @@ async fn independent_multiple_spellings_persist_reload_reorder_and_remove(pool: 
     let mut content = read["word"]["forms"].clone();
     let content_id = content["contents"][0]["id"].clone();
     let first = content["contents"][0]["regional_variants"].clone();
+    content["contents"][0]["pronunciation_slots"] = json!([{"id":Uuid::now_v7(),"uk":{"id":first["uk"]["pronunciations"][0]["id"],"variant_slot_id":first["uk"]["id"]},"us":{"id":first["us"]["pronunciations"][0]["id"],"variant_slot_id":first["us"]["id"]}}]);
+
     let mut uk = vec![first["uk"].clone()];
     let mut us = vec![first["us"].clone()];
     let binding = content["pos"][0]["forms"][0]["regional_bindings"].clone();
@@ -2433,6 +2436,48 @@ async fn independent_multiple_spellings_persist_reload_reorder_and_remove(pool: 
                 .unwrap();
         assert_eq!(count, [5, 5, 4, 2, 2][iteration]);
         assert_eq!(fresh["word"]["forms"]["contents"][0]["id"], content_id);
+        if iteration == 0 {
+            for (suffix, batch) in [("archive", false), ("archive-batch", true)] {
+                let rejected_key = Uuid::now_v7();
+                let input = if batch {
+                    json!({"entries":[{"id":id,"base_revision":revision,"base_lifecycle_revision":fresh["word"]["lifecycle_revision"]}]})
+                } else {
+                    json!({"base_revision":revision,"base_lifecycle_revision":fresh["word"]["lifecycle_revision"]})
+                };
+                let endpoint = if batch {
+                    format!("{ROOT}/entries/{suffix}")
+                } else {
+                    format!("{path}/{suffix}")
+                };
+                let (status, rejected) = call_with_form_capability(
+                    &state,
+                    Method::POST,
+                    &endpoint,
+                    &bearer,
+                    Some(rejected_key),
+                    Some(input),
+                    (true, true, true, true),
+                    true,
+                )
+                .await;
+                assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+                let (_, unchanged) =
+                    multiple_spelling_call(&state, &bearer, Method::GET, &path, None).await;
+                assert_eq!(unchanged["word"]["revision"], revision);
+                assert_eq!(unchanged["word"]["status"], fresh["word"]["status"]);
+                let cached: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM platform.idempotency_records WHERE idempotency_key=$1",
+                )
+                .bind(rejected_key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(
+                    cached, 0,
+                    "rejected old-client command must not be committed"
+                );
+            }
+        }
         if iteration == 0 {
             content["contents"][0]["regional_variants"]["uk"]
                 .as_array_mut()

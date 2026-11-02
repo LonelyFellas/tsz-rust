@@ -206,12 +206,36 @@ pub struct LexiconService {
     dubbing_supported: bool,
     voice_pool_supported: bool,
     form_contents_supported: bool,
+    multiple_spellings_supported: bool,
 }
 
 impl LexiconService {
     pub(crate) fn with_form_contents_support(mut self, supported: bool) -> Self {
         self.form_contents_supported = supported;
         self
+    }
+
+    pub(crate) fn with_multiple_spellings_support(mut self, supported: bool) -> Self {
+        self.multiple_spellings_supported = supported;
+        self
+    }
+
+    fn ensure_form_contents_supported(
+        &self,
+        forms: &DraftFormsStepContentV3,
+    ) -> Result<(), LexiconServiceError> {
+        if (!self.form_contents_supported && !forms.legacy_readable())
+            || (!self.multiple_spellings_supported
+                && forms.pos.iter().flat_map(|pos| &pos.forms).any(|form| {
+                    matches!(
+                        form.regional_variants,
+                        WordRegionalVariantsV3::UkUsMany { .. }
+                    )
+                }))
+        {
+            return Err(crate::lexicon::shared_forms::upgrade_error().into());
+        }
+        Ok(())
     }
 
     fn unsupported_voice_content(&self, value: &serde_json::Value) -> bool {
@@ -285,6 +309,7 @@ impl LexiconService {
             dubbing_supported: true,
             voice_pool_supported: true,
             form_contents_supported: true,
+            multiple_spellings_supported: true,
         }
     }
 }

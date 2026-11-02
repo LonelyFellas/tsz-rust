@@ -725,16 +725,6 @@ impl SharedFormsStepContentV3 {
                     "too many pronunciation mappings".into(),
                 ));
             }
-            let multiple = matches!(
-                content.regional_variants,
-                FormContentRegionalVariantsV3::UkUsMany { .. }
-            );
-            let mut regions = content
-                .regional_variants
-                .variants()
-                .into_iter()
-                .map(|(side, row)| (side, row.id))
-                .collect::<HashMap<_, _>>();
             for mapping in &content.pronunciation_slots {
                 if !mapping_ids.insert(mapping.id) {
                     return Err(content_error(
@@ -745,12 +735,7 @@ impl SharedFormsStepContentV3 {
                 let mut sides = 0;
                 for (side, slot) in pronunciation_slots(mapping) {
                     sides += 1;
-                    if !mapping_slots.insert(slot.id)
-                        || (!multiple
-                            && regions
-                                .insert(side, slot.variant_slot_id)
-                                .is_some_and(|id| id != slot.variant_slot_id))
-                    {
+                    if !mapping_slots.insert(slot.id) {
                         return Err(content_error(
                             content.id,
                             "invalid pronunciation slot correspondence".into(),

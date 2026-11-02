@@ -470,3 +470,43 @@ fn multiple_spellings_require_capability_and_prevent_lossy_old_writes() {
     };
     assert!(ensure_write(&forms, &old).is_err());
 }
+
+#[test]
+fn singleton_pair_keeps_correspondence_to_retired_spelling_after_multiple_lists() {
+    let mut shared = multiple_spellings().shared_representation().unwrap();
+    let FormContentRegionalVariantsV3::UkUsMany { uk, us } = &shared.contents[0].regional_variants
+    else {
+        panic!("multiple");
+    };
+    let old = &uk[0];
+    let next_uk = uk[1].clone();
+    let next_us = us[0].clone();
+    shared.contents[0].pronunciation_slots = vec![FormPronunciationSlotsV3 {
+        id: Uuid::now_v7(),
+        common: None,
+        uk: Some(FormPronunciationSlotV3 {
+            id: old.pronunciations[0].id,
+            variant_slot_id: old.id,
+        }),
+        us: Some(FormPronunciationSlotV3 {
+            id: next_us.pronunciations[0].id,
+            variant_slot_id: next_us.id,
+        }),
+    }];
+    shared.contents[0].regional_variants = FormContentRegionalVariantsV3::UkUs {
+        uk: next_uk,
+        us: next_us,
+    };
+    shared.contents[0].dialect_rules = DialectRulesV3::UNIFIED_DISTINGUISH;
+    let FormRegionalBindingsV3::UkUsMany { uk, us } = &shared.pos[0].forms[0].regional_bindings
+    else {
+        panic!("multiple");
+    };
+    shared.pos[0].forms[0].regional_bindings = FormRegionalBindingsV3::UkUs {
+        uk: uk[1].clone(),
+        us: us[0].clone(),
+    };
+    let resolved = shared.clone().resolve().unwrap();
+    assert!(super::super::v3_contract::validate_forms(&resolved, StepSaveIntent::Save).is_empty());
+    assert_eq!(resolved.shared_representation().unwrap(), shared);
+}
