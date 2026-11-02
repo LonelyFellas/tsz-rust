@@ -227,7 +227,10 @@ fn variant(
     if let Some(spelling) = value.get("spelling_speech") {
         add_selected(root, spelling, &spelling_path, variant_id, content, out)?;
     }
-    let accents: &[(&str, AccentGroup)] = match path.rsplit('/').next() {
+    let accents: &[(&str, AccentGroup)] = match path
+        .rsplit('/')
+        .find(|part| matches!(*part, "common" | "uk" | "us"))
+    {
         Some("uk") => &[("uk", AccentGroup::Uk)],
         Some("us") => &[("us", AccentGroup::Us)],
         _ => &[("uk", AccentGroup::Uk), ("us", AccentGroup::Us)],
@@ -336,6 +339,38 @@ mod tests {
             }]}
         }}]}})
     }
+    #[test]
+    fn independent_spelling_arrays_keep_every_audio_default_on_its_own_accent() {
+        let mut value = fixture("uk");
+        let uk = value["forms"]["contents"][0]["regional_variants"]["uk"].clone();
+        let mut us = uk.clone();
+        us["pronunciations"][0]["synthesis"]["us"] =
+            us["pronunciations"][0]["synthesis"]["uk"].clone();
+        us["pronunciations"][0]["synthesis"]["us"]["ipa_speech"]["voice_profile"]["voices"] =
+            json!([voice("en-US", true, Some(Uuid::now_v7()))]);
+        us["pronunciations"][0]["synthesis"]
+            .as_object_mut()
+            .unwrap()
+            .remove("uk");
+        value["forms"]["contents"][0]["regional_variants"] =
+            json!({"mode":"uk_us_many","uk":[uk.clone(),uk],"us":[us.clone(),us.clone(),us]});
+        let items = collect(&value).unwrap();
+        assert_eq!(items.len(), 5);
+        for item in items {
+            assert!(item.issue.is_none());
+            assert!(item.asset_id.is_some());
+            assert!(item.source.is_some());
+            assert_eq!(
+                item.default_for,
+                if item.source_path.contains("/uk/") {
+                    vec![AccentGroup::Uk]
+                } else {
+                    vec![AccentGroup::Us]
+                }
+            );
+        }
+    }
+
     #[test]
     fn grammar_owner_dialect_is_retained_internally_not_in_the_wire_manifest() {
         let value = json!({"meanings":{"id":Uuid::now_v7(),"dialect":"uk","content":{"version":2,"text":"grammar","annotations":[]},

@@ -145,15 +145,16 @@ async fn read_in(
         {
             response.occurrence = sqlx::query_scalar("SELECT count(*) FROM learning_questions WHERE run_id=$1 AND entry_id=$2 AND position<=$3")
                 .bind(id).bind(entry).bind(q.position).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
-            let (variant, pronunciations) = match &form.regional_variants {
-                crate::lexicon::dto::WordRegionalVariantsV3::Common { common } => {
-                    (common.id, &common.pronunciations)
-                }
-                crate::lexicon::dto::WordRegionalVariantsV3::UkUs { uk, us } => match accent {
-                    LearningAudioAccent::Uk => (uk.id, &uk.pronunciations),
-                    LearningAudioAccent::Us => (us.id, &us.pronunciations),
-                },
-            };
+            let (variant, pronunciations) = form
+                .regional_variants
+                .variants()
+                .into_iter()
+                .find(|v| {
+                    v.dialect == crate::lexicon::dto::Dialect::Common
+                        || v.dialect.as_str() == accent.as_str()
+                })
+                .map(|v| (v.id, v.pronunciations))
+                .ok_or_else(unavailable)?;
             let targets: Vec<_> = std::iter::once(variant)
                 .chain(pronunciations.iter().map(|p| p.id))
                 .collect();

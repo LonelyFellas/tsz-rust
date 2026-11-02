@@ -50,28 +50,14 @@ pub fn project(
                             )
                             .map(|sense| sense.id)
                             .collect(),
-                            variants: match &item.regional_variants {
-                                WordRegionalVariantsV3::Common { common } => vec![form_variant(
-                                    common.id,
-                                    Dialect::Common,
-                                    &common.spelling,
-                                    &common.pronunciations,
-                                )],
-                                WordRegionalVariantsV3::UkUs { uk, us } => vec![
-                                    form_variant(
-                                        uk.id,
-                                        Dialect::Uk,
-                                        &uk.spelling,
-                                        &uk.pronunciations,
-                                    ),
-                                    form_variant(
-                                        us.id,
-                                        Dialect::Us,
-                                        &us.spelling,
-                                        &us.pronunciations,
-                                    ),
-                                ],
-                            },
+                            variants: item
+                                .regional_variants
+                                .variants()
+                                .into_iter()
+                                .map(|v| {
+                                    form_variant(v.id, v.dialect, v.spelling, v.pronunciations)
+                                })
+                                .collect(),
                         })
                         .collect()
                 }),

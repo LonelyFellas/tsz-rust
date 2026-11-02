@@ -169,42 +169,31 @@ pub(crate) fn name_variants_from_native_forms(
             if form.form_type != "base" {
                 continue;
             }
-            match &form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => {
-                    has_current_name |= !common.spelling.trim().is_empty();
-                    push(common.id, &common.spelling, Some(Dialect::Common))?;
-                }
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    let groups = pos
-                        .form_groups
-                        .iter()
-                        .filter(|group| {
-                            group.members.iter().any(|member| member.form_id == form.id)
-                        })
-                        .collect::<Vec<_>>();
-                    let spelling_mode = forms
-                        .content_rules(form.id)
-                        .map(|rules| rules.spelling_mode)
-                        .or_else(|| {
-                            groups
-                                .first()
-                                .map(|group| group.dialect_rules.spelling_mode)
-                        });
-                    for (variant_id, spelling, dialect) in [
-                        (uk.id, uk.spelling.as_str(), Dialect::Uk),
-                        (us.id, us.spelling.as_str(), Dialect::Us),
-                    ] {
-                        has_current_name |= !spelling.trim().is_empty();
-                        push(
-                            variant_id,
-                            spelling,
-                            spelling_mode.map(|mode| match mode {
-                                DialectModeV3::Distinguish => dialect,
-                                DialectModeV3::Unified => Dialect::Common,
-                            }),
-                        )?;
-                    }
-                }
+            for v in form.regional_variants.variants() {
+                let mode = forms
+                    .content_rules(form.id)
+                    .map(|rules| rules.spelling_mode)
+                    .or_else(|| {
+                        pos.form_groups
+                            .iter()
+                            .find(|group| {
+                                group.members.iter().any(|member| member.form_id == form.id)
+                            })
+                            .map(|group| group.dialect_rules.spelling_mode)
+                    });
+                has_current_name |= !v.spelling.trim().is_empty();
+                let dialect = if v.dialect == Dialect::Common {
+                    Some(Dialect::Common)
+                } else {
+                    mode.map(|mode| {
+                        if mode == DialectModeV3::Unified {
+                            Dialect::Common
+                        } else {
+                            v.dialect
+                        }
+                    })
+                };
+                push(v.id, v.spelling, dialect)?;
             }
         }
     }
@@ -279,53 +268,29 @@ pub(crate) fn form_variant_sources(
                         pos_id: pos.pos_id,
                         form_id: form.id,
                     })?;
-            match &form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => {
-                    ensure_unique_variant(&mut seen_variant_ids, common.id)?;
-                    push_variant_sources(
-                        &mut sources,
-                        entry_id,
-                        pos.pos_id,
-                        &pos.pos,
-                        group_ids,
-                        form.id,
-                        &form.form_type,
-                        common.id,
+            for v in form.regional_variants.variants() {
+                ensure_unique_variant(&mut seen_variant_ids, v.id)?;
+                let (dialect, scopes): (_, &[_]) = match v.dialect {
+                    Dialect::Common => (
                         V3SurfaceDialect::Common,
-                        &common.spelling,
                         &[V3SurfaceDialectScope::Uk, V3SurfaceDialectScope::Us],
-                    )?;
-                }
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    ensure_unique_variant(&mut seen_variant_ids, uk.id)?;
-                    push_variant_sources(
-                        &mut sources,
-                        entry_id,
-                        pos.pos_id,
-                        &pos.pos,
-                        group_ids,
-                        form.id,
-                        &form.form_type,
-                        uk.id,
-                        V3SurfaceDialect::Uk,
-                        &uk.spelling,
-                        &[V3SurfaceDialectScope::Uk],
-                    )?;
-                    ensure_unique_variant(&mut seen_variant_ids, us.id)?;
-                    push_variant_sources(
-                        &mut sources,
-                        entry_id,
-                        pos.pos_id,
-                        &pos.pos,
-                        group_ids,
-                        form.id,
-                        &form.form_type,
-                        us.id,
-                        V3SurfaceDialect::Us,
-                        &us.spelling,
-                        &[V3SurfaceDialectScope::Us],
-                    )?;
-                }
+                    ),
+                    Dialect::Uk => (V3SurfaceDialect::Uk, &[V3SurfaceDialectScope::Uk]),
+                    Dialect::Us => (V3SurfaceDialect::Us, &[V3SurfaceDialectScope::Us]),
+                };
+                push_variant_sources(
+                    &mut sources,
+                    entry_id,
+                    pos.pos_id,
+                    &pos.pos,
+                    group_ids,
+                    form.id,
+                    &form.form_type,
+                    v.id,
+                    dialect,
+                    v.spelling,
+                    scopes,
+                )?;
             }
         }
     }
@@ -333,12 +298,11 @@ pub(crate) fn form_variant_sources(
 }
 
 fn regional_variant_spellings(variants: &WordRegionalVariantsV3) -> Vec<(Uuid, &str)> {
-    match variants {
-        WordRegionalVariantsV3::Common { common } => vec![(common.id, &common.spelling)],
-        WordRegionalVariantsV3::UkUs { uk, us } => {
-            vec![(uk.id, &uk.spelling), (us.id, &us.spelling)]
-        }
-    }
+    variants
+        .variants()
+        .into_iter()
+        .map(|v| (v.id, v.spelling.as_str()))
+        .collect()
 }
 
 fn ensure_unique_variant(

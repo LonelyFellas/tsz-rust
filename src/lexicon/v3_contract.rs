@@ -499,6 +499,11 @@ fn regional_variants_match_rules(variants: &WordRegionalVariantsV3, rules: Diale
             DialectModeV3::Distinguish,
             WordRegionalVariantsV3::UkUs { .. },
         ) => true,
+        (
+            DialectModeV3::Distinguish,
+            DialectModeV3::Distinguish,
+            WordRegionalVariantsV3::UkUsMany { uk, us },
+        ) => !uk.is_empty() && !us.is_empty() && uk.len() <= 2000 && us.len() <= 2000,
         _ => false,
     }
 }
@@ -869,16 +874,12 @@ fn forms_node_count(content: &DraftFormsStepContentV3) -> usize {
                 + pos
                     .forms
                     .iter()
-                    .map(|form| match &form.regional_variants {
-                        WordRegionalVariantsV3::Common { common } => {
-                            1 + common.pronunciations.len() + common.component_usages.len()
-                        }
-                        WordRegionalVariantsV3::UkUs { uk, us } => {
-                            2 + uk.pronunciations.len()
-                                + us.pronunciations.len()
-                                + uk.component_usages.len()
-                                + us.component_usages.len()
-                        }
+                    .map(|form| {
+                        form.regional_variants
+                            .variants()
+                            .iter()
+                            .map(|v| 1 + v.pronunciations.len() + v.component_usages.len())
+                            .sum::<usize>()
                     })
                     .sum::<usize>()
                 + pos.form_groups.len()
@@ -1152,48 +1153,20 @@ fn validate_form_content(
     node_roles: &mut HashMap<Uuid, &'static str>,
     issues: &mut Vec<DraftValidationIssue>,
 ) {
-    match &form.regional_variants {
-        WordRegionalVariantsV3::Common { common } => validate_variant(
+    for v in form.regional_variants.variants() {
+        validate_variant(
             form.id,
             pos_id,
-            common.id,
-            Dialect::Common,
-            &common.spelling,
-            common.spelling_rich.as_ref(),
-            common.spelling_speech.as_deref(),
-            &common.pronunciations,
+            v.id,
+            v.dialect,
+            v.spelling,
+            v.spelling_rich.as_ref(),
+            v.spelling_speech.as_deref(),
+            v.pronunciations,
             complete,
             node_roles,
             issues,
-        ),
-        WordRegionalVariantsV3::UkUs { uk, us } => {
-            validate_variant(
-                form.id,
-                pos_id,
-                uk.id,
-                Dialect::Uk,
-                &uk.spelling,
-                uk.spelling_rich.as_ref(),
-                uk.spelling_speech.as_deref(),
-                &uk.pronunciations,
-                complete,
-                node_roles,
-                issues,
-            );
-            validate_variant(
-                form.id,
-                pos_id,
-                us.id,
-                Dialect::Us,
-                &us.spelling,
-                us.spelling_rich.as_ref(),
-                us.spelling_speech.as_deref(),
-                &us.pronunciations,
-                complete,
-                node_roles,
-                issues,
-            );
-        }
+        );
     }
 }
 
@@ -1812,6 +1785,20 @@ fn valid_regional_shape(value: Option<&Value>) -> bool {
                 variant.get("dialect").and_then(Value::as_str) == Some("common")
             }) && !object.contains_key("uk")
                 && !object.contains_key("us")
+        }
+        Some("uk_us_many") => {
+            ["uk", "us"].iter().all(|side| {
+                object
+                    .get(*side)
+                    .and_then(Value::as_array)
+                    .is_some_and(|rows| {
+                        !rows.is_empty()
+                            && rows.len() <= 2000
+                            && rows.iter().all(|row| {
+                                row.get("dialect").and_then(Value::as_str) == Some(*side)
+                            })
+                    })
+            }) && !object.contains_key("common")
         }
         Some("uk_us") => {
             object

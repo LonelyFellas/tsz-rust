@@ -2,10 +2,7 @@ use super::{dto::*, invalid, source_changed};
 use crate::{
     error::AppError,
     learning_tasks::repository::Tx,
-    lexicon::{
-        dto::{WordDefinitionV3, WordRegionalVariantsV3},
-        published,
-    },
+    lexicon::{dto::WordDefinitionV3, published},
     platform::text::key_v1,
 };
 use sha2::{Digest, Sha256};
@@ -57,27 +54,25 @@ pub async fn candidates(
                                 .any(|s| s.id == sense.id)
                     })
                     .collect();
-                let spelling = |form: &crate::lexicon::dto::WordConcreteFormV3| match &form
-                    .regional_variants
-                {
-                    WordRegionalVariantsV3::Common { common } => common.spelling.trim().to_owned(),
-                    WordRegionalVariantsV3::UkUs { uk, us } => {
-                        if profile == "BrE" {
-                            uk.spelling.trim().to_owned()
-                        } else {
-                            us.spelling.trim().to_owned()
-                        }
-                    }
+                let spelling = |form: &crate::lexicon::dto::WordConcreteFormV3| {
+                    form.regional_variants
+                        .variants()
+                        .into_iter()
+                        .find(|v| {
+                            v.dialect == crate::lexicon::dto::Dialect::Common
+                                || v.dialect.as_str() == if profile == "BrE" { "uk" } else { "us" }
+                        })
+                        .map(|v| v.spelling.trim().to_owned())
+                        .unwrap_or_default()
                 };
                 let mut accepted: Vec<String> = forms
                     .iter()
-                    .flat_map(|f| match &f.regional_variants {
-                        WordRegionalVariantsV3::Common { common } => {
-                            vec![common.spelling.trim().to_owned()]
-                        }
-                        WordRegionalVariantsV3::UkUs { uk, us } => {
-                            vec![uk.spelling.trim().to_owned(), us.spelling.trim().to_owned()]
-                        }
+                    .flat_map(|f| {
+                        f.regional_variants
+                            .variants()
+                            .into_iter()
+                            .map(|v| v.spelling.trim().to_owned())
+                            .collect::<Vec<_>>()
                     })
                     .collect();
                 accepted.retain(|s| !s.is_empty());

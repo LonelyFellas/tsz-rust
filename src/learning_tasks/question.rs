@@ -3,7 +3,7 @@ use super::dto::{LearningContext, LearningExclusions, LearningPrompt};
 use crate::{
     error::{AppError, ErrorCode},
     lexicon::{
-        dto::{WordDefinitionV3, WordRegionalVariantsV3},
+        dto::WordDefinitionV3,
         published::{PublishedContentV3, allowed_form_senses},
     },
     platform::text::{display_v1, key_v1},
@@ -244,26 +244,34 @@ fn build_with_policy(
                     .into_iter()
                     .filter(|f| (all_content && !has_base) || f.form_type.as_str() == "base")
                 {
-                    let spelling = match &form.regional_variants {
-                        WordRegionalVariantsV3::Common { common } => &common.spelling,
-                        WordRegionalVariantsV3::UkUs { uk, us } => {
-                            if context.english_variant == "BrE" {
-                                &uk.spelling
-                            } else {
-                                &us.spelling
-                            }
-                        }
-                    };
-                    if let Some((display, key)) = normalize_answer_v1(spelling)
-                        && english_spelling(&display)
+                    for spelling in form
+                        .regional_variants
+                        .variants()
+                        .into_iter()
+                        .filter(|v| {
+                            v.dialect == crate::lexicon::dto::Dialect::Common
+                                || v.dialect.as_str()
+                                    == if context.english_variant == "BrE" {
+                                        "uk"
+                                    } else {
+                                        "us"
+                                    }
+                        })
+                        .map(|v| v.spelling)
                     {
-                        form_ids.push(form.id);
-                        if !answer.keys.contains(&key) {
-                            answer.answers.push(display);
-                            answer.keys.push(key);
+                        if let Some((display, key)) = normalize_answer_v1(spelling)
+                            && english_spelling(&display)
+                        {
+                            form_ids.push(form.id);
+                            if !answer.keys.contains(&key) {
+                                answer.answers.push(display);
+                                answer.keys.push(key);
+                            }
                         }
                     }
                 }
+                form_ids.sort_unstable();
+                form_ids.dedup();
                 if answer.keys.is_empty() {
                     pool.exclusions.no_base_form += 1;
                     continue;

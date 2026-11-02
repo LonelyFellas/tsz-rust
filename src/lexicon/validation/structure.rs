@@ -246,14 +246,38 @@ pub(crate) fn validate_node_identities(
         }
     }
 
-    let existing_stable_slots = existing
+    let mut existing_stable_slots = HashMap::<_, Vec<_>>::new();
+    for node in existing
         .iter()
         .filter(|node| node.entry_id == entry_id && node.stable_slot)
-        .map(|node| ((node.parent_node_id, node.node_role.as_str()), node.id))
-        .collect::<HashMap<_, _>>();
-    for node in proposed.iter().filter(|node| node.stable_slot) {
-        if let Some(existing_id) =
+    {
+        existing_stable_slots
+            .entry((node.parent_node_id, node.node_role.as_str()))
+            .or_default()
+            .push(node.id);
+    }
+    let multiple_forms: HashSet<_> = forms
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.forms)
+        .filter(|form| {
+            matches!(
+                form.regional_variants,
+                crate::lexicon::dto::WordRegionalVariantsV3::UkUsMany { .. }
+            )
+        })
+        .map(|form| form.id)
+        .collect();
+    for node in proposed.iter().filter(|node| {
+        node.stable_slot
+            && !node
+                .parent_node_id
+                .is_some_and(|id| multiple_forms.contains(&id))
+    }) {
+        if let Some(existing_ids) =
             existing_stable_slots.get(&(node.parent_node_id, node.node_role.as_str()))
+            && existing_ids.len() == 1
+            && let Some(existing_id) = existing_ids.first()
             && *existing_id != node.id
         {
             // 存量 ID 只进服务端日志：它可能是一个已退役槽位，前端要靠

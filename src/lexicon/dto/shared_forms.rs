@@ -51,6 +51,12 @@ pub enum FormContentRegionalVariantsV3 {
         uk: FormContentVariantV3,
         us: FormContentVariantV3,
     },
+    UkUsMany {
+        #[schema(min_items = 1, max_items = 2000)]
+        uk: Vec<FormContentVariantV3>,
+        #[schema(min_items = 1, max_items = 2000)]
+        us: Vec<FormContentVariantV3>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -129,6 +135,12 @@ pub enum FormRegionalBindingsV3 {
         uk: FormVariantBindingV3,
         us: FormVariantBindingV3,
     },
+    UkUsMany {
+        #[schema(min_items = 1, max_items = 2000)]
+        uk: Vec<FormVariantBindingV3>,
+        #[schema(min_items = 1, max_items = 2000)]
+        us: Vec<FormVariantBindingV3>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -197,4 +209,32 @@ pub struct RetiredContentSlotV3 {
 pub enum FormsStepRepresentationV3 {
     Shared(SharedFormsStepContentV3),
     Expanded(ExpandedFormsStepContentV3),
+}
+
+impl FormContentRegionalVariantsV3 {
+    pub(crate) fn variants(&self) -> Vec<(&'static str, &FormContentVariantV3)> {
+        match self {
+            Self::Common { common } => vec![("common", common)],
+            Self::UkUs { uk, us } => vec![("uk", uk), ("us", us)],
+            Self::UkUsMany { uk, us } => uk
+                .iter()
+                .map(|row| ("uk", row))
+                .chain(us.iter().map(|row| ("us", row)))
+                .collect(),
+        }
+    }
+}
+
+impl FormRegionalBindingsV3 {
+    pub(crate) fn variants(&self) -> Vec<(&'static str, &FormVariantBindingV3)> {
+        match self {
+            Self::Common { common } => vec![("common", common)],
+            Self::UkUs { uk, us } => vec![("uk", uk), ("us", us)],
+            Self::UkUsMany { uk, us } => uk
+                .iter()
+                .map(|row| ("uk", row))
+                .chain(us.iter().map(|row| ("us", row)))
+                .collect(),
+        }
+    }
 }

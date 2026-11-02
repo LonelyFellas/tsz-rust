@@ -102,40 +102,20 @@ fn related_v3_matches(
     let mut matches = Vec::new();
     for pos in &forms.pos {
         for form in &pos.forms {
-            match &form.regional_variants {
-                WordRegionalVariantsV3::Common { common } => include_related_v3_match(
+            for v in form.regional_variants.variants() {
+                include_related_v3_match(
                     &mut matches,
                     RelatedWordMatchV3 {
                         pos_id: pos.pos_id,
                         form_id: form.id,
-                        variant_id: common.id,
+                        variant_id: v.id,
                         form_type: form.form_type.clone(),
-                        dialect: Dialect::Common,
-                        spelling: common.spelling.clone(),
+                        dialect: v.dialect,
+                        spelling: v.spelling.clone(),
                     },
                     normalized_q,
                     match_mode,
-                )?,
-                WordRegionalVariantsV3::UkUs { uk, us } => {
-                    for (dialect, variant_id, spelling) in [
-                        (Dialect::Uk, uk.id, &uk.spelling),
-                        (Dialect::Us, us.id, &us.spelling),
-                    ] {
-                        include_related_v3_match(
-                            &mut matches,
-                            RelatedWordMatchV3 {
-                                pos_id: pos.pos_id,
-                                form_id: form.id,
-                                variant_id,
-                                form_type: form.form_type.clone(),
-                                dialect,
-                                spelling: spelling.clone(),
-                            },
-                            normalized_q,
-                            match_mode,
-                        )?;
-                    }
-                }
+                )?;
             }
         }
     }
