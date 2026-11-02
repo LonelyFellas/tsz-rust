@@ -188,8 +188,8 @@ async fn catalog_schema_and_metadata_seed_are_present(pool: PgPool) {
     .expect("查询 catalog.metadata 应成功");
     assert_eq!(
         rows,
-        vec![(true, 7, true)],
-        "词性 kind 迁移后 metadata 应为唯一一行 version=7"
+        vec![(true, 8, true)],
+        "默认模版迁移后 metadata 应为唯一一行 version=8"
     );
 }
 
@@ -1774,5 +1774,43 @@ async fn parts_of_speech_kind_constraints(pool: PgPool) {
         FOREIGN_KEY_VIOLATION,
         Some("catalog_form_types_part_of_speech_fkey"),
         "词形变化不能挂到短语词性下",
+    );
+}
+
+#[sqlx::test]
+async fn form_type_default_template_migration_preserves_rows_and_can_be_reverted(pool: PgPool) {
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.form_types")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalog.form_types SET is_default=false WHERE code='plural'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261102020000_form_type_default_template.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.form_types")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261102020000_form_type_default_template.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let enabled: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM catalog.form_types WHERE is_default")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        enabled, before,
+        "迁移应保留所有历史词形并默认开启；down 后重做会丢失开关设置"
     );
 }

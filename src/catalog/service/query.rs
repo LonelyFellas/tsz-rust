@@ -50,7 +50,13 @@ impl CatalogService {
                     )?,
                     full_name_en: required(record.part_full_name_en, "part full_name_en is null")?,
                     sort_order: required(record.part_sort_order, "part sort_order is null")?,
-                    default_form_types: allowed_form_types.clone(),
+                    default_form_types: form_types
+                        .iter()
+                        .filter(|f| {
+                            f.code != "base" && f.part_of_speech_id == Some(part_id) && f.is_default
+                        })
+                        .map(|f| f.code.clone())
+                        .collect(),
                     allowed_form_types,
                     sub_parts_extensible: true,
                     // 细分词性在下面逐行追加，数量要等这一轮走完才知道，统一在循环后回填。

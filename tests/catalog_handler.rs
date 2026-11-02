@@ -489,7 +489,7 @@ async fn catalog_read_allows_word_access_but_management_requires_settings_access
     )
     .await;
     assert_eq!(status, StatusCode::OK, "普通管理员应能读 catalog：{body}");
-    assert_eq!(body["catalog_version"], 7);
+    assert_eq!(body["catalog_version"], 8);
     // 词形候选按所属词性收窄：种子把动词的四个时态、名词的复数、形容词的两级各归其主，
     // 原形对所有词性通用所以不进候选。
     let form_types_by_pos = json!({
@@ -981,8 +981,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    // 比放开前多两步写操作：自建词性挂细分词性、再把它删掉；kind 迁移又让基线加一。
-    assert_eq!(catalog["catalog_version"], 15);
+    // 自建词性挂细分词性、再删除；kind 与默认模版迁移各让基线加一。
+    assert_eq!(catalog["catalog_version"], 16);
     assert!(
         catalog["items"]
             .as_array()
@@ -1304,6 +1304,7 @@ async fn form_type_catalog_crud_permissions_revision_and_base_protection(pool: P
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["is_default"], true, "旧客户端未传开关时默认开启");
     let id = created["id"].as_str().unwrap();
     let (status, _, duplicate, _) = call(
         &state,
@@ -2211,4 +2212,172 @@ async fn full_name_en_limit_is_200_characters_for_parts_sub_parts_and_form_types
         );
         assert_eq!(updated["full_name_en"], longest.as_str());
     }
+}
+
+#[sqlx::test]
+async fn form_type_default_template_controls_catalog_without_disabling_type(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let root = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let bearer = token(&state, root, AdminRole::SuperAdmin);
+    let noun_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code='noun'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let path = "/api/v1/admin/settings/form-types";
+    let input = json!({"part_of_speech_id":noun_id,"code":"rare_variant","name_zh":"罕见词形","short_name_zh":"罕见","name_en":"Rare variant","abbreviation":"rare","full_name_en":"rare variant","sort_order":100,"is_default":false});
+    let (status, _, created, _) = call(
+        &state,
+        Method::POST,
+        path,
+        Some(&bearer),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["is_default"], false);
+    let id = created["id"].as_str().unwrap();
+    let (status, _, list, _) = call(
+        &state,
+        Method::GET,
+        &format!("{path}?q=rare_variant"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["items"][0]["is_default"], false);
+    let (status, _, before, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/catalog"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let noun = before["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["code"] == "noun")
+        .unwrap();
+    assert!(
+        noun["allowed_form_types"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rare_variant"))
+    );
+    assert!(
+        !noun["default_form_types"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rare_variant"))
+    );
+    let mut update = input.clone();
+    update.as_object_mut().unwrap().remove("is_default");
+    update["base_revision"] = json!(1);
+    // 旧客户端编辑名称不传开关，也不能把已关闭的设置重新打开。
+    let (status, _, saved, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{id}"),
+        Some(&bearer),
+        Some(update.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["is_default"], false);
+    update["is_default"] = json!(true);
+    let (status, _, conflict, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{id}"),
+        Some(&bearer),
+        Some(update.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    update["base_revision"] = json!(2);
+    let (status, _, saved, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{id}"),
+        Some(&bearer),
+        Some(update),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["is_default"], true);
+    let (_, _, after, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/catalog"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert!(
+        after["catalog_version"].as_i64().unwrap() > before["catalog_version"].as_i64().unwrap()
+    );
+    let noun = after["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["code"] == "noun")
+        .unwrap();
+    assert_eq!(
+        noun["default_form_types"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        "rare_variant"
+    );
+    let (_, _, parts, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}?q=noun"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    let listed_noun = parts["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["code"] == "noun")
+        .unwrap();
+    assert_eq!(
+        listed_noun["default_form_types"],
+        noun["default_form_types"]
+    );
+    // 原形不能通过 API 或直接 SQL 从默认模版移除。
+    let base = after["form_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "base")
+        .unwrap();
+    let mut base_update = base.clone();
+    base_update["base_revision"] = json!(1);
+    base_update["is_default"] = json!(false);
+    let (status, _, rejected, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{}", base["id"].as_str().unwrap()),
+        Some(&bearer),
+        Some(base_update),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_eq!(rejected["field"], "is_default");
+    let error = sqlx::query("UPDATE catalog.form_types SET is_default=false WHERE code='base'")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().constraint(),
+        Some("catalog_form_types_base_default")
+    );
 }

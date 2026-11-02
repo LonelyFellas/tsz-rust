@@ -297,6 +297,7 @@ pub type PartListResponse = PaginatedResponse<PartOfSpeechConfig>;
 
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct PartRecord {
+    pub default_form_types: Vec<String>,
     pub allowed_form_types: Vec<String>,
     pub id: Uuid,
     pub kind: String,
@@ -338,7 +339,7 @@ impl From<PartRecord> for PartOfSpeechConfig {
             sub_part_count: value.sub_part_count,
             sub_parts_extensible: true,
             sub_pos_required,
-            default_form_types: allowed_form_types.clone(),
+            default_form_types: value.default_form_types,
             allowed_form_types,
             revision: value.revision,
             created_by: actor(value.created_by_admin_id, value.created_by_display_name)

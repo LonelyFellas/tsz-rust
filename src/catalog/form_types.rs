@@ -31,6 +31,8 @@ pub struct FormTypeCatalogItem {
     pub abbreviation: String,
     pub full_name_en: String,
     pub sort_order: i32,
+    /// 是否在新建词条或新增词性时默认生成录入行。
+    pub is_default: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -45,6 +47,7 @@ pub struct FormTypeConfig {
     pub abbreviation: String,
     pub full_name_en: String,
     pub sort_order: i32,
+    pub is_default: bool,
     pub usage_count: i64,
     pub revision: i64,
     pub created_by: Actor,
@@ -84,6 +87,9 @@ pub struct CreateFormTypeRequest {
     #[schema(min_length = 1, max_length = 200)]
     pub full_name_en: String,
     pub sort_order: i32,
+    /// 省略时开启，兼容旧客户端。
+    #[serde(default = "default_template_enabled")]
+    pub is_default: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -102,6 +108,12 @@ pub struct UpdateFormTypeRequest {
     #[schema(min_length = 1, max_length = 200)]
     pub full_name_en: String,
     pub sort_order: i32,
+    /// 省略时保留当前设置，原形不能关闭。
+    pub is_default: Option<bool>,
+}
+
+fn default_template_enabled() -> bool {
+    true
 }
 
 pub fn router() -> Router<AppState> {
@@ -330,10 +342,10 @@ pub async fn create(
         .require("lexicon_settings.edit_forms")?;
     require_part(&mut tx, request.part_of_speech_id).await?;
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO catalog.form_types(id,part_of_speech_id,code,name_zh,name_en,short_name_zh,abbreviation,full_name_en,sort_order,created_by_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
+    sqlx::query("INSERT INTO catalog.form_types(id,part_of_speech_id,code,name_zh,name_en,short_name_zh,abbreviation,full_name_en,sort_order,created_by_admin_id,is_default) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
         .bind(id).bind(request.part_of_speech_id).bind(request.code).bind(text(request.name_zh,"name_zh",64)?).bind(text(request.name_en,"name_en",64)?)
         .bind(text(request.short_name_zh,"short_name_zh",16)?).bind(text(request.abbreviation,"abbreviation",16)?)
-        .bind(text(request.full_name_en,"full_name_en",200)?).bind(request.sort_order).bind(auth.subject)
+        .bind(text(request.full_name_en,"full_name_en",200)?).bind(request.sort_order).bind(auth.subject).bind(request.is_default)
         .execute(&mut *tx).await.map_err(database_error)?;
     bump(&mut tx).await?;
     let value = config(&mut tx, id).await?;
@@ -388,6 +400,13 @@ pub async fn update(
         .await?
         .require("lexicon_settings.edit_forms")?;
     let current = lock(&mut tx, path.id, request.base_revision).await?;
+    if current.code == "base" && request.is_default == Some(false) {
+        return Err(AppError::validation(
+            ErrorCode::InvalidFormType,
+            "is_default",
+            "base form type must remain in the default template",
+        ));
+    }
     // 原形对所有词性通用，不接受归属；其余词形保持原归属或改挂到另一个词性。
     let part_of_speech_id = if current.code == "base" {
         if request.part_of_speech_id.is_some() {
@@ -413,10 +432,10 @@ pub async fn update(
         require_part(&mut tx, target).await?;
         Some(target)
     };
-    sqlx::query("UPDATE catalog.form_types SET part_of_speech_id=$9,name_zh=$2,name_en=$3,short_name_zh=$4,abbreviation=$5,full_name_en=$6,sort_order=$7,updated_by_admin_id=$8,updated_at=now(),revision=revision+1 WHERE id=$1")
+    sqlx::query("UPDATE catalog.form_types SET is_default=$10,part_of_speech_id=$9,name_zh=$2,name_en=$3,short_name_zh=$4,abbreviation=$5,full_name_en=$6,sort_order=$7,updated_by_admin_id=$8,updated_at=now(),revision=revision+1 WHERE id=$1")
         .bind(path.id).bind(text(request.name_zh,"name_zh",64)?).bind(text(request.name_en,"name_en",64)?)
         .bind(text(request.short_name_zh,"short_name_zh",16)?).bind(text(request.abbreviation,"abbreviation",16)?)
-        .bind(text(request.full_name_en,"full_name_en",200)?).bind(request.sort_order).bind(auth.subject).bind(part_of_speech_id)
+        .bind(text(request.full_name_en,"full_name_en",200)?).bind(request.sort_order).bind(auth.subject).bind(part_of_speech_id).bind(request.is_default.unwrap_or(current.is_default))
         .execute(&mut *tx).await.map_err(database_error)?;
     bump(&mut tx).await?;
     let value = config(&mut tx, path.id).await?;
