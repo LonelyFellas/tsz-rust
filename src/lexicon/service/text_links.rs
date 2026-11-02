@@ -604,7 +604,11 @@ pub(crate) fn shared_target_matches(
     if matches!(
         form.regional_variants,
         WordRegionalVariantsV3::UkUsMany { .. }
-    ) {
+    ) && link
+        .target_dialect
+        .is_some_and(|side| side != Dialect::Common)
+    {
+        // 新的英美引用绑定具体拼写；旧 common/缺省坐标继续按原文与方言定位。
         return false;
     }
     // 语义坐标兜底：结构漂移（common ↔ uk_us）后变体实例 id 会换掉，旧 id 找不到。引用在

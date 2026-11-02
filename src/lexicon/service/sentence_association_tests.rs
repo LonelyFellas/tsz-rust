@@ -750,6 +750,98 @@ mod dialect_structure_drift {
         (word, target)
     }
 
+    fn many_snapshot(fixture: &V3Fixture) -> (Value, Uuid) {
+        let mut snapshot = fixture.snapshot.clone();
+        to_uk_us(&mut snapshot, 0, Uuid::now_v7());
+        let pair = snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"].clone();
+        let mut extra = pair["uk"].clone();
+        let extra_id = Uuid::now_v7();
+        extra["id"] = json!(extra_id);
+        snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"] =
+            json!({"mode":"uk_us_many","uk":[pair["uk"],extra],"us":[pair["us"]]});
+        (snapshot, extra_id)
+    }
+
+    #[test]
+    fn common_reference_survives_many_spellings() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let (snapshot, _) = many_snapshot(&fixture);
+        let (word, target) = component_target(&snapshot);
+        for dialect in [Some("common"), None] {
+            let mut value = json!({"id":Uuid::now_v7(),"source_segments":[{"start":0,"end":7,"surface":"harbour"}],"target_word_id":fixture.entry_id,"target_pos_id":fixture.pos_id,"target_base_form_id":form_id,"target_form_id":form_id,"target_variant_id":fixture.variant_ids[0],"target_sense_id":fixture.sense_id});
+            if let Some(side) = dialect {
+                value["target_dialect"] = json!(side);
+            }
+            let link: TextLinkV3 = serde_json::from_value(value).unwrap();
+            assert!(text_links::shared_target_matches(
+                &word.forms,
+                &word.meanings,
+                &link,
+                "common"
+            ));
+        }
+        assert!(phrase_component_matches_target(
+            &target,
+            fixture.pos_id,
+            form_id,
+            fixture.sense_id,
+            form_id,
+            fixture.variant_ids[0],
+            Dialect::Common,
+            "base",
+            None
+        ));
+    }
+
+    #[test]
+    fn removed_explicit_reference_is_not_revived_in_many_spellings() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let (mut snapshot, extra_id) = many_snapshot(&fixture);
+        let link: TextLinkV3 = serde_json::from_value(json!({"id":Uuid::now_v7(),"source_segments":[{"start":0,"end":7,"surface":"harbour"}],"target_word_id":fixture.entry_id,"target_pos_id":fixture.pos_id,"target_base_form_id":form_id,"target_form_id":form_id,"target_variant_id":extra_id,"target_dialect":"uk","target_sense_id":fixture.sense_id})).unwrap();
+        let (word, target) = component_target(&snapshot);
+        assert!(text_links::shared_target_matches(
+            &word.forms,
+            &word.meanings,
+            &link,
+            "common"
+        ));
+        assert!(phrase_component_matches_target(
+            &target,
+            fixture.pos_id,
+            form_id,
+            fixture.sense_id,
+            form_id,
+            extra_id,
+            Dialect::Uk,
+            "base",
+            None
+        ));
+        snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        let (word, target) = component_target(&snapshot);
+        assert!(!text_links::shared_target_matches(
+            &word.forms,
+            &word.meanings,
+            &link,
+            "common"
+        ));
+        assert!(!phrase_component_matches_target(
+            &target,
+            fixture.pos_id,
+            form_id,
+            fixture.sense_id,
+            form_id,
+            extra_id,
+            Dialect::Uk,
+            "base",
+            None
+        ));
+    }
+
     #[test]
     fn shared_sentence_reference_survives_common_to_uk_us() {
         let fixture = v3_fixture(1);

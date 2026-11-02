@@ -3734,10 +3734,7 @@ fn variant_id_matches(form: &WordConcreteFormV3, target_variant_id: Uuid) -> boo
 /// 但方言与结构的映射是双向的：common 结构任一引用方言都能落到它；uk/us 结构能接 common 引用
 /// 与自己的方言。两者均无法定位时才视为失效。
 ///
-/// 注意 `Dialect` 当前只有 common/uk/us 三值，第二个分支已列全剩余取值，本函数**恒为 true**；
-/// 也就是说成分引用的有效性实际由 form / base / sense 的存在性决定，`target_variant_id` 仅作
-/// 记录、不再参与判定（绑定坐标是「form + 方言侧」，见 design.md §2.2）。保留这个 match 是给
-/// 方言集合扩张留的编译期兜底：新增 `Dialect` 变体会让它不再穷尽，必须显式补齐映射。
+/// 多拼写模式保留旧 common 引用的语义坐标；新英美引用指向明确拼写，删除后不能重解析到另一条。
 fn dialect_side_available(form: &WordConcreteFormV3, target_dialect: Dialect) -> bool {
     match (&form.regional_variants, target_dialect) {
         // 通用结构：单一拼写，任何目标方言都落它。
@@ -3745,7 +3742,8 @@ fn dialect_side_available(form: &WordConcreteFormV3, target_dialect: Dialect) ->
         // 分离结构：uk/us 侧都在。这里只判「该侧存在」；具体落到哪一侧属于业务口径——
         // 例句路径另有拼写校验，成分路径没有，只认 form / base / sense 存在性。
         (WordRegionalVariantsV3::UkUs { .. }, Dialect::Common | Dialect::Uk | Dialect::Us) => true,
-        (WordRegionalVariantsV3::UkUsMany { .. }, _) => false,
+        (WordRegionalVariantsV3::UkUsMany { .. }, Dialect::Common) => true,
+        (WordRegionalVariantsV3::UkUsMany { .. }, Dialect::Uk | Dialect::Us) => false,
     }
 }
 
@@ -3784,8 +3782,8 @@ pub(super) fn phrase_component_matches_target(
     }
     // 变体定位：先走 id 快速路径（同结构、存量引用完全不变）；未命中时按方言侧重解析。
     // 结构漂移（common ↔ uk_us）会换掉变体实例 id，而 common/uk/us 之间双向可映射
-    // （见 dialect_side_available：该判定当前恒为 true），因此漂移不构成失效；真正的失效由
-    // form / base / sense 的存在性判（见下方 base 校验与 target_content_gloss）。
+    // 因此旧 common 引用仍可按词形定位；多拼写模式中明确英美侧的引用还必须保留具体拼写 ID。
+    // form / base / sense 的存在性仍按下方 base 校验与 target_content_gloss 判断。
     if !variant_id_matches(form, target_variant_id) && !dialect_side_available(form, target_dialect)
     {
         return false;
