@@ -336,7 +336,7 @@ pub async fn materialize(
                 ));
             }
             answer.choice = None;
-            answer.wordlist_fallback = true;
+            // Missing distractors do not change the target's existing spelling qualification.
             sqlx::query("UPDATE learning_cycle_units SET answer_snapshot=$2 WHERE id=$1")
                 .bind(unit.id)
                 .bind(serde_json::to_value(answer).map_err(AppError::internal)?)

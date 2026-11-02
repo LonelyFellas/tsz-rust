@@ -295,7 +295,7 @@ pub async fn create(
         return Err(invalid(&p.reasons.join("；")));
     }
     let direct_key = if input.reuse_active {
-        let scope: Vec<_> = candidates
+        let mut scope: Vec<_> = candidates
             .iter()
             .cloned()
             .map(|mut candidate| {
@@ -303,6 +303,8 @@ pub async fn create(
                 candidate
             })
             .collect();
+        // Choice availability can reorder the pool without changing its learning targets.
+        scope.sort_by(|a, b| a.unit_key.cmp(&b.unit_key));
         Some(hash(&(&input.preview(), &p.settings, &scope))?)
     } else {
         None
