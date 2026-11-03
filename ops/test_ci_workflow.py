@@ -18,13 +18,13 @@ class CiWorkflowTests(unittest.TestCase):
     def test_backup_restore_safety_checks_run_in_quality(self) -> None:
         self.assertIn(
             "python3 -m unittest discover -s ops -p 'test_backup_restore_drill.py'",
-            self._job("quality"),
+            self._job("quality-checks"),
         )
 
     def test_git_hook_regressions_run_in_quality(self) -> None:
         self.assertIn(
             "python3 -m unittest ops/test_rule_doc_hook.py ops/test_pre_push_hook.py",
-            self._job("quality"),
+            self._job("quality-checks"),
         )
 
     def test_ci07_integration_matrix_is_parallel_and_complete(self) -> None:
@@ -37,7 +37,7 @@ class CiWorkflowTests(unittest.TestCase):
         )
 
     def test_ci08_only_test_jobs_start_database_services(self) -> None:
-        quality = self._job("quality")
+        quality = self._job("quality-checks")
         unit_doc = self._job("unit-doc")
         integration = self._job("integration")
 
@@ -90,12 +90,17 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn('cron: "23 3 * * 1"', self.workflow)
         self.assertIn("github.event_name == 'schedule' && 'scheduled-audit'", self.workflow)
         quality = self._job("quality")
-        self.assertIn("needs: [dependency-audit]", quality)
+        self.assertIn("needs: [dependency-audit, quality-checks]", quality)
         self.assertIn("always()", quality)
         self.assertIn("needs['dependency-audit'].result", quality)
-        self.assertIn('test "$AUDIT_RESULT" = "success"', quality)
-        self.assertLess(quality.index("Require dependency audit to pass"), quality.index("Check out repository"))
-        for name in ("quality", "unit-doc", "integration", "lexicon-summary", "ci-summary"):
+        self.assertIn("needs['quality-checks'].result", quality)
+        self.assertNotIn("needs:", self._job("quality-checks"))
+        script = quality.split("        run: |\n", 1)[1]
+        for audit, checks in (("success", "success"), ("failure", "success"), ("success", "failure"),
+                              ("cancelled", "success"), ("success", "skipped")):
+            result = subprocess.run(["bash", "-e", "-c", script], env={**os.environ, "AUDIT_RESULT": audit, "CHECKS_RESULT": checks})
+            self.assertEqual(result.returncode == 0, audit == checks == "success")
+        for name in ("quality", "quality-checks", "unit-doc", "integration", "lexicon-summary", "ci-summary"):
             self.assertIn("github.event_name != 'schedule'", self._job(name))
 
     def test_ci10_release_artifact_is_exact_main_and_auditable(self) -> None:
@@ -140,14 +145,14 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertNotIn("ssh ", smoke)
         self.assertNotIn("secrets.", smoke)
         self.assertNotIn("workflow_run:", self.workflow)
-        quality = self._job("quality")
+        quality = self._job("quality-checks")
         self.assertIn("test_release_artifact_smoke.py", quality)
         self.assertIn("test_migration_compatibility.py", quality)
         self.assertIn("test_deployed_baseline.py", quality)
 
     def test_ci11_caches_are_explicit_restore_only_outside_trusted_main(self) -> None:
         jobs = [
-            self._job("quality"),
+            self._job("quality-checks"),
             self._job("unit-doc"),
             self._job("integration"),
             self._job("release-artifact"),
@@ -174,7 +179,7 @@ class CiWorkflowTests(unittest.TestCase):
                 self.assertIn("ops/ci_cargo_fetch.py", job)
 
     def test_ci13_phase_zero_metrics_cover_every_cargo_gate(self) -> None:
-        quality = self._job("quality")
+        quality = self._job("quality-checks")
         unit_doc = self._job("unit-doc")
         integration = self._job("integration")
         release = self._job("release-artifact")
@@ -308,7 +313,7 @@ class CiWorkflowTests(unittest.TestCase):
                     self.assertTrue(installs[0].startswith(f"http://{expected_host}/ubuntu/ "))
 
     def test_ci12_quality_and_unit_doc_keep_every_original_gate(self) -> None:
-        quality = self._job("quality")
+        quality = self._job("quality-checks")
         unit_doc = self._job("unit-doc")
 
         self.assertIn("cargo fmt --all -- --check", quality)
