@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import pathlib
+import platform
 import subprocess
 import time
 from collections.abc import Sequence
@@ -25,6 +26,44 @@ def _append_summary(summary_path: pathlib.Path | None, metric: dict[str, Any]) -
         )
 
 
+def _append_metrics(metric: dict[str, Any]) -> None:
+    path = os.environ.get("CI_METRICS_PATH")
+    if path:
+        destination = pathlib.Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("a", encoding="utf-8") as output:
+            output.write(json.dumps(metric, separators=(",", ":")) + "\n")
+
+
+def _cpu_model() -> str:
+    cpuinfo = pathlib.Path("/proc/cpuinfo")
+    if cpuinfo.exists():
+        for line in cpuinfo.read_text().splitlines():
+            if line.startswith("model name"):
+                return line.partition(":")[2].strip()
+    return platform.processor()
+
+
+def record_context() -> None:
+    # Explicit allowlist: never serialize the environment or command arguments.
+    context = {
+        "name": "context",
+        "sha": os.environ.get("GITHUB_SHA", ""),
+        "tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+        "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+        "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        "event": os.environ.get("GITHUB_EVENT_NAME", ""),
+        "runner_image": os.environ.get("ImageVersion", ""),
+        "runner_os": platform.system(),
+        "architecture": platform.machine(),
+        "cpu_count": os.cpu_count(),
+        "cpu_model": _cpu_model(),
+        "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+    }
+    _append_metrics(context)
+    print(json.dumps(context, separators=(",", ":")), flush=True)
+
+
 def record_metric(
     name: str,
     value: str | int,
@@ -34,6 +73,7 @@ def record_metric(
 ) -> dict[str, Any]:
     metric = {"name": name, "value": value, "unit": unit}
     _append_summary(summary_path, metric)
+    _append_metrics(metric)
     print(json.dumps(metric, separators=(",", ":")), flush=True)
     return metric
 
@@ -55,6 +95,7 @@ def run_timed(
         "elapsed_ms": elapsed_ms,
     }
     _append_summary(summary_path, metric)
+    _append_metrics(metric)
     print(json.dumps(metric, separators=(",", ":")), flush=True)
     return completed.returncode
 
@@ -67,6 +108,7 @@ def _summary_path(value: str | None) -> pathlib.Path | None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record simple CI and deploy timings")
     subparsers = parser.add_subparsers(dest="action", required=True)
+    subparsers.add_parser("context")
     run = subparsers.add_parser("run")
     run.add_argument("--name", required=True)
     run.add_argument("--summary-path")
@@ -81,6 +123,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if arguments.action == "context":
+        record_context()
+        return 0
     summary_path = _summary_path(arguments.summary_path)
     if arguments.action == "record":
         record_metric(arguments.name, arguments.value, arguments.unit, summary_path=summary_path)

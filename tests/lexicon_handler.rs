@@ -50,6 +50,8 @@ const ROOT: &str = "/api/v1/admin/lexicon";
 #[derive(Clone, Default)]
 struct TestRouterStats {
     router_builds: usize,
+    router_build_us: u128,
+    http_us: u128,
     requests: BTreeMap<&'static str, usize>,
     request_ids: HashSet<String>,
 }
@@ -75,9 +77,12 @@ async fn with_test_router<F: std::future::Future>(
         router_builds: 1,
         ..Default::default()
     }));
+    let router_started = std::time::Instant::now();
+    let router = tsz_rust::router(state.clone());
+    stats.lock().unwrap().router_build_us = router_started.elapsed().as_micros();
     let scope = TestRouterScope {
         state_address: std::ptr::from_ref(state) as usize,
-        router: tsz_rust::router(state.clone()),
+        router,
         stats: stats.clone(),
     };
     let result = TEST_ROUTER.scope(scope, future).await;
@@ -366,12 +371,14 @@ async fn call_with_form_capability(
     } else {
         Body::empty()
     };
+    let http_started = std::time::Instant::now();
     let response = test_router(state, request_kind)
         .oneshot(builder.body(body).unwrap())
         .await
         .unwrap();
     let status = response.status();
     let _ = TEST_ROUTER.try_with(|scope| {
+        scope.stats.lock().unwrap().http_us += http_started.elapsed().as_micros();
         let request_id = response.headers()["x-request-id"].to_str().unwrap();
         assert!(
             scope
@@ -15923,157 +15930,170 @@ async fn component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-    let mut expected = HashSet::new();
-    // 251 足以穿过旧版 200 词条总量窗口，同时避免把正常 CI 时间消耗在重复建稿发布上。
-    // 开发阶段另以 1001 个真实发布词条 / 8008 候选完整跑过同一路径。
-    // 测试池最多 5 条连接；4 个独立 fixture 并行，给请求内部查询留出余量。
-    let surfaces = (0..251_u32)
-        .map(|index| {
-            let suffix = [index / 676, index / 26 % 26, index % 26]
-                .map(|n| char::from(b'a' + n as u8))
-                .iter()
-                .collect::<String>();
-            format!("pagination harbour {suffix}")
-        })
-        .collect::<Vec<_>>();
-    let (prototype, _) = create_v3_phrase_draft(&state, &bearer, &surfaces[0]).await;
-    let prototype = Uuid::parse_str(&prototype).unwrap();
-    let mut ids = vec![prototype];
-    ids.extend(
-        fixtures::seed_empty_v3_entries(&pool, prototype, &surfaces[0], &surfaces[1..]).await,
-    );
-    record_test_phase("component-pagination", "empty-fixture", fixture_started);
-    let content_started = std::time::Instant::now();
-    let words = stream::iter(ids.iter().zip(&surfaces))
-        .map(|(id, surface)| {
-            let state = &state;
-            let bearer = &bearer;
-            async move {
-                complete_v3_phrase_draft(
-                    state,
-                    bearer,
-                    &id.to_string(),
-                    phrase_forms_fixture(surface),
-                )
-                .await
+    let ((), router_stats) = with_test_router(&state, async {
+        let admin_id = seed_admin(&pool).await;
+        let bearer = token(&state, admin_id);
+        let mut expected = HashSet::new();
+        // 251 足以穿过旧版 200 词条总量窗口，同时避免把正常 CI 时间消耗在重复建稿发布上。
+        // 开发阶段另以 1001 个真实发布词条 / 8008 候选完整跑过同一路径。
+        // 测试池最多 5 条连接；4 个独立 fixture 并行，给请求内部查询留出余量。
+        let surfaces = (0..251_u32)
+            .map(|index| {
+                let suffix = [index / 676, index / 26 % 26, index % 26]
+                    .map(|n| char::from(b'a' + n as u8))
+                    .iter()
+                    .collect::<String>();
+                format!("pagination harbour {suffix}")
+            })
+            .collect::<Vec<_>>();
+        let (prototype, _) = create_v3_phrase_draft(&state, &bearer, &surfaces[0]).await;
+        let prototype = Uuid::parse_str(&prototype).unwrap();
+        let mut ids = vec![prototype];
+        ids.extend(
+            fixtures::seed_empty_v3_entries(&pool, prototype, &surfaces[0], &surfaces[1..]).await,
+        );
+        record_test_phase("component-pagination", "empty-fixture", fixture_started);
+        let content_started = std::time::Instant::now();
+        let words = stream::iter(ids.iter().zip(&surfaces))
+            .map(|(id, surface)| {
+                let state = &state;
+                let bearer = &bearer;
+                async move {
+                    complete_v3_phrase_draft(
+                        state,
+                        bearer,
+                        &id.to_string(),
+                        phrase_forms_fixture(surface),
+                    )
+                    .await
+                }
+            })
+            .buffered(4)
+            .collect::<Vec<_>>()
+            .await;
+        let last_id = words.last().unwrap()["word"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for word in &words {
+            expected.insert(word["word"]["id"].as_str().unwrap().to_owned());
+        }
+        record_test_phase("component-pagination", "content-fixture", content_started);
+        let publish_started = std::time::Instant::now();
+        // 保留单条发布样本，其他独立词条用现有的 50 条批量发布能力准备。
+        let (status, first) = publish_reviewed_v3(&state, &bearer, &words[0]).await;
+        assert_eq!(status, StatusCode::CREATED, "{first}");
+        for batch in words[1..].chunks(50) {
+            for word in batch {
+                confirm_audio(&state, &bearer, word).await;
             }
-        })
-        .buffered(4)
-        .collect::<Vec<_>>()
-        .await;
-    let last_id = words.last().unwrap()["word"]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    for word in &words {
-        expected.insert(word["word"]["id"].as_str().unwrap().to_owned());
-    }
-    record_test_phase("component-pagination", "content-fixture", content_started);
-    let publish_started = std::time::Instant::now();
-    // 保留单条发布样本，其他独立词条用现有的 50 条批量发布能力准备。
-    let (status, first) = publish_reviewed_v3(&state, &bearer, &words[0]).await;
-    assert_eq!(status, StatusCode::CREATED, "{first}");
-    for batch in words[1..].chunks(50) {
-        for word in batch {
-            confirm_audio(&state, &bearer, word).await;
+            let (status, published) = call(
+                &state,
+                Method::POST,
+                &format!("{ROOT}/entries/publications/batch"),
+                &bearer,
+                Some(Uuid::now_v7()),
+                Some(batch3_input(&batch.iter().collect::<Vec<_>>())),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{published}");
+            assert_eq!(published["words"].as_array().unwrap().len(), batch.len());
         }
-        let (status, published) = call(
-            &state,
-            Method::POST,
-            &format!("{ROOT}/entries/publications/batch"),
-            &bearer,
-            Some(Uuid::now_v7()),
-            Some(batch3_input(&batch.iter().collect::<Vec<_>>())),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "{published}");
-        assert_eq!(published["words"].as_array().unwrap().len(), batch.len());
-    }
-    record_test_phase("component-pagination", "publish-fixture", publish_started);
-    let mut cursor = None;
-    let mut visited = HashSet::new();
-    let mut candidate_keys = HashSet::new();
-    let mut total = None;
-    let mut last_next = None;
-    let started = std::time::Instant::now();
-    for _ in 0..200 {
-        let mut input = json!({"schema_version": 3, "q": "pagination harbour", "page_size": 50});
-        if let Some(value) = &cursor {
-            input["cursor"] = json!(value);
+        record_test_phase("component-pagination", "publish-fixture", publish_started);
+        let mut cursor = None;
+        let mut visited = HashSet::new();
+        let mut candidate_keys = HashSet::new();
+        let mut total = None;
+        let mut last_next = None;
+        let started = std::time::Instant::now();
+        for _ in 0..200 {
+            let mut input =
+                json!({"schema_version": 3, "q": "pagination harbour", "page_size": 50});
+            if let Some(value) = &cursor {
+                input["cursor"] = json!(value);
+            }
+            let (status, page) = search_component_targets(&state, &bearer, input).await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            let page_total = page["total"].as_u64().unwrap();
+            assert_eq!(*total.get_or_insert(page_total), page_total);
+            let matches = page["matches"].as_array().unwrap();
+            assert!(matches.len() <= 50);
+            for candidate in matches {
+                visited.insert(candidate["entry_id"].as_str().unwrap().to_owned());
+                let key = format!(
+                    "{}:{}:{}:{}:{}",
+                    candidate["entry_id"],
+                    candidate["publication_id"],
+                    candidate["pos_id"],
+                    candidate["base_form_id"],
+                    candidate["matched_variant_id"]
+                );
+                assert!(candidate_keys.insert(key), "跨页候选重复：{candidate}");
+            }
+            last_next = page["next_cursor"].as_str().map(str::to_owned);
+            assert_eq!(page["truncated"], json!(last_next.is_some()));
+            if last_next.is_none() {
+                break;
+            }
+            cursor = last_next.clone();
         }
-        let (status, page) = search_component_targets(&state, &bearer, input).await;
-        assert_eq!(status, StatusCode::OK, "{page}");
-        let page_total = page["total"].as_u64().unwrap();
-        assert_eq!(*total.get_or_insert(page_total), page_total);
-        let matches = page["matches"].as_array().unwrap();
-        assert!(matches.len() <= 50);
-        for candidate in matches {
-            visited.insert(candidate["entry_id"].as_str().unwrap().to_owned());
-            let key = format!(
-                "{}:{}:{}:{}:{}",
-                candidate["entry_id"],
-                candidate["publication_id"],
-                candidate["pos_id"],
-                candidate["base_form_id"],
-                candidate["matched_variant_id"]
-            );
-            assert!(candidate_keys.insert(key), "跨页候选重复：{candidate}");
+        eprintln!(
+            "251-entry search traversal: {:?}, {} candidates",
+            started.elapsed(),
+            candidate_keys.len()
+        );
+        assert!(last_next.is_none(), "必须遍历到末页");
+        assert_eq!(visited, expected, "旧200词条窗口之外也必须可达");
+        assert_eq!(
+            candidate_keys.len(),
+            2008,
+            "保持 251 个词条的完整英美候选形状"
+        );
+        assert_eq!(candidate_keys.len() as u64, total.unwrap());
+        let input =
+            json!({"schema_version":3,"q":"pagination harbour","page_size":1,"entry_id":last_id});
+        let (status, targeted) = search_component_targets(&state, &bearer, input.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{targeted}");
+        assert_eq!(targeted["matches"][0]["entry_id"], last_id);
+        let next = targeted["next_cursor"].as_str().expect("英美候选应能跨页");
+        let mut changed = input.clone();
+        changed["cursor"] = json!(next);
+        changed["entry_id"] = json!(Uuid::now_v7());
+        let (status, rejected) = search_component_targets(&state, &bearer, changed).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["field"], "cursor");
+        for input in [
+            json!({"schema_version":3,"q":"not a matching surface","entry_id":last_id}),
+            json!({"schema_version":3,"q":"pagination harbour","entry_id":Uuid::now_v7()}),
+        ] {
+            let (status, empty) = search_component_targets(&state, &bearer, input).await;
+            assert_eq!(status, StatusCode::OK, "{empty}");
+            assert!(empty["matches"].as_array().unwrap().is_empty());
         }
-        last_next = page["next_cursor"].as_str().map(str::to_owned);
-        assert_eq!(page["truncated"], json!(last_next.is_some()));
-        if last_next.is_none() {
-            break;
-        }
-        cursor = last_next.clone();
-    }
-    eprintln!(
-        "251-entry search traversal: {:?}, {} candidates",
-        started.elapsed(),
-        candidate_keys.len()
-    );
-    assert!(last_next.is_none(), "必须遍历到末页");
-    assert_eq!(visited, expected, "旧200词条窗口之外也必须可达");
-    assert_eq!(
-        candidate_keys.len(),
-        2008,
-        "保持 251 个词条的完整英美候选形状"
-    );
-    assert_eq!(candidate_keys.len() as u64, total.unwrap());
-    let input =
-        json!({"schema_version":3,"q":"pagination harbour","page_size":1,"entry_id":last_id});
-    let (status, targeted) = search_component_targets(&state, &bearer, input.clone()).await;
-    assert_eq!(status, StatusCode::OK, "{targeted}");
-    assert_eq!(targeted["matches"][0]["entry_id"], last_id);
-    let next = targeted["next_cursor"].as_str().expect("英美候选应能跨页");
-    let mut changed = input.clone();
-    changed["cursor"] = json!(next);
-    changed["entry_id"] = json!(Uuid::now_v7());
-    let (status, rejected) = search_component_targets(&state, &bearer, changed).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
-    assert_eq!(rejected["field"], "cursor");
-    for input in [
-        json!({"schema_version":3,"q":"not a matching surface","entry_id":last_id}),
-        json!({"schema_version":3,"q":"pagination harbour","entry_id":Uuid::now_v7()}),
-    ] {
-        let (status, empty) = search_component_targets(&state, &bearer, input).await;
+        sqlx::query("UPDATE lexicon.entries SET archived_at = now() WHERE id = $1")
+            .bind(Uuid::parse_str(&last_id).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut archived = input;
+        archived["cursor"] = json!(next);
+        let (status, empty) = search_component_targets(&state, &bearer, archived).await;
         assert_eq!(status, StatusCode::OK, "{empty}");
         assert!(empty["matches"].as_array().unwrap().is_empty());
-    }
-    sqlx::query("UPDATE lexicon.entries SET archived_at = now() WHERE id = $1")
-        .bind(Uuid::parse_str(&last_id).unwrap())
-        .execute(&pool)
-        .await
-        .unwrap();
-    let mut archived = input;
-    archived["cursor"] = json!(next);
-    let (status, empty) = search_component_targets(&state, &bearer, archived).await;
-    assert_eq!(status, StatusCode::OK, "{empty}");
-    assert!(empty["matches"].as_array().unwrap().is_empty());
-    assert_eq!(empty["truncated"], false);
-    assert!(empty.get("next_cursor").is_none());
-    record_test_phase("component-pagination", "search-assertions", started);
+        assert_eq!(empty["truncated"], false);
+        assert!(empty.get("next_cursor").is_none());
+        record_test_phase("component-pagination", "search-assertions", started);
+    })
+    .await;
+    assert_eq!(router_stats.router_builds, 1);
+    assert_eq!(
+        router_stats.request_ids.len(),
+        router_stats.requests.values().sum::<usize>()
+    );
+    eprintln!(
+        "{}",
+        json!({"ci_test": "component-pagination", "phase": "router-scope", "router_builds": router_stats.router_builds, "router_build_us": router_stats.router_build_us, "http_us_cumulative": router_stats.http_us, "requests": router_stats.requests, "unique_request_ids": router_stats.request_ids.len()})
+    );
 }
 
 #[sqlx::test]

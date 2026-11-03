@@ -193,6 +193,8 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
         json!({
             "test": concat!(module_path!(), "::", "batch5_list_references_and_maximum_batch_measurement"),
             "router_builds": router_stats.router_builds,
+            "router_build_us": router_stats.router_build_us,
+            "http_us_cumulative": router_stats.http_us,
             "requests": router_stats.requests,
             "unique_request_ids": router_stats.request_ids.len(),
         })
