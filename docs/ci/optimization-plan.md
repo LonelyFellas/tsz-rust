@@ -240,6 +240,17 @@ main `0f7d4fa` 的运行 `41574741920` attempt 1：`lexicon-other` 编译 217.84
 将 `lexicon-other` 与 handler 一样限定为 35 分钟，保留其余分片 20 分钟上限与全部测试/审计；
 预算变化仅避免完整回归在末尾被截断，不作为性能改善证据。
 
+### P0 后续：全运行汇总
+
+新增 `ops/ci_run_summary.py`，读取精确 attempt 的 jobs/steps，在所有原 CI 门及 release smoke
+结束后生成独立诊断摘要。成功、失败、取消均计入；重跑仅统计当前 attempt，不把上一次复用的
+job 混入，区分 PR source head 与实际 workflow SHA。展示准备/其他、编译/lint、测试、缓存、
+上传与收尾分类，并汇总最大 job、最后结束的 job、测得反馈时间及未加权 runner minutes。
+API 时间戳不能证明真实排队或完整 DAG 因果关键路径，因此仅报告 created-to-start 区间，
+缺值保持 unknown；这不包含汇总 job 自身，也不当作账单分钟。诊断 job 没有更改原门禁，
+收集失败不替代任何业务检查结果。历史 PR 41573045659 复算为1023秒、96.367 runner minutes。
+已用并行、失败、跳过、未知时间与重复/跨attempt身份场景定向验证；真实新CI产物待PR验证。
+
 ## 6. 交付边界与下一步
 
 已完成：公开源码/运行对标、本地主线代码与历史设计核对、main 分支保护只读核对、本文方案及上述局部实施。
