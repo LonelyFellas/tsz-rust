@@ -153,6 +153,34 @@ mod tests {
         assert!(rows.iter().any(|row| row["direction"] == "down"));
     }
 
+    #[sqlx::test]
+    async fn default_template_undo_refusal_preserves_catalog_schema_and_entire_ledger(
+        pool: PgPool,
+    ) {
+        sqlx::query("UPDATE catalog.form_types SET is_default=false WHERE code='plural'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let snapshot = "SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(jsonb_build_object('version',version,'checksum',encode(checksum,'hex'),'success',success) ORDER BY version) FROM _sqlx_migrations),'types',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM catalog.form_types t),'metadata',(SELECT to_jsonb(m) FROM catalog.metadata m WHERE id),'stable_index',pg_get_indexdef('lexicon.lexicon_nodes_stable_slot_key'::regclass),'region_index',to_regclass('lexicon.lexicon_v3_form_content_slots_region_key'))";
+        let before: serde_json::Value =
+            sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
+        let current: i64 =
+            sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let error = undo(&pool, 20261102010000, current).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("default form templates require manual recovery"),
+            "{error:#}"
+        );
+        let after: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            before, after,
+            "a refused deployment undo must preserve data, indexes and every migration row"
+        );
+    }
+
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
     const HISTORICAL_RELEASE_VERSION: i64 = 20261027100000;
 
