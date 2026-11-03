@@ -72,7 +72,7 @@ of serial execution in `lexicon-other`. Those targets now run in the separate `l
 
 ## Identity lifecycle measurements
 
-Only the identity CI job uses a disposable profiling workspace. The SQLx 0.9.0
+The identity CI job uses a disposable profiling workspace. The SQLx 0.9.0
 crate archives are verified against the original Cargo.lock SHA-256 checksums,
 then extracted into private copies. Anchors in their test-only lifecycle code
 must match exactly. Instrumentation adds clocks/logging around the original
@@ -162,7 +162,7 @@ Reports contain only names/counts/times/hashes, not SQL or fixture data.
 
 ## Maximum-batch Router reuse pilot
 
-Only the original maximum-batch case enters an explicit task-local Router
+The original maximum-batch pilot enters an explicit task-local Router
 scope. It creates the complete application Router once, including Swagger under
 all-features, then clones it for every real HTTP request. The immutable state
 borrow lasts for the scope; a different AppState builds its own Router. Nested
@@ -180,3 +180,22 @@ fallback/nested scope isolation, Swagger presence and live account revocation.
 All original integration results must remain; the two new isolation cases are
 additional coverage, with no new ignored cases. Compare maximum-batch fixture
 walls and whole shard time with successful main run 38247710389.
+
+## Current follow-up boundaries
+
+The pagination case and fourteen measured slow handler cases also use the same
+explicit, per-test, per-AppState Router scope. They retain their original HTTP
+requests and assertions. Different-state and nested-scope behavior, Swagger,
+authorization revocation, one construction and unique request IDs remain checked.
+The three pagination companion targets run as separate complete test binaries;
+they do not share a Router with the pagination case.
+
+Pure documentation PRs under the explicit `docs/ci` / `docs/features` Markdown
+allowlist retain all required matrix check names but mark runtime steps as not
+applicable. Their service images are empty, so they start no test containers.
+The aggregate still requires successful change classification and quality/audit
+results. Main, manual runs, unknown changes and any mixed runtime/configuration
+change retain the full seven-shard inventory and exactly-once execution audit.
+
+See [the optimization plan and verification record](optimization-plan.md) for
+measured results, the unit/doc dependency-cache pilot and the nextest evaluation.
