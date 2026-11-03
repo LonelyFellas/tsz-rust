@@ -17605,9 +17605,22 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
         .await
         .unwrap_err();
     assert!(
-        format!("{down_error:#}").contains("publication audio review receipts must be retained"),
+        format!("{down_error:#}").contains("default form templates require manual recovery"),
         "{down_error:#}"
     );
+    let mut audio_tx = pool.begin().await.unwrap();
+    let audio_guard = sqlx::raw_sql(include_str!(
+        "../migrations/20261029010000_publication_audio_reviews.down.sql"
+    ))
+    .execute(&mut *audio_tx)
+    .await
+    .unwrap_err();
+    assert!(
+        audio_guard
+            .to_string()
+            .contains("publication audio review receipts must be retained")
+    );
+    audio_tx.rollback().await.unwrap();
     let mut tx = pool.begin().await.unwrap();
     let rollback_guard = sqlx::raw_sql(include_str!(
         "../migrations/20260922151000_lexicon_rollback_publications.down.sql"
