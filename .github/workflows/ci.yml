@@ -143,7 +143,7 @@ jobs:
         run: python3 -m unittest ops/test_ci_fingerprint.py
 
       - name: Test CI metrics
-        run: python3 -m unittest ops/test_ci_metrics.py
+        run: python3 -m unittest ops/test_ci_metrics.py ops/test_ci_run_summary.py
 
       - name: Test Cargo fetch fallback
         run: python3 -m unittest ops/test_ci_cargo_fetch.py
@@ -668,6 +668,34 @@ jobs:
             target/release/tsz-rust
             target/release/tsz-rust.sha256
             target/release/tsz-rust.manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  ci-timing-summary:
+    name: CI timing summary
+    if: ${{ always() && github.event_name != 'schedule' }}
+    needs: [ci-summary, release-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    # Diagnostics have no authority to pass/fail the existing quality gates.
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Summarize this exact attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 ops/ci_run_summary.py --workflow-sha "$GITHUB_SHA" --output target/ci-run-summary.json
+      - name: Upload attempt timings
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-timings-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: target/ci-run-summary.json
           if-no-files-found: error
           retention-days: 30
 
