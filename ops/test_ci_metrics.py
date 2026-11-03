@@ -1,11 +1,14 @@
+import json
+import os
 import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from ci_metrics import record_metric, run_timed  # noqa: E402
+from ci_metrics import record_context, record_metric, run_timed  # noqa: E402
 
 
 class CiMetricsTests(unittest.TestCase):
@@ -29,6 +32,17 @@ class CiMetricsTests(unittest.TestCase):
             self.assertIn("success", rendered)
             self.assertIn("failure", rendered)
             self.assertIn("elapsed_ms", rendered)
+
+    def test_metrics_file_retains_failed_exit_and_only_allowlisted_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "metrics.jsonl"
+            with mock.patch.dict(os.environ, {"CI_METRICS_PATH": str(path), "SECRET_TEST_VALUE": "private-value"}):
+                record_context()
+                self.assertEqual(run_timed("failure", [sys.executable, "-c", "raise SystemExit(7)"]), 7)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(rows[0]["name"], "context")
+            self.assertEqual(rows[1]["exit_code"], 7)
+            self.assertNotIn("private-value", path.read_text())
 
     def test_record_metric_appends_a_machine_and_human_readable_value(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

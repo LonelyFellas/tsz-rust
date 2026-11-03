@@ -1,15 +1,15 @@
 # Integration test sharding
 
-The first optimization changes scheduling only. Rust sources, test assertions,
-fixture sizes, migrations, compiler profile, services and caching policy stay
-unchanged. The existing required `Integration (lexicon)` check becomes a
+The initial optimization changed scheduling only. Subsequent test-only Router
+reuse pilots preserve test assertions, fixture sizes, migrations, compiler profile,
+services and caching policy. The existing required `Integration (lexicon)` check becomes a
 fail-closed aggregate, so branch protection does not need to change.
 
 ## Partition
 
 - `lexicon-pagination`: the existing 251-entry/2008-candidate pagination case,
-  selected by its complete libtest name with `--exact`, plus all `learning_*`
-  targets. Learning targets run without the pagination filter.
+  selected by its complete libtest name with `--exact`.
+- `lexicon-learning`: all `learning_*` targets without the pagination filter.
 - `lexicon-handler`: every other case in the same `lexicon_handler` executable.
   The skip filter is rejected if it could accidentally match another case.
 - `lexicon-other`: every other target in the original lexicon module, excluding
@@ -21,7 +21,7 @@ belong to exactly one logical module. New cases in lexicon_handler automatically
 join the handler shard; removing or renaming the pagination case fails closed.
 Each matrix job has its own PostgreSQL and Redis containers. No test result,
 database, publication, token or credential is cached or shared between jobs.
-There are two additional jobs, so reduced elapsed time may cost more aggregate
+There are three additional jobs compared with the original four modules, so reduced elapsed time may cost more aggregate
 runner minutes; compiler and cache changes are outside this optimization.
 
 ## Execution audit
@@ -33,7 +33,7 @@ runs the same binaries, and checks actual result names against the selected
 inventory. Expected ignored cases are retained; unexpectedly ignored cases,
 failures, duplicates and omissions cannot produce a passing report.
 
-Six reports are uploaded from the current run. The aggregate checks every
+Seven reports are uploaded from the current run. The aggregate checks every
 report's workflow SHA, complete target membership, matching shared-binary
 inventories, and actual execution counts. Every discovered integration case
 must occur exactly once across the reports. Missing jobs/reports fail the gate.
@@ -64,15 +64,10 @@ report runner-minute cost; one hosted-runner comparison is evidence, not an SLA.
 Results and candidate SHA are recorded in the PR after CI completes, avoiding a
 new measurement run caused only by committing the report.
 
-The current partition also balances the existing six jobs without adding a
-runner: in successful main run [39575328075](https://github.com/LonelyFellas/tsz-rust/actions/runs/39575328075),
+An earlier six-job partition was evaluated without adding a runner: in successful main run [39575328075](https://github.com/LonelyFellas/tsz-rust/actions/runs/39575328075),
 `lexicon-pagination` executed in 234 s, `lexicon-handler` in 472 s and
 `lexicon-other` in 443 s. The five `learning_*` targets accounted for about 170 s
-of serial execution in `lexicon-other`. Moving those complete targets to the
-pagination job preserves every case and each job's isolated services. This is
-an execution-time estimate, not a measured improvement: the moved targets add
-compilation work to pagination, and the actual longest job must be compared in
-CI after publication.
+of serial execution in `lexicon-other`. Those targets now run in the separate `lexicon-learning` job; the historical estimate is not a measurement of the current partition.
 
 ## Identity lifecycle measurements
 
@@ -146,7 +141,7 @@ The lexicon-handler shard reuses the same verified SQLx 0.9.0 private-copy
 lifecycle timers, without the identity template/helper or cloning route. Every
 enabled case must retain fresh database creation, automatic migration, body,
 connection lifecycle and cleanup timing. The pagination shard retains its
-original path; all existing execution/ignored-case audits remain in place.
+original business path and uses an explicit test-local Router scope; all existing execution/ignored-case audits remain in place.
 
 Only the disposable copy of the existing 50-entry cyclic maximum-batch test
 receives request timers: 50 forms impact/save pairs, 50 initial meanings saves,
@@ -174,11 +169,11 @@ scopes restore their parent and the Router is dropped before SQLx cleanup.
 No Router or authorization result is cached across tests. Every request still
 creates fresh middleware extensions and a unique request ID.
 
-The original 243 HTTP calls are audited by kind: 1 detection, 1 creation,
-50 forms-impact, 50 forms-save, 100 meanings-save, 1 batch publication,
+The original 343 HTTP calls are audited by kind: 1 detection, 1 creation,
+50 forms-impact, 50 forms-save, 100 meanings-save, 50 audio checks, 50 audio confirmations, 1 batch publication,
 20 list reads and 20 reference reads. All original data/assertions and the
 four-concurrent content fixture remain in place. CI requires one construction,
-this exact request inventory, 243 unique request IDs and the existing 190
+this exact request inventory, 343 unique request IDs and the existing 190
 request timing samples. Separate integration cases verify different-state
 fallback/nested scope isolation, Swagger presence and live account revocation.
 All original integration results must remain; the two new isolation cases are

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 from ci_test_modules import ClassificationError, cargo_command, classify_targets, discover_targets
 
@@ -112,41 +113,56 @@ def run(shard, grouped, directory, report):
         raise ClassificationError("stale executable inventory")
     inventory, executed, timings, template_uses = {}, [], [], []
     batch_timings, batch_fixture_phases = [], []
-    router_pilots = []
-    for target, executable in sorted(executables.items()):
-        names = list_cases(executable)
-        ignored = list_cases(executable, ignored=True)
-        if not set(ignored) <= set(names):
-            raise ClassificationError("ignored cases not in complete inventory")
-        inventory[target] = {"names": names, "ignored": ignored}
-        selected = selected_cases(shard, target, names)
-        results = []
-        print(f"Running {target}: shard={shard}, selected={len(selected)}, discovered={len(names)}", flush=True)
-        with subprocess.Popen([executable, *filters_for(shard, target), "--show-output"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
-            for line in process.stdout:
-                print(line, end="", flush=True)
-                cleaned = ANSI.sub("", line).strip()
-                if cleaned.startswith("SQLX_CI_PHASE "):
-                    timings.append(json.loads(cleaned.removeprefix("SQLX_CI_PHASE ")))
-                if cleaned.startswith("SQLX_CI_TEMPLATE_USE "):
-                    template_uses.append(json.loads(cleaned.removeprefix("SQLX_CI_TEMPLATE_USE ")))
-                if cleaned.startswith("SQLX_CI_BATCH_PHASE "):
-                    batch_timings.append(json.loads(cleaned.removeprefix("SQLX_CI_BATCH_PHASE ")))
-                if cleaned.startswith("SQLX_CI_ROUTER_PILOT "):
-                    router_pilots.append(json.loads(cleaned.removeprefix("SQLX_CI_ROUTER_PILOT ")))
-                if cleaned.startswith('{"ci_test":'):
-                    row = json.loads(cleaned)
-                    if row["ci_test"] == "maximum-batch":
-                        batch_fixture_phases.append(row)
-                match = RESULT.fullmatch(cleaned)
-                if match:
-                    results.append({"target": target, "name": match[1], "status": match[2]})
-            if process.wait() != 0:
-                raise ClassificationError(f"test binary failed: {target}")
-        validate_results(target, selected, [name for name in ignored if name in selected], results)
-        executed.extend(results)
+    router_pilots, pagination_phases, target_timings = [], [], []
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps({"sha": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "shard": shard, "inventory": inventory, "executed": executed, **({"timings": timings} if timings else {}), **({"template_uses": template_uses} if template_uses else {}), **({"batch_timings": batch_timings} if batch_timings else {}), **({"batch_fixture_phases": batch_fixture_phases} if batch_fixture_phases else {}), **({"router_pilots": router_pilots} if router_pilots else {})}, indent=2) + "\n")
+    report.unlink(missing_ok=True)
+    diagnostic = report.with_name(f"{shard}-diagnostic.json")
+    diagnostic.unlink(missing_ok=True)
+    current_results = []
+    try:
+        for target, executable in sorted(executables.items()):
+            names = list_cases(executable)
+            ignored = list_cases(executable, ignored=True)
+            if not set(ignored) <= set(names):
+                raise ClassificationError("ignored cases not in complete inventory")
+            inventory[target] = {"names": names, "ignored": ignored}
+            selected = selected_cases(shard, target, names)
+            results = []
+            current_results = results
+            print(f"Running {target}: shard={shard}, selected={len(selected)}, discovered={len(names)}", flush=True)
+            started = time.monotonic_ns()
+            with subprocess.Popen([executable, *filters_for(shard, target), "--show-output"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
+                for line in process.stdout:
+                    print(line, end="", flush=True)
+                    cleaned = ANSI.sub("", line).strip()
+                    if cleaned.startswith("SQLX_CI_PHASE "):
+                        timings.append(json.loads(cleaned.removeprefix("SQLX_CI_PHASE ")))
+                    if cleaned.startswith("SQLX_CI_TEMPLATE_USE "):
+                        template_uses.append(json.loads(cleaned.removeprefix("SQLX_CI_TEMPLATE_USE ")))
+                    if cleaned.startswith("SQLX_CI_BATCH_PHASE "):
+                        batch_timings.append(json.loads(cleaned.removeprefix("SQLX_CI_BATCH_PHASE ")))
+                    if cleaned.startswith("SQLX_CI_ROUTER_PILOT "):
+                        router_pilots.append(json.loads(cleaned.removeprefix("SQLX_CI_ROUTER_PILOT ")))
+                    if cleaned.startswith('{"ci_test":'):
+                        row = json.loads(cleaned)
+                        if row["ci_test"] == "maximum-batch":
+                            batch_fixture_phases.append(row)
+                        elif row["ci_test"] == "component-pagination":
+                            pagination_phases.append(row)
+                    match = RESULT.fullmatch(cleaned)
+                    if match:
+                        results.append({"target": target, "name": match[1], "status": match[2]})
+                exit_code = process.wait()
+                target_timings.append({"target": target, "elapsed_ms": (time.monotonic_ns() - started) // 1_000_000, "exit_code": exit_code})
+                if exit_code != 0:
+                    raise ClassificationError(f"test binary failed: {target}")
+            validate_results(target, selected, [name for name in ignored if name in selected], results)
+            executed.extend(results)
+            current_results = []
+    finally:
+        diagnostic.write_text(json.dumps({"complete": False, "shard": shard, "sha": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "inventory": inventory, "executed": executed + current_results, "timings": timings, "batch_fixture_phases": batch_fixture_phases, "pagination_phases": pagination_phases, "target_timings": target_timings}, indent=2) + "\n")
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps({"sha": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "shard": shard, "inventory": inventory, "executed": executed, **({"timings": timings} if timings else {}), **({"template_uses": template_uses} if template_uses else {}), **({"batch_timings": batch_timings} if batch_timings else {}), **({"batch_fixture_phases": batch_fixture_phases} if batch_fixture_phases else {}), **({"router_pilots": router_pilots} if router_pilots else {}), **({"pagination_phases": pagination_phases} if pagination_phases else {}), "target_timings": target_timings}, indent=2) + "\n")
 
 
 def verify_manifests(manifests, grouped, sha):

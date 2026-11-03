@@ -87,6 +87,34 @@ class IntegrationShardsTests(unittest.TestCase):
             with self.assertRaises(ClassificationError):
                 list_cases("/binary")
 
+    def test_failed_binary_preserves_incomplete_diagnostic_and_no_success_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "harness"
+            binary.write_text(f'''#!{sys.executable}
+import json, sys
+if '--list' in sys.argv:
+    names = [] if '--ignored' in sys.argv else [{PAGINATION!r}]
+    for name in names: print(name + ': test')
+    print(str(len(names)) + ' tests, 0 benchmarks')
+else:
+    print(json.dumps({{"ci_test": "component-pagination", "phase": "content-fixture", "elapsed_ms": 42}}, separators=(',', ':')))
+    print('test ' + {PAGINATION!r} + ' ... FAILED')
+    sys.exit(1)
+''')
+            binary.chmod(0o755)
+            (root / "lexicon-pagination-executables.json").write_text(json.dumps({"lexicon_handler": str(binary)}))
+            report = root / "lexicon-pagination-report.json"
+            report.write_text("stale")
+            with mock.patch.dict("os.environ", {"GITHUB_SHA": "exact-sha"}):
+                with self.assertRaises(ClassificationError):
+                    run("lexicon-pagination", self.grouped, root, report)
+            self.assertFalse(report.exists())
+            diagnostic = json.loads((root / "lexicon-pagination-diagnostic.json").read_text())
+            self.assertFalse(diagnostic["complete"])
+            self.assertEqual(diagnostic["executed"][0]["status"], "FAILED")
+            self.assertEqual(diagnostic["pagination_phases"][0]["elapsed_ms"], 42)
+
     def test_actual_binary_results_match_both_filters_and_preserve_ignored_cases(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
