@@ -38,6 +38,14 @@ class SummaryTests(unittest.TestCase):
         self.assertFalse(report["all_measured_jobs_completed"])
         self.assertNotIn("do-not-record", str(report))
 
+    def test_github_relabels_reused_jobs_with_current_attempt(self):
+        reused = dict(self.job, id=2, started_at="2026-11-02T23:00:00Z", completed_at="2026-11-02T23:20:00Z")
+        report = summarize(self.run, [self.job, reused])
+        self.assertEqual(len(report["reused_jobs"]), 1)
+        self.assertEqual(len(report["jobs"]), 1)
+        self.assertEqual(report["completed_runner_minutes"], 2)
+        self.assertEqual(report["measured_latency_seconds"], 130)
+
     def test_reused_attempt_and_duplicate_job_are_rejected(self):
         for change in ({"run_attempt": 1}, {"run_id": 11}):
             with self.assertRaises(ValueError):

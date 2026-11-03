@@ -34,7 +34,7 @@ def phase(name):
 
 
 def summarize(run, jobs):
-    rows = []
+    rows, reused = [], []
     seen = set()
     for job in jobs:
         if job["id"] in seen:
@@ -45,6 +45,12 @@ def summarize(run, jobs):
         if job["name"] == SUMMARY_JOB:
             continue
         skipped = job["conclusion"] == "skipped"
+        # GitHub reissues successful previous-attempt jobs with the NEW attempt
+        # number but preserves their execution timestamps. Do not double count.
+        if not skipped and job["started_at"] and seconds(run["run_started_at"], job["started_at"]) is None:
+            reused.append({"id": job["id"], "name": job["name"], "conclusion": job["conclusion"],
+                           "started_at": job["started_at"], "completed_at": job["completed_at"]})
+            continue
         wall = 0 if skipped else seconds(job["started_at"], job["completed_at"])
         phases = {}
         for step in job.get("steps", []):
@@ -65,7 +71,7 @@ def summarize(run, jobs):
     last = max(finished, key=lambda r: r["completed_at"]) if finished else None
     longest = max(finished, key=lambda r: r["wall_seconds"]) if finished else None
     return {"schema_version": 1, "run_id": run["id"], "attempt": run["run_attempt"],
-            "head_sha": run["head_sha"], "event": run["event"], "jobs": rows,
+            "head_sha": run["head_sha"], "event": run["event"], "jobs": rows, "reused_jobs": reused,
             "all_measured_jobs_completed": all(r["status"] == "completed" for r in rows),
             "measured_latency_seconds": seconds(run["run_started_at"], last["completed_at"]) if last else None,
             "last_completed_job": last["name"] if last else None,
@@ -76,6 +82,7 @@ def summarize(run, jobs):
 
 def markdown(report):
     lines = ["## CI attempt timings", "", report["scope"], "",
+             f"Reused previous-attempt jobs (excluded from this attempt cost): {len(report['reused_jobs'])}.",
              f"Run {report['run_id']} / attempt {report['attempt']} / source head {report['head_sha']}",
              f"Evaluated workflow SHA: {report.get('workflow_sha') or 'unknown (historical API does not identify the PR merge checkout)'}",
              f"Measured latency: {report['measured_latency_seconds']} s; completed runner time: {report['completed_runner_minutes']} min.",
