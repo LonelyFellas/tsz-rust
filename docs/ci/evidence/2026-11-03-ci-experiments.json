@@ -1,0 +1,143 @@
+{
+  "date": "2026-11-03",
+  "kind": "local-experiment-not-CI-SLA",
+  "nextest_version": "0.9.151",
+  "threads": 4,
+  "retries": 0,
+  "targets": 18,
+  "cases": 268,
+  "passed": 266,
+  "ignored": 2,
+  "libtest_execution_seconds": 338.85,
+  "nextest_execution_seconds": 268.68,
+  "same_executable_paths": true,
+  "case_results_sha256": "ce7ffe018f02399dab8529ec7bb9925704f55b1c441929b374957e0c99519c13",
+  "libtest_target_timings": [
+    {
+      "target": "dictionary_schema",
+      "elapsed_ms": 1521,
+      "exit_code": 0
+    },
+    {
+      "target": "lexicon_audio_asset_references",
+      "elapsed_ms": 47711,
+      "exit_code": 0
+    },
+    {
+      "target": "lexicon_audio_assets_handler",
+      "elapsed_ms": 15213,
+      "exit_code": 0
+    },
+    {
+      "target": "lexicon_audio_assets_schema",
+      "elapsed_ms": 2733,
+      "exit_code": 0
+    },
+    {
+      "target": "lexicon_schema",
+      "elapsed_ms": 2956,
+      "exit_code": 0
+    },
+    {
+      "target": "lexicon_surface_projection",
+      "elapsed_ms": 3699,
+      "exit_code": 0
+    },
+    {
+      "target": "lexicon_surface_snapshot",
+      "elapsed_ms": 19,
+      "exit_code": 0
+    },
+    {
+      "target": "lexicon_v3_lifecycle",
+      "elapsed_ms": 11736,
+      "exit_code": 0
+    },
+    {
+      "target": "lexicon_v3_relation_consumers",
+      "elapsed_ms": 2,
+      "exit_code": 0
+    },
+    {
+      "target": "lexicon_v3_storage_schema",
+      "elapsed_ms": 9805,
+      "exit_code": 0
+    },
+    {
+      "target": "question_bank_handler",
+      "elapsed_ms": 64190,
+      "exit_code": 0
+    },
+    {
+      "target": "sentence_association_segments_schema",
+      "elapsed_ms": 2566,
+      "exit_code": 0
+    },
+    {
+      "target": "sentence_target_discovery_contract",
+      "elapsed_ms": 391,
+      "exit_code": 0
+    },
+    {
+      "target": "shared_sentences",
+      "elapsed_ms": 52409,
+      "exit_code": 0
+    },
+    {
+      "target": "wordlists_handler",
+      "elapsed_ms": 76178,
+      "exit_code": 0
+    },
+    {
+      "target": "wordlists_review",
+      "elapsed_ms": 27480,
+      "exit_code": 0
+    },
+    {
+      "target": "wordlists_schema",
+      "elapsed_ms": 3017,
+      "exit_code": 0
+    },
+    {
+      "target": "wordlists_tips",
+      "elapsed_ms": 17224,
+      "exit_code": 0
+    }
+  ],
+  "ci_baseline_run": 41581738758,
+  "limitations": [
+    "one local sample per runner, no hosted nextest timing",
+    "scope is lexicon-other, not full CI",
+    "no retries; original ignored set preserved"
+  ],
+  "balanced_pagination": {
+    "targets": 4,
+    "cases": 143,
+    "target_timings": [
+      {
+        "target": "lexicon_handler",
+        "elapsed_ms": 41731,
+        "exit_code": 0
+      },
+      {
+        "target": "question_bank_handler",
+        "elapsed_ms": 68509,
+        "exit_code": 0
+      },
+      {
+        "target": "shared_sentences",
+        "elapsed_ms": 45170,
+        "exit_code": 0
+      },
+      {
+        "target": "wordlists_handler",
+        "elapsed_ms": 71535,
+        "exit_code": 0
+      }
+    ],
+    "command_seconds": 228.612,
+    "isolated_services_cleaned": true,
+    "passed": 141,
+    "ignored": 2
+  }
+}

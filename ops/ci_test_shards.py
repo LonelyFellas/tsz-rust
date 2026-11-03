@@ -14,6 +14,7 @@ from ci_test_modules import ClassificationError, cargo_command, classify_targets
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGINATION = "component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_late_entry"
+PAGINATION_COMPANIONS = {"wordlists_handler", "question_bank_handler", "shared_sentences"}
 SHARD_MODULES = {
     "lexicon-pagination": "lexicon",
     "lexicon-learning": "lexicon",
@@ -32,13 +33,13 @@ def targets_for(shard, grouped):
         raise ClassificationError(f"unknown shard: {shard}")
     targets = grouped[SHARD_MODULES[shard]]
     if shard == "lexicon-pagination":
-        return ("lexicon_handler",)
+        return ("lexicon_handler",) + tuple(target for target in targets if target in PAGINATION_COMPANIONS)
     if shard == "lexicon-learning":
         return tuple(target for target in targets if target.startswith("learning_"))
     if shard == "lexicon-handler":
         return ("lexicon_handler",)
     if shard == "lexicon-other":
-        return tuple(target for target in targets if target != "lexicon_handler" and not target.startswith("learning_"))
+        return tuple(target for target in targets if target != "lexicon_handler" and not target.startswith("learning_") and target not in PAGINATION_COMPANIONS)
     return targets
 
 

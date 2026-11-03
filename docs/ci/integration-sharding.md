@@ -8,12 +8,13 @@ fail-closed aggregate, so branch protection does not need to change.
 ## Partition
 
 - `lexicon-pagination`: the existing 251-entry/2008-candidate pagination case,
-  selected by its complete libtest name with `--exact`.
+  selected by its complete libtest name with `--exact`, plus the complete `wordlists_handler`,
+  `question_bank_handler` and `shared_sentences` targets without that filter.
 - `lexicon-learning`: all `learning_*` targets without the pagination filter.
 - `lexicon-handler`: every other case in the same `lexicon_handler` executable.
   The skip filter is rejected if it could accidentally match another case.
 - `lexicon-other`: every other target in the original lexicon module, excluding
-  `lexicon_handler` and `learning_*`.
+  `lexicon_handler`, `learning_*` and the three pagination companion targets.
 - `admin`, `identity`, `platform`: their original complete target sets.
 
 The old module classifier still requires every repository integration target to
