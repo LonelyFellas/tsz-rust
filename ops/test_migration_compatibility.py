@@ -96,6 +96,34 @@ class ColumnRuntime(MigrationRuntime):
         return result
 
 
+class CatalogRuntime(ColumnRuntime):
+    def __init__(self, *, version=20261102020000, lose_data=False):
+        super().__init__(lose_data=lose_data)
+        self.info = copy.deepcopy(INFO)
+        for direction in ("up", "down"):
+            self.info["migrations"].append({"version": version, "direction": direction, "checksum": "d" * 96, "transactional": True})
+        self.recovered = False
+        self.catalog_before = {"rows": [{"id": True, "version": 8, "updated_at": "2026-11-03T02:00:00+00:00"}], "clock": "2026-11-03T02:00:10+00:00"}
+        self.catalog_after = {"rows": [{"id": True, "version": 9, "updated_at": "2026-11-03T02:00:15+00:00"}], "clock": "2026-11-03T02:00:20+00:00"}
+
+    def binary(self, artifact, *arguments):
+        result = super().binary(artifact, *arguments)
+        if arguments[0] == "deploy-undo-migrations":
+            self.recovered = True
+        return result
+
+    def sql(self, statement):
+        if "FROM catalog.metadata" in statement:
+            return json.dumps(self.catalog_after if self.recovered else self.catalog_before)
+        return super().sql(statement)
+
+    def snapshot(self, *, projection=None):
+        result = super().snapshot(projection=projection)
+        rows = (self.catalog_after if self.recovered else self.catalog_before)["rows"]
+        result["catalog.metadata"] = {"rows": len(rows), "digest": json.dumps(rows, sort_keys=True)}
+        return result
+
+
 def args_fixture(root):
     args = fixture(root)
     args.baseline_manifest = args.manifest
@@ -203,6 +231,53 @@ class MigrationCompatibilityTests(unittest.TestCase):
             runtime = ColumnRuntime(new_rows=1)
             with self.assertRaisesRegex(VerificationError, "recovery_dropped_synthetic_data"):
                 rehearse(args, runtime_factory=lambda: runtime)
+            self.assertTrue(runtime.closed)
+
+    def test_catalog_default_template_down_advances_metadata_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = CatalogRuntime()
+            result = rehearse(args_fixture(Path(directory)), runtime_factory=lambda: runtime)
+            self.assertEqual(result["checks"]["catalog_metadata_recovery"], "passed")
+            self.assertEqual(result["checks"]["old_binary_after_recovery"], "passed")
+            self.assertTrue(runtime.closed)
+
+    def test_catalog_recovery_rejects_unexpected_metadata_changes(self):
+        changes = [
+            {"id": False}, {"version": 8}, {"version": 10},
+            {"updated_at": "2026-11-03T02:00:09+00:00"},
+            {"updated_at": "2026-11-03T02:00:21+00:00"},
+            {"updated_at": "2026-11-03T02:00:15"},
+            {"updated_at": "invalid"}, {"unexpected": "changed"},
+        ]
+        for change in changes:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                runtime = CatalogRuntime()
+                runtime.catalog_after["rows"][0].update(change)
+                with self.assertRaises(VerificationError):
+                    rehearse(args_fixture(Path(directory)), runtime_factory=lambda: runtime)
+                self.assertTrue(runtime.closed)
+
+    def test_catalog_recovery_rejects_row_loss_and_duplicates(self):
+        for count in (0, 2):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
+                runtime = CatalogRuntime()
+                runtime.catalog_after["rows"] *= count
+                with self.assertRaises(VerificationError):
+                    rehearse(args_fixture(Path(directory)), runtime_factory=lambda: runtime)
+                self.assertTrue(runtime.closed)
+
+    def test_catalog_recovery_does_not_hide_other_business_data_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = CatalogRuntime(lose_data=True)
+            with self.assertRaisesRegex(VerificationError, "recovery_changed_synthetic_data"):
+                rehearse(args_fixture(Path(directory)), runtime_factory=lambda: runtime)
+            self.assertTrue(runtime.closed)
+
+    def test_unrelated_migration_cannot_change_catalog_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = CatalogRuntime(version=4)
+            with self.assertRaisesRegex(VerificationError, "recovery_changed_synthetic_data"):
+                rehearse(args_fixture(Path(directory)), runtime_factory=lambda: runtime)
             self.assertTrue(runtime.closed)
 
     def test_guard_refusal_has_no_partial_changes_and_never_authorizes_rollback(self):
