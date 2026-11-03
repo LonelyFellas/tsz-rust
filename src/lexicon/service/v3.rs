@@ -1596,6 +1596,29 @@ impl LexiconService {
             &confirmed_headwords,
         )?;
         let initial_headword_keys = initial_v3_headword_keys(&confirmed_headwords)?;
+        let equivalent_detection_headwords = match (&confirmed_headwords, &suggested_headwords) {
+            (
+                WordHeadwordsV2::Unified { common },
+                WordHeadwordsV2::Unified { common: suggested },
+            ) => common.to_lowercase() == suggested.to_lowercase(),
+            (
+                WordHeadwordsV2::Distinguish {
+                    uk,
+                    us,
+                    source_dialect,
+                },
+                WordHeadwordsV2::Distinguish {
+                    uk: suggested_uk,
+                    us: suggested_us,
+                    source_dialect: suggested_source_dialect,
+                },
+            ) => {
+                source_dialect == suggested_source_dialect
+                    && uk.to_lowercase() == suggested_uk.to_lowercase()
+                    && us.to_lowercase() == suggested_us.to_lowercase()
+            }
+            _ => false,
+        };
         let verified_surface = if write_projection {
             if explicit_headwords {
                 self.verify_v3_final_surface_for_create(
@@ -1605,8 +1628,7 @@ impl LexiconService {
                     entry_id,
                     &forms,
                     &confirmed_headwords,
-                    (confirmed_headwords == suggested_headwords)
-                        .then_some(detection.normalized_surface.as_str()),
+                    equivalent_detection_headwords.then_some(detection.normalized_surface.as_str()),
                     &initial_headword_keys,
                     input.confirmed_surface_match_token.as_deref(),
                 )

@@ -11176,6 +11176,102 @@ async fn clearing_v3_forms_allows_same_initial_headwords(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn v3_create_confirms_case_change_with_archived_match_once(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = fixture_state(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    seed_dictionary_word(&pool, "guinea").await;
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"schema_version":3,"language":"en","kind":"word","surface":"guinea"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let (status, original) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(
+            json!({"schema_version":3,"detection_id":detection["detection_id"],"kind":"word",
+            "headwords":{"mode":"unified","common":"guinea"}}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    archive_v3_entry(&state, &bearer, &original).await;
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"schema_version":3,"language":"en","kind":"word","surface":"Guinea"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    assert_eq!(detection["requires_acknowledgement"], true);
+    assert_eq!(
+        detection["surface_match_page"]["items"][0]["match"]["status"],
+        "archived"
+    );
+    let body = json!({"schema_version":3,"detection_id":detection["detection_id"],"kind":"word",
+        "headwords":{"mode":"unified","common":"Guinea"},
+        "confirmed_surface_match_token":detection["surface_match_page"]["surface_confirmation_token"]});
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "first confirmation must create: {created}"
+    );
+    assert_ne!(created["word"]["id"], original["word"]["id"]);
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", created["word"]["id"].as_str().unwrap()),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(reloaded["word"]["presentation"]["label"], "Guinea");
+    assert_eq!(
+        reloaded["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["spelling"],
+        "Guinea"
+    );
+    let (status, archived) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/{}",
+            original["word"]["id"].as_str().unwrap()
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    assert_eq!(archived["word"]["status"], "archived");
+}
+
+#[sqlx::test]
 async fn v3_create_rebinds_dictionary_base_forms_to_explicit_regional_headwords(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
@@ -14860,7 +14956,7 @@ async fn surface_confirm_bugfix_first_explicit_confirmation_http(pool: PgPool) {
     assert_eq!(response.status().as_u16(), 200);
     let detection: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
     let mut body = json!({"schema_version":3,"detection_id":detection["detection_id"],"kind":"word",
-        "headwords":{"mode":"unified","common":"harbour"},
+        "headwords":{"mode":"unified","common":"Harbour"},
         "confirmed_surface_match_token":detection["surface_match_page"]["surface_confirmation_token"]});
     assert!(
         body["confirmed_surface_match_token"].is_string(),
@@ -14907,7 +15003,7 @@ async fn surface_confirm_bugfix_rejects_changed_evidence(pool: PgPool) {
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let bearer = token(&state, seed_admin(&pool).await);
     let first = create_v3_with_complete_forms(&state, &pool, &bearer).await;
-    for scenario in ["headwords", "annotation", "new_match", "policy"] {
+    for scenario in ["headwords", "mode", "annotation", "new_match", "policy"] {
         let (_, detection) = call(
             &state,
             Method::POST,
@@ -14918,12 +15014,15 @@ async fn surface_confirm_bugfix_rejects_changed_evidence(pool: PgPool) {
         )
         .await;
         let mut body = json!({"schema_version":3,"detection_id":detection["detection_id"],"kind":"word",
-            "headwords":{"mode":"unified","common":"harbour"},
+            "headwords":{"mode":"unified","common":"Harbour"},
             "confirmed_surface_match_token":detection["surface_match_page"]["surface_confirmation_token"]});
         match scenario {
             "headwords" => {
                 body["headwords"] =
                     json!({"mode":"distinguish","uk":"harbour","us":"harbor","source_dialect":"uk"})
+            }
+            "mode" => {
+                body["headwords"] = json!({"mode":"distinguish","uk":"Harbour","us":"Harbour","source_dialect":"uk"})
             }
             "annotation" => {
                 let (status, result) = call(
