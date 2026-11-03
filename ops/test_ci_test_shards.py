@@ -41,6 +41,19 @@ class IntegrationShardsTests(unittest.TestCase):
                 covered = {target for shard in SHARD_MODULES for target in targets_for(shard, grouped)}
                 self.assertEqual(covered, set(discovered))
 
+    def test_pagination_companions_run_whole_targets_once_with_ignored_preserved(self):
+        companions = ("wordlists_handler", "question_bank_handler", "shared_sentences")
+        self.grouped["lexicon"] += companions
+        pagination = next(r for r in self.reports if r["shard"] == "lexicon-pagination")
+        for target in companions:
+            pagination["inventory"][target] = {"names": ["ordinary", "ignored"], "ignored": ["ignored"]}
+            pagination["executed"] += [{"target": target, "name": "ordinary", "status": "ok"},
+                                       {"target": target, "name": "ignored", "status": "ignored"}]
+            self.assertEqual(filters_for("lexicon-pagination", target), [])
+            self.assertEqual(selected_cases("lexicon-pagination", target, ["ordinary", "ignored"]), ["ordinary", "ignored"])
+            self.assertNotIn(target, targets_for("lexicon-other", self.grouped))
+        self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha"), {"targets": 9, "cases": 14, "shards": 7})
+
     def test_omitted_duplicate_or_unexpected_execution_fails(self):
         for mutation in [lambda r: r[1]["executed"].pop(), lambda r: r[1]["executed"].append(r[1]["executed"][0]), lambda r: r[1]["executed"].append({"target": "unknown", "name": "extra", "status": "ok"})]:
             reports = copy.deepcopy(self.reports)
