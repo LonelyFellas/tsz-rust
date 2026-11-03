@@ -36,6 +36,16 @@ class CiWorkflowTests(unittest.TestCase):
             "python3 ops/ci_identity_profile.py run ${{ matrix.module }}", integration
         )
 
+    def test_documentation_keeps_required_matrix_check_names(self):
+        integration = self._job("integration")
+        header = integration.split("    steps:", 1)[0]
+        condition = re.search(r"(?m)^    if: (.*)$", header).group(1)
+        self.assertNotIn("docs_only", condition)
+        self.assertIn("name: Integration (${{ matrix.module }})", header)
+        self.assertIn("needs.change-scope.outputs.docs_only != 'true' && 'postgres:16-alpine' || ''", header)
+        for step in integration.split("      - name:")[1:]:
+            self.assertIn("needs.change-scope.outputs.docs_only", step.split("        uses:", 1)[0].split("        run:", 1)[0])
+
     def test_ci08_only_test_jobs_start_database_services(self) -> None:
         quality = self._job("quality-checks")
         unit_doc = self._job("unit-doc")
@@ -75,9 +85,9 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("pattern: integration-inventory-*", inventory)
         self.assertIn("needs['lexicon-summary'].result", summary)
         self.assertIn("if-no-files-found: error", self._job("integration"))
-        self.assertIn("if: matrix.module == 'identity'", self._job("integration"))
+        self.assertIn("if: (matrix.module == 'identity') && needs.change-scope.outputs.docs_only != 'true'", self._job("integration"))
         self.assertIn("name: identity-phase-measurements", self._job("integration"))
-        self.assertIn("if: matrix.module == 'lexicon-handler'", self._job("integration"))
+        self.assertIn("if: (matrix.module == 'lexicon-handler') && needs.change-scope.outputs.docs_only != 'true'", self._job("integration"))
         self.assertIn("name: lexicon-handler-phase-measurements", self._job("integration"))
 
     def test_dependency_audit_blocks_ci_and_runs_alone_on_schedule(self) -> None:

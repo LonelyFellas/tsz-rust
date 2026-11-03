@@ -58,9 +58,10 @@ class ChangeScopeTests(unittest.TestCase):
         script = job.split("        run: |\n", 1)[1]
         defaults = {"AUDIT_RESULT": "success", "QUALITY_RESULT": "success", "INVENTORY_RESULT": "success",
                     "SCOPE_RESULT": "success", "DOCS_ONLY": "false", "UNIT_DOC_RESULT": "success", "INTEGRATION_RESULT": "success"}
-        docs = {"DOCS_ONLY": "true", "UNIT_DOC_RESULT": "skipped", "INTEGRATION_RESULT": "skipped"}
+        docs = {"DOCS_ONLY": "true", "UNIT_DOC_RESULT": "skipped", "INTEGRATION_RESULT": "success"}
         for changes, expected in (({}, True), (docs, True), ({"UNIT_DOC_RESULT": "skipped"}, False),
                                   ({**docs, "SCOPE_RESULT": "failure"}, False),
+                                  ({**docs, "INTEGRATION_RESULT": "skipped"}, False),
                                   ({**docs, "AUDIT_RESULT": "failure"}, False),
                                   ({**docs, "QUALITY_RESULT": "cancelled"}, False),
                                   ({**docs, "INVENTORY_RESULT": "failure"}, False)):

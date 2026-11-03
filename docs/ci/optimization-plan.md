@@ -281,7 +281,8 @@ Quality检查与dependency-audit并行启动；原必需检查名Quality保留�
 才标为不适用；使用精确base/head三点diff、--no-renames，源码移动成文档也会因删除旧源码走全量。
 解析/读取/git错误默认全量，main push和手动运行始终全量。保留audit、fmt、工具回归与原Quality
 聚合，文档PR省略Clippy、unit/doc和integration；必需检查名称保留，聚合显式要求成功分类及
-对应skipped状态，普通代码路径的跳过仍失败。没有修改仓库保护规则或部署来源。
+unit/doc的skipped状态；integration保留matrix实例并在步骤级标记不适用，返回success，
+以生成所有受保护的分片check。文档模式服务image为空，不启动容器。普通代码路径的跳过仍失败。没有修改仓库保护规则或部署来源。
 已验证白名单/混合改动/真实Git重命名/错误回退和真实聚合shell的失败闭合；真实文档PR待验收。
 
 ## 6. 交付边界与下一步
