@@ -2,6 +2,7 @@
 """Rehearse a captured deployed baseline and candidate using synthetic data only."""
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -72,6 +73,27 @@ def same_ledger(expected, actual):
         raise VerificationError("baseline_ledger_mismatch")
 
 
+def catalog_recovery_state(runtime):
+    return json.loads(runtime.sql("SELECT json_build_object('rows', coalesce(json_agg(to_jsonb(m)), '[]'::json), 'clock', clock_timestamp()) FROM catalog.metadata m"))
+
+
+def verify_catalog_metadata_recovery(before, after):
+    try:
+        previous, = before["rows"]
+        restored, = after["rows"]
+        started = datetime.fromisoformat(before["clock"])
+        finished = datetime.fromisoformat(after["clock"])
+        updated = datetime.fromisoformat(restored["updated_at"])
+        if (previous["id"] is not True or type(previous["version"]) is not int
+                or previous["version"] < 1
+                or not all(value.tzinfo is not None for value in (started, finished, updated))
+                or not started <= updated <= finished
+                or restored != {**previous, "version": previous["version"] + 1, "updated_at": restored["updated_at"]}):
+            raise VerificationError("unexpected_catalog_metadata_recovery")
+    except (KeyError, TypeError, ValueError) as failure:
+        raise VerificationError("unexpected_catalog_metadata_recovery") from failure
+
+
 def rehearse(args, runtime_factory=IsolatedRuntime):
     if args.output.exists():
         raise VerificationError("receipt_already_exists")
@@ -132,6 +154,8 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
             # Capture candidate writes through the schema that the old binary will read.
             # Full snapshots still protect new tables, refusal atomicity and sequences.
             before_recovery_data = runtime.snapshot(projection=baseline_columns)
+            # This down migration invalidates the catalog cache exactly once.
+            catalog_before = catalog_recovery_state(runtime) if 20261102020000 in interval["versions"] else None
             try:
                 runtime.binary(args.artifact, "deploy-undo-migrations", str(interval["baseline_version"]), str(interval["candidate_version"]))
             except VerificationError as failure:
@@ -141,6 +165,9 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
                     raise VerificationError("rejected_recovery_changed_data")
                 receipt["checks"]["recovery_refusal_atomic"] = "passed"
                 raise VerificationError("recovery_refused_requires_manual_plan")
+            if catalog_before is not None:
+                verify_catalog_metadata_recovery(catalog_before, catalog_recovery_state(runtime))
+                receipt["checks"]["catalog_metadata_recovery"] = "passed"
             same_ledger(ledger, runtime.ledger())
             restored = runtime.snapshot()
             if restored.get("schema_sha256") != baseline_snapshot.get("schema_sha256"):
@@ -157,7 +184,8 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
                     if summary.get("rows", 0):
                         raise VerificationError("recovery_dropped_synthetic_data")
                 elif restored[table] != before_recovery_data[table]:
-                    raise VerificationError("recovery_changed_synthetic_data")
+                    if table != "catalog.metadata" or catalog_before is None:
+                        raise VerificationError("recovery_changed_synthetic_data")
             receipt["checks"]["bounded_down"] = "passed"
         else:
             receipt["checks"]["bounded_down"] = "not_needed_no_schema_change"
