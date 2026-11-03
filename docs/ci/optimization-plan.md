@@ -275,6 +275,15 @@ Quality检查与dependency-audit并行启动；原必需检查名Quality保留�
 才通过，失败、取消和跳过均不放行。所有Clippy、fmt及工具回归保持，schedule仍仅运行audit。
 这主要减少lint错误反馈等待，不宣称缩短当前handler主导的总CI。源码/制品门禁不变。
 
+### P4 试点：严格文档白名单
+
+仅pull_request、非空改动且所有路径在docs/ci或docs/features下并以.md结尾时，运行时测试
+才标为不适用；使用精确base/head三点diff、--no-renames，源码移动成文档也会因删除旧源码走全量。
+解析/读取/git错误默认全量，main push和手动运行始终全量。保留audit、fmt、工具回归与原Quality
+聚合，文档PR省略Clippy、unit/doc和integration；必需检查名称保留，聚合显式要求成功分类及
+对应skipped状态，普通代码路径的跳过仍失败。没有修改仓库保护规则或部署来源。
+已验证白名单/混合改动/真实Git重命名/错误回退和真实聚合shell的失败闭合；真实文档PR待验收。
+
 ## 6. 交付边界与下一步
 
 已完成：公开源码/运行对标、本地主线代码与历史设计核对、main 分支保护只读核对、本文方案及上述局部实施。

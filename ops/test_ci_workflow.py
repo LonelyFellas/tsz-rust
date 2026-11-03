@@ -61,7 +61,7 @@ class CiWorkflowTests(unittest.TestCase):
         summary = self._job("ci-summary")
 
         self.assertIn("name: Format, lint and test", summary)
-        self.assertIn("needs: [quality, unit-doc, integration, lexicon-summary, dependency-audit]", summary)
+        self.assertIn("needs: [quality, unit-doc, integration, lexicon-summary, dependency-audit, change-scope]", summary)
         self.assertIn("if: ${{ always() && github.event_name != 'schedule' }}", summary)
         self.assertIn("needs['dependency-audit'].result", summary)
         self.assertIn('test "$AUDIT_RESULT" = "success"', summary)
@@ -70,7 +70,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("needs.integration.result", summary)
         inventory = self._job("lexicon-summary")
         self.assertIn("name: Integration (lexicon)", inventory)
-        self.assertIn("needs: [integration]", inventory)
+        self.assertIn("needs: [integration, change-scope]", inventory)
         self.assertIn("ci_test_shards.py verify integration-inventories", inventory)
         self.assertIn("pattern: integration-inventory-*", inventory)
         self.assertIn("needs['lexicon-summary'].result", summary)
@@ -94,7 +94,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("always()", quality)
         self.assertIn("needs['dependency-audit'].result", quality)
         self.assertIn("needs['quality-checks'].result", quality)
-        self.assertNotIn("needs:", self._job("quality-checks"))
+        self.assertNotIn("dependency-audit", self._job("quality-checks"))
         script = quality.split("        run: |\n", 1)[1]
         for audit, checks in (("success", "success"), ("failure", "success"), ("success", "failure"),
                               ("cancelled", "success"), ("success", "skipped")):

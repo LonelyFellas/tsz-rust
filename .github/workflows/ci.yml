@@ -27,6 +27,22 @@ env:
   SQLX_OFFLINE: "true"
 
 jobs:
+  change-scope:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Classify exact PR changes
+        id: scope
+        run: python3 ops/ci_change_scope.py
+
   dependency-audit:
     name: Dependency audit
     runs-on: ubuntu-24.04
@@ -57,6 +73,7 @@ jobs:
           test "$CHECKS_RESULT" = "success"
 
   quality-checks:
+    needs: [change-scope]
     if: github.event_name != 'schedule'
     name: Quality checks
     runs-on: ubuntu-24.04
@@ -142,7 +159,7 @@ jobs:
         run: python3 -m unittest ops/test_ci_identity_profile.py
 
       - name: Test CI workflow structure
-        run: python3 -m unittest ops/test_ci_workflow.py
+        run: python3 -m unittest ops/test_ci_workflow.py ops/test_ci_change_scope.py
 
       - name: Test speech voice metadata updater
         run: python3 -I ops/speech-voice-catalog/test_update_metadata.py
@@ -197,12 +214,14 @@ jobs:
         run: python3 -m unittest ops/test_deploy_skill.py ops/test_deployment_auth_smoke.py
 
       - name: Run Clippy
+        if: needs.change-scope.outputs.docs_only != 'true'
         run: >-
           python3 ops/ci_metrics.py run --name clippy --
           cargo clippy --locked --all-targets --all-features -- -D warnings
 
   unit-doc:
-    if: github.event_name != 'schedule'
+    needs: [change-scope]
+    if: github.event_name != 'schedule' && needs.change-scope.outputs.docs_only != 'true'
     name: Unit and doc tests
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -302,7 +321,8 @@ jobs:
           cargo test --locked --all-features --doc
 
   integration:
-    if: github.event_name != 'schedule'
+    needs: [change-scope]
+    if: github.event_name != 'schedule' && needs.change-scope.outputs.docs_only != 'true'
     name: Integration (${{ matrix.module }})
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ (matrix.module == 'lexicon-handler' || matrix.module == 'lexicon-other') && 35 || 20 }}
@@ -459,14 +479,23 @@ jobs:
     # the executed-case audit must pass before this check can become green.
     name: Integration (lexicon)
     if: ${{ always() && github.event_name != 'schedule' }}
-    needs: [integration]
+    needs: [integration, change-scope]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Require all integration shards to pass
         env:
           INTEGRATION_RESULT: ${{ needs.integration.result }}
-        run: test "$INTEGRATION_RESULT" = "success"
+          SCOPE_RESULT: ${{ needs['change-scope'].result }}
+          DOCS_ONLY: ${{ needs.change-scope.outputs.docs_only }}
+        run: |
+          test "$SCOPE_RESULT" = "success"
+          if [ "$DOCS_ONLY" = "true" ]; then
+            test "$INTEGRATION_RESULT" = "skipped"
+            echo "Documentation-only PR: integration cases are not applicable."
+          else
+            test "$INTEGRATION_RESULT" = "success"
+          fi
 
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -474,18 +503,20 @@ jobs:
           persist-credentials: false
 
       - name: Download executed test inventories
+        if: needs.change-scope.outputs.docs_only != 'true'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: integration-inventory-*
           path: integration-inventories
 
       - name: Require every discovered integration case exactly once
+        if: needs.change-scope.outputs.docs_only != 'true'
         run: python3 ops/ci_test_shards.py verify integration-inventories
 
   ci-summary:
     name: Format, lint and test
     if: ${{ always() && github.event_name != 'schedule' }}
-    needs: [quality, unit-doc, integration, lexicon-summary, dependency-audit]
+    needs: [quality, unit-doc, integration, lexicon-summary, dependency-audit, change-scope]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
 
@@ -497,11 +528,20 @@ jobs:
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           INVENTORY_RESULT: ${{ needs['lexicon-summary'].result }}
           AUDIT_RESULT: ${{ needs['dependency-audit'].result }}
+          SCOPE_RESULT: ${{ needs['change-scope'].result }}
+          DOCS_ONLY: ${{ needs.change-scope.outputs.docs_only }}
         run: |
           test "$AUDIT_RESULT" = "success"
           test "$QUALITY_RESULT" = "success"
-          test "$UNIT_DOC_RESULT" = "success"
-          test "$INTEGRATION_RESULT" = "success"
+          test "$SCOPE_RESULT" = "success"
+          if [ "$DOCS_ONLY" = "true" ]; then
+            test "$UNIT_DOC_RESULT" = "skipped"
+            test "$INTEGRATION_RESULT" = "skipped"
+            echo "Documentation-only PR: Rust runtime tests are not applicable."
+          else
+            test "$UNIT_DOC_RESULT" = "success"
+            test "$INTEGRATION_RESULT" = "success"
+          fi
           test "$INVENTORY_RESULT" = "success"
 
   release-artifact:
