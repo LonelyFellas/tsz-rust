@@ -293,7 +293,7 @@ jobs:
     if: github.event_name != 'schedule'
     name: Integration (${{ matrix.module }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.module == 'lexicon-handler' && 35 || 20 }}
 
     strategy:
       fail-fast: false

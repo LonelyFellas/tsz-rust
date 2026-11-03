@@ -1778,39 +1778,34 @@ async fn parts_of_speech_kind_constraints(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn form_type_default_template_migration_preserves_rows_and_can_be_reverted(pool: PgPool) {
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.form_types")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+async fn form_type_default_template_down_requires_manual_recovery_without_data_changes(
+    pool: PgPool,
+) {
     sqlx::query("UPDATE catalog.form_types SET is_default=false WHERE code='plural'")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::raw_sql(include_str!(
+    let snapshot = "SELECT jsonb_build_object('types',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM catalog.form_types t),'metadata',(SELECT to_jsonb(m) FROM catalog.metadata m WHERE id))";
+    let before: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    let error = sqlx::raw_sql(include_str!(
         "../migrations/20261102020000_form_type_default_template.down.sql"
     ))
-    .execute(&pool)
+    .execute(&mut *transaction)
     .await
-    .unwrap();
-    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.form_types")
+    .expect_err(
+        "automatic down must not discard default-template settings or change catalog epochs",
+    );
+    assert!(error.to_string().contains("manual recovery"), "{error}");
+    transaction.rollback().await.unwrap();
+    let after: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
+    assert_eq!(before, after);
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT is_default FROM catalog.form_types WHERE code='plural' LIMIT 1"
+        )
         .fetch_one(&pool)
         .await
-        .unwrap();
-    assert_eq!(before, after);
-    sqlx::raw_sql(include_str!(
-        "../migrations/20261102020000_form_type_default_template.up.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    let enabled: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM catalog.form_types WHERE is_default")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(
-        enabled, before,
-        "迁移应保留所有历史词形并默认开启；down 后重做会丢失开关设置"
+        .unwrap()
     );
 }
