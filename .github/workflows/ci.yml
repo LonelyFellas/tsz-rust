@@ -261,7 +261,11 @@ jobs:
           key: ${{ steps.ci-fingerprint.outputs.cache_key }}
           env-vars: CARGO SQLX_OFFLINE
           cache-bin: false
-          cache-targets: false
+          # Pilot: compiled dependencies only, never workspace crates or results.
+          prefix-key: v1-unit-dependencies
+          cache-targets: true
+          cache-workspace-crates: false
+          cache-all-crates: false
           cache-on-failure: false
           save-if: >-
             ${{ github.event_name == 'push' &&

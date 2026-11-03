@@ -159,7 +159,13 @@ class CiWorkflowTests(unittest.TestCase):
                 self.assertLess(job.index("id: ci-fingerprint"), job.index("id: cargo-cache"))
                 self.assertIn("continue-on-error: true", job)
                 self.assertIn("cache-bin: false", job)
-                self.assertIn("cache-targets: false", job)
+                if job == self._job("unit-doc"):
+                    self.assertIn("cache-targets: true", job)
+                    self.assertIn("prefix-key: v1-unit-dependencies", job)
+                    self.assertIn("cache-workspace-crates: false", job)
+                    self.assertIn("cache-all-crates: false", job)
+                else:
+                    self.assertIn("cache-targets: false", job)
                 self.assertIn("cache-on-failure: false", job)
                 self.assertIn("steps.ci-fingerprint.outputs.cache_key", job)
                 self.assertIn("github.event_name == 'push'", job)

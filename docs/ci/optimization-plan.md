@@ -260,6 +260,15 @@ API 时间戳不能证明真实排队或完整 DAG 因果关键路径，因此�
 这些是同机局部观察，不推算GitHub整分片收益。既有两例跨状态/嵌套及Swagger/即时撤销回归通过。
 各测试批次独占容器与匿名卷均已删除并按owner复查，无服务器或OSS写入。真实PR/main数据待验证。
 
+### P2 试点：unit/doc 编译依赖缓存
+
+只在unit-doc启用target缓存，显式排除workspace crates和安装的bin；使用新的独立prefix避免
+复用旧registry-only命中而永远不保存target。保留原fingerprint、锁文件、Cargo重建判定以及
+仅同仓main push成功保存的规则；PR/workflow_dispatch只读。release和SQLx patched分片保持原策略。
+冷缓存PR验证正确性；main成功后建立受信暖缓存，再以相同main SHA的workflow_dispatch测暖路径。
+若下载/解压/保存开销抵消收益，或出现失配，就撤销本试点。当前仅准备代码，尚无暖缓存收益证据。
+不为了试验允许PR写入main可见缓存，不缓存数据库、报告或通过状态。
+
 ## 6. 交付边界与下一步
 
 已完成：公开源码/运行对标、本地主线代码与历史设计核对、main 分支保护只读核对、本文方案及上述局部实施。
