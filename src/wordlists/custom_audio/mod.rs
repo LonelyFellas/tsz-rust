@@ -12,7 +12,7 @@ use super::service::Tx;
 use crate::{
     auth::extract::AuthUser,
     coins::{
-        admin_service::coin_error,
+        error::coin_error,
         model::{Actor, Amount, Context, Owner, OwnerType},
     },
     error::{AppError, ErrorCode},

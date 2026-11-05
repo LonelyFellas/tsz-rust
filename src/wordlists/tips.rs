@@ -15,7 +15,7 @@ use crate::{
 };
 use axum::{Json, extract::State, response::Response};
 use chrono::{DateTime, Utc};
-use coins::admin_service::coin_error;
+use coins::error::coin_error;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::ToSchema;
@@ -140,7 +140,7 @@ pub async fn transfer(
             "词条曾不可用，作者修复并重新审核后才能投币",
         ));
     }
-    let hash = service::hash(&(auth.subject, id, author, &input))?;
+    let hash = crate::platform::hash_json(&(auth.subject, id, author, &input))?;
     for key in [
         format!(
             "wordlist-tip-request:{}:{}",
@@ -270,7 +270,7 @@ pub async fn records(
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistTipPage {
         items,
-        pagination: service::page_meta(page, size, total),
+        pagination: crate::api::page_meta(page, size, total),
     })
 }
 #[utoipa::path(post,path="/api/v1/wordlists/{id}/tips",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=CreateWordlistTip,

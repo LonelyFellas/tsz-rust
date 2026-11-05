@@ -68,7 +68,7 @@ async fn load(tx: &mut Tx<'_>, user: Uuid, space: LibrarySpace) -> Result<Vec<No
         .bind(user).bind(space.as_str()).fetch_all(&mut **tx).await.map_err(AppError::internal)
 }
 fn version(nodes: &[Node]) -> Result<String, AppError> {
-    Ok(service::hash(&nodes)?
+    Ok(crate::platform::hash_json(&nodes)?
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
@@ -265,7 +265,7 @@ pub async fn listing(
         version: version(&nodes)?,
         ancestors,
         items,
-        pagination: service::page_meta(page, size, total),
+        pagination: crate::api::page_meta(page, size, total),
     };
     commit(tx, auth).await?;
     Ok(result)

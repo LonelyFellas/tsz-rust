@@ -42,7 +42,7 @@ pub async fn search(pool: &PgPool, query: DictionaryQuery) -> Result<DictionaryP
     tx.commit().await.map_err(AppError::internal)?;
     Ok(DictionaryPage {
         items,
-        pagination: reading::page_meta(page, size, total),
+        pagination: crate::api::page_meta(page, size, total),
     })
 }
 

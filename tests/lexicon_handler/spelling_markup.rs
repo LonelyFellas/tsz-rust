@@ -16,6 +16,7 @@ async fn markup_negotiation_preserves_cached_publish_history_and_lifecycle(pool:
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let ((), router_stats) = with_test_router(&state, async {
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
     let ready = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
@@ -197,4 +198,10 @@ async fn markup_negotiation_preserves_cached_publish_history_and_lifecycle(pool:
     assert_eq!(status, StatusCode::CREATED, "{new}");
     assert_eq!(new["word"]["forms"], changed["word"]["forms"]);
     assert_eq!(current_publication_id(&pool, entry_id).await, rolled);
+    })
+    .await;
+    assert_single_router(
+        "markup_negotiation_preserves_cached_publish_history_and_lifecycle",
+        router_stats,
+    );
 }

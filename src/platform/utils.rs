@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use super::Password;
+use crate::error::AppError;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
@@ -24,6 +25,12 @@ pub fn generate_token_plaintext() -> String {
 /// 改哈希策略要同步测试侧的镜像 `expected_hash`（tests/{session,admin_session}_*.rs）。
 pub fn hash_token(plaintext: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(plaintext.as_bytes()))
+}
+
+/// SHA-256 of serde_json bytes, including struct field and array order.
+/// Persisted request receipts depend on this encoding; do not canonicalize it.
+pub fn hash_json(input: &impl serde::Serialize) -> Result<Vec<u8>, AppError> {
+    Ok(Sha256::digest(serde_json::to_vec(input).map_err(AppError::internal)?).to_vec())
 }
 
 #[cfg(test)]
@@ -66,5 +73,27 @@ mod tests {
     #[test]
     fn different_input_different_hash() {
         assert_ne!(hash_token("aaa"), hash_token("bbb"));
+    }
+
+    #[test]
+    fn boundary_json_hash_preserves_struct_order_unicode_and_null() {
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            z: &'a str,
+            a: [u8; 2],
+            absent: Option<u8>,
+        }
+        let request = Request {
+            z: "中\n文",
+            a: [2, 1],
+            absent: None,
+        };
+        // Persisted receipts use the serialized struct bytes, not sorted/canonical JSON.
+        let bytes = super::hash_json(&request).unwrap();
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "43bf946be4a2b579092a01057721af25d242ad5b395a76dab76cfdebaab30200"
+        );
     }
 }

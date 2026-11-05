@@ -32,6 +32,7 @@ async fn sentence_formatting_negotiates_reads_and_protects_legacy_writes(pool: P
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let ((), router_stats) = with_test_router(&state, async {
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
     let forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
@@ -290,4 +291,10 @@ async fn sentence_formatting_negotiates_reads_and_protects_legacy_writes(pool: P
     let (status, clear) = call(&state, Method::PUT, &path, &bearer, None, Some(json!({"schema_version":3,"base_revision":latest["word"]["revision"],"intent":"complete","content":cleared}))).await;
     assert_eq!(status, StatusCode::OK, "{clear}");
     assert!(!has_new_formats(&clear));
+    })
+    .await;
+    assert_single_router(
+        "sentence_formatting_negotiates_reads_and_protects_legacy_writes",
+        router_stats,
+    );
 }

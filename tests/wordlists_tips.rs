@@ -396,7 +396,8 @@ async fn tipped_one_can_add_one_and_tip_states_stay_private(pool: PgPool) {
 async fn legacy_success_replays_with_original_hash_but_blocks_new_tips(pool: PgPool) {
     use tsz_rust::{
         coins::{model::*, service as coins},
-        wordlists::{service, tips::CreateWordlistTip},
+        platform::hash_json,
+        wordlists::tips::CreateWordlistTip,
     };
     // Preserve the exact pre-like serde field order, rather than hashing a JSON map.
     #[derive(serde::Serialize)]
@@ -417,16 +418,16 @@ async fn legacy_success_replays_with_original_hash_but_blocks_new_tips(pool: PgP
         idempotency_key: legacy.idempotency_key,
         amount: "7".into(),
     };
-    let old_hash = service::hash(&(payer.subject, id, author.subject, &old)).unwrap();
+    let old_hash = hash_json(&(payer.subject, id, author.subject, &old)).unwrap();
     assert_eq!(
-        service::hash(&(payer.subject, id, author.subject, &legacy)).unwrap(),
+        hash_json(&(payer.subject, id, author.subject, &legacy)).unwrap(),
         old_hash
     );
     let mut explicit_false = input.clone();
     explicit_false["like"] = json!(false);
     let decoded: CreateWordlistTip = serde_json::from_value(explicit_false.clone()).unwrap();
     assert_eq!(
-        service::hash(&(payer.subject, id, author.subject, &decoded)).unwrap(),
+        hash_json(&(payer.subject, id, author.subject, &decoded)).unwrap(),
         old_hash
     );
     let owners = [
