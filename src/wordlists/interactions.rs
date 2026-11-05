@@ -218,6 +218,6 @@ pub async fn favorites(
     tx.commit().await.map_err(AppError::internal)?;
     Ok(private_json(WordlistFavoritePage {
         items,
-        pagination: service::page_meta(page, size, total),
+        pagination: crate::api::page_meta(page, size, total),
     }))
 }

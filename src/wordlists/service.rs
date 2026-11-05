@@ -1,10 +1,10 @@
 use super::{dto::*, projection};
 use crate::{
-    api::PaginationMeta,
+    api::{PaginationMeta, page_meta},
     auth::extract::AuthUser,
     error::{AppError, ErrorCode},
+    platform::hash_json as hash,
 };
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -31,14 +31,6 @@ pub fn pagination(query: &WordlistQuery) -> Result<(u32, u32, String), AppError>
         ));
     }
     Ok((page, size, q.to_owned()))
-}
-pub fn page_meta(page: u32, size: u32, total: i64) -> PaginationMeta {
-    PaginationMeta {
-        page,
-        page_size: size,
-        total,
-        total_pages: (total + i64::from(size) - 1) / i64::from(size),
-    }
 }
 pub async fn lock_user(tx: &mut Tx<'_>, auth: &AuthUser) -> Result<(), AppError> {
     let valid: Option<bool> = sqlx::query_scalar(
@@ -145,9 +137,6 @@ pub async fn ids(tx: &mut Tx<'_>, id: Uuid) -> Result<Vec<Uuid>, AppError> {
         .fetch_all(&mut **tx)
         .await
         .map_err(AppError::internal)
-}
-pub fn hash(input: &impl serde::Serialize) -> Result<Vec<u8>, AppError> {
-    Ok(Sha256::digest(serde_json::to_vec(input).map_err(AppError::internal)?).to_vec())
 }
 pub fn validate_items(name: &str, items: &[WordlistContentItem]) -> Result<(), AppError> {
     validate_content(name, &items.iter().map(|i| i.item_id).collect::<Vec<_>>())?;

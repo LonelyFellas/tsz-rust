@@ -32,3 +32,27 @@ pub struct ListQuery<T> {
 
     pub pagination: PaginationQuery,
 }
+
+pub(crate) fn page_meta(page: u32, size: u32, total: i64) -> PaginationMeta {
+    PaginationMeta {
+        page,
+        page_size: size,
+        total,
+        total_pages: (total + i64::from(size) - 1) / i64::from(size),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_meta;
+
+    #[test]
+    fn boundary_pagination_preserves_empty_exact_and_partial_pages() {
+        for (page, size, total, pages) in [(1, 50, 0, 0), (2, 50, 100, 2), (3, 50, 101, 3)] {
+            assert_eq!(
+                serde_json::to_value(page_meta(page, size, total)).unwrap(),
+                serde_json::json!({"page":page,"page_size":size,"total":total,"total_pages":pages})
+            );
+        }
+    }
+}

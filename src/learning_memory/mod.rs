@@ -21,7 +21,7 @@ use crate::{
         },
         repository::{QuestionRow, RunRow, SourceAccess},
     },
-    wordlists::service::hash,
+    platform::hash_json as hash,
 };
 use scheduler::{SCHEDULER_VERSION, Schedule, Stage, advance};
 

@@ -1,8 +1,116 @@
 # Rust 后端 CI/CD 对标评估与优化方案
 
 评估日期：2026-11-03（Asia/Singapore）。本项目基线：`4e13630c01aebc4833457e47605d5fe337c024e4`。
-当前阶段：代码阶段已由 PR #381、#384 合并 main，真实 CI 与缓存试验完成；待最终文档 PR 和最终 main 验收，稳定低于15分钟尚未证明。本文是本任务唯一主记录，复用
+当前阶段：PR #381、#384 和结果文档 #385 均已合并，后续 main CI 成功；2026-11-05 的本地工程治理补丁与验证见下节，待 PR CI 验证，稳定低于15分钟尚未证明。本文是 CI 优化的唯一主记录，复用
 [集成测试分片设计](integration-sharding.md)和[部署控制器说明](deployment-controller.md)，不另建发布体系。
+
+## 2026-11-05 工程治理第 2 批
+
+本批属于[同一工程治理任务](engineering-governance.md)。基线 `fb0575d019e6eb98d722ee85279805deeb034a56`，
+仅本地实施与验证，未提交、推送、重跑或触发远端 CI。实际分片说明路径为
+`docs/ci/integration-sharding.md`。既有 Router 复用、unit/doc 依赖缓存、七分片再平衡、Quality/audit
+并行、严格文档快路径、私有 SQLx 插桩、identity 模板与执行审计全部复用。
+
+### 近期失败分类
+
+只读检查最近 35 次 CI 运行及最近 10 次 failure 的 job；下表列出有原始 job 日志支持的代表问题。
+汇总 check 的连带失败不重复计为根因；日志中故意注入并被测试捕获的 panic 也不算失败。
+latest attempt 成功不覆盖历史失败，特别保留 `41574741920 / attempt 1`。
+
+| 分类 | 精确 run / attempt 与原始证据 | 当前状态 |
+| --- | --- | --- |
+| 迁移版本冲突，非 SQLx 离线元数据 | [40991311944 / 1](https://github.com/LonelyFellas/tsz-rust/actions/runs/40991311944/attempts/1)，job 123854130189：`_sqlx_migrations_pkey`，重复版本 `20261030010000`；多个分片在迁移准备阶段失败 | `24f549e` 已修正版本；当前 main 全量通过，不重复修改 |
+| 回退测试 fixture 与新表依赖不一致 | [41208450239 / 1](https://github.com/LonelyFellas/tsz-rust/actions/runs/41208450239/attempts/1)，job 124558249744/124558249786：`learning_question_audio` 外键阻止 down，以及 fixture 缺表 | `14e6610` 已对齐回退 fixture；当前 main 通过 |
+| 路由/权限契约断言 | [41004376922 / 1](https://github.com/LonelyFellas/tsz-rust/actions/runs/41004376922/attempts/1)，job 123895814537：退役 question-bank 路由与 policy/OpenAPI 集不一致 | 后续主线已通过相同单元检查；不修改产品契约 |
+| 语音回归断言 | [41185072193 / 1](https://github.com/LonelyFellas/tsz-rust/actions/runs/41185072193/attempts/1)，job 124490239427：两个 speech_generated 用例失败，包含 `SpeechVoiceNotFound`；不是编译错误 | 后续主线 platform 已通过；本批不改语音行为 |
+| 测试准备/超时边界 | [40461681990 / 1](https://github.com/LonelyFellas/tsz-rust/actions/runs/40461681990/attempts/1)，job 122047518765：`audit_failure_and_deadline_after_reward_roll_back_everything` 失败 | `91709ee` 已将 query timeout 限于受测操作 |
+| 计时完整性审计 | [40814493015 / 1](https://github.com/LonelyFellas/tsz-rust/actions/runs/40814493015/attempts/1)，job 123252279235：`router pilot changed the request inventory or scope` | `1e2a904` 已将真实音频审核请求纳入计数，审计继续严格 |
+| job 执行预算 | [41574741920 / 1](https://github.com/LonelyFellas/tsz-rust/actions/runs/41574741920/attempts/1)，job 125715518564；[41559848390 / 1](https://github.com/LonelyFellas/tsz-rust/actions/runs/41559848390/attempts/1)，job 125667569873：约 20 分钟取消，不能误记为断言失败；前者最新 attempt 2 成功 | #380、handler 预算调整及 #384 再平衡均已在主线；不再放宽 timeout 或增加重试 |
+
+上述近期失败样本没有独立的编译/链接、SQLx 离线缓存缺失或 Clippy 根因。第 1 批发现的本机历史
+SQLx 连接/字段/类型/lint 错误另见治理记录，缺少原命令和 SHA，不能混作 GitHub CI 当前故障。
+未找到本批需修复的现存断言失败；未解决的是 handler 长尾及 runner 波动，不能将所有变慢归因于缓存。
+
+### 当前关键路径和最小补丁
+
+以下均为 attempt 1、完整成功、相同现有七分片机制；PR/main 源码不同，不作为严格性能对照。
+
+| run | handler 编译 / 执行 / job | identity 执行 | unit/doc job |
+| --- | ---: | ---: | ---: |
+| [41590951618](https://github.com/LonelyFellas/tsz-rust/actions/runs/41590951618)（main f036a94） | 227 / 949 / 1218 s | 748 s | 231 s |
+| [41634254288](https://github.com/LonelyFellas/tsz-rust/actions/runs/41634254288)（PR 37184db） | 210 / 866 / 1115 s | 380 s | 215 s |
+| [41640669021](https://github.com/LonelyFellas/tsz-rust/actions/runs/41640669021)（main fb0575d） | 228 / 979 / 1251 s | 746 s | 176 s |
+
+最新 handler job `125933129463`：4 vCPU、AMD EPYC 7763、image `20261026.354.1`、Rust 1.98.0。
+源码依赖缓存命中，下载 384180914 B（约 366 MiB），仍需 228 秒编译；命中不等于复用了 target。
+该 job 的 cache restore 为 7 秒，unit/doc restore 为 11 秒，两者 post cache step 均为 0 秒；
+阶段是 GitHub step 的秒级时间，不能把 post cache 错算作测试或遗漏后声称净收益。
+unit/doc 继续原有受限依赖缓存，不扩展到 SQLx 私有 patch 或 release。缓存开销和机器差异仍须
+随实际 job 解释，不由一次 wall time 保证收益。nextest、增加 runner、重试和迁移业务断言均不采用。
+
+最新逐例计时中两个最慢 body 为：
+
+- `sentence_formatting::sentence_formatting_negotiates_reads_and_protects_legacy_writes`：48.753 s。
+- `spelling_markup::markup_negotiation_preserves_cached_publish_history_and_lifecycle`：42.296 s。
+
+两者此前没有进入既有 `with_test_router` scope。补丁仅将这两个测试的原 body 放入同一 AppState
+作用域，并调用既有 `assert_single_router`。保持每次真实 HTTP 请求、能力协商、缓存回放、历史读取、
+发布/回滚、数据库重读和全部原断言；无跨测试 Router 缓存，无产品 src/API/SQL/迁移改动。
+这些 body 时间包含并发资源竞争，不可相加当作 CI 墙钟收益。
+
+### 本地对照与验收
+
+Apple M5 Pro / macOS arm64 / Rust 1.98.0；共享 target，`jobs=2`、incremental=false，
+沿用现有 dev/test profile、all-features、SQLX_OFFLINE=true，没有新增 profile/flags 或关闭断言。
+独立 PostgreSQL 16.15、独立 Redis，显式传 DATABASE_URL/REDIS_URL/TEST_REDIS_URL；
+音频为既有 MemoryAdapter，不调用 OSS 或付费服务。两个用例在相同实例上串行运行，
+每次 SQLx 用例保留独立数据库及原迁移路径。前后保留二进制用于复测，计时排除编译。
+
+| 顺序 | 两用例进程墙钟 | 结果与可比性 |
+| --- | ---: | --- |
+| baseline 1 | 19.014 s | 2 passed；与约 2 秒的 Python 工具测试短暂重叠，仅预热，不用于独占对照 |
+| baseline 2 | 17.501 s | 2 passed；无其他任务 Cargo/rustc 或本任务工具测试并发 |
+| candidate 1 | 2.870 s | 2 passed，libtest 内部 1.73 s；含进程启动成本 |
+| candidate 2 | 1.625 s | 2 passed，libtest 内部 1.61 s |
+| baseline 3（保存的原二进制） | 16.582 s | 2 passed；证明不只是后测受益于数据/OS 预热 |
+
+candidate 两次都只有各 1 次 Router 构造，句子格式测试 40 个独立 request ID、拼写标记测试 33 个。
+两个源码文件移除新增 scope/统计检查后与 HEAD 原文逐字节相同，原测试 body 和断言未变。
+编译分别为 65 秒和 22.18 秒，均复用本机已有依赖缓存；后者不是纯代码加速证据，不能把它计入
+测试执行收益。以上仅为小范围本地测量，Linux 私有 SQLx 插桩及整体 CI 净收益**待 PR CI 验证**。
+
+验证命令（本地连接变量必须指向任务独立服务）：
+
+以下命令已在第 1 批复验后更新为原生 Cargo；历史实际执行使用的空间门禁包装已撤回，
+不改变当时 Cargo 参数或测试结果，本次没有重跑这些 Rust 检查。
+
+```bash
+SQLX_OFFLINE=true cargo test --locked --offline --all-features --test lexicon_handler --no-run --message-format=json
+# 从 compiler-artifact 消息取得本次 lexicon_handler executable，分别执行：
+<executable> negotiat --test-threads=1 --show-output
+<executable> batch5::scoped_router_ --test-threads=1 --show-output
+<executable> --list
+<executable> --list --ignored
+python3 -B -m unittest ops/test_ci_test_shards.py ops/test_ci_test_modules.py ops/test_ci_identity_profile.py
+GITHUB_SHA=fb0575d019e6eb98d722ee85279805deeb034a56 python3 -B ops/ci_test_shards.py verify <exact-main-inventory-directory>
+SQLX_OFFLINE=true cargo clippy --locked --offline --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+- 两个修改用例及两个既有 scope 回归通过：覆盖不同 AppState、嵌套 scope 恢复、Swagger 和逐请求鉴权撤销。
+- Python 分片/发现/私有插桩工具回归 31 项通过。测试输出中故意构造的 FAILED 用于验证审计拒绝路径，unittest 总结果为 OK。
+- 前后 `lexicon_handler` 的全部 190 个用例及 ignored 清单逐项相同；七分片调度/过滤代码未改。
+- 从 run `41640669021 / attempt 1` 下载精确 inventory artifact ID：13233986225、13233695931、
+  13233508786、13233156855、13233013488、13232689317、13232632916；按当前 target 清单和源 SHA
+  独立复算原审计通过：100 targets、1317 cases、7 shards（1314 ok、3 既有 ignored，无重复/漏跑）。
+  这是主线执行证据；本地候选只执行受影响用例，不将主线清单冒充候选全量运行。
+- 最终 all-targets/all-features Clippy 通过（65 秒），fmt 和 diff 检查通过。未改运行时 SQL，
+  无需重新生成 `.sqlx`、OpenAPI 或迁移；未运行候选全量 Rust/CI/部署验收。
+- 批次 `tsz-ci-batch2-20261105-ewo2ph5g` 清理完成：核对 PG data-dir 和 Redis dir 后停止两项
+  专属服务，确认 PID 消失、端口关闭，再删除专属目录中的数据库、缓存、原始日志、inventory 下载、
+  baseline/candidate 二进制副本；目录复查不存在。保留共享 Cargo target 和既有服务，未写远端资源。
+  本批全部写入/编译结束后交给第 3 批，不承诺 15 分钟 CI SLA。
 
 ## 结论与范围
 

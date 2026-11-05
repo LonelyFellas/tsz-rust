@@ -1,4 +1,4 @@
-use super::{admin_dto::*, model::*, service};
+use super::{admin_dto::*, error::coin_error, model::*, service};
 use crate::{
     admin::{AdminAuth, permissions},
     api::PaginationMeta,
@@ -7,41 +7,6 @@ use crate::{
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-pub fn coin_error(error: CoinError) -> AppError {
-    let code = match error {
-        CoinError::Database(error) => {
-            if error
-                .as_database_error()
-                .is_some_and(|e| e.constraint() == Some("coin_manual_event_once"))
-            {
-                return AppError::conflict(
-                    ErrorCode::CoinSourceConflict,
-                    None,
-                    "event already recorded",
-                );
-            }
-            return AppError::internal(error);
-        }
-        CoinError::InvalidAmount | CoinError::BalanceOverflow => ErrorCode::CoinInvalidAmount,
-        CoinError::InvalidCommand => ErrorCode::InvalidRequestBody,
-        CoinError::AccountUnavailable => ErrorCode::CoinAccountUnavailable,
-        CoinError::WalletUnavailable | CoinError::InvalidTransition => {
-            ErrorCode::CoinWalletUnavailable
-        }
-        CoinError::InsufficientBalance => ErrorCode::CoinInsufficientBalance,
-        CoinError::IdempotencyConflict => ErrorCode::CoinIdempotencyConflict,
-        CoinError::SourceConflict => ErrorCode::CoinSourceConflict,
-        CoinError::BalanceChanged => ErrorCode::AccountDeletionBalanceChanged,
-    };
-    if matches!(
-        code,
-        ErrorCode::CoinInvalidAmount | ErrorCode::InvalidRequestBody
-    ) {
-        AppError::bad_request(code, "invalid coin request")
-    } else {
-        AppError::conflict(code, None, "coin operation rejected")
-    }
-}
 fn text(value: &str, max: usize) -> Result<(), AppError> {
     if value.trim().is_empty() || value.chars().count() > max || value.trim() != value {
         return Err(AppError::bad_request(

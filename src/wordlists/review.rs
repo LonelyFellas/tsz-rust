@@ -27,7 +27,7 @@ pub async fn submit(
     id: Uuid,
     input: SubmitWordlist,
 ) -> Result<WordlistReview, AppError> {
-    let hash = service::hash(&input)?;
+    let hash = crate::platform::hash_json(&input)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     service::lock_user(&mut tx, auth).await?;
     let list = service::lock_list(&mut tx, id, Some(auth.subject), true).await?;
@@ -308,7 +308,7 @@ pub async fn admin_items(
     Ok(WordlistItems {
         items,
         revision: review.submitted_revision,
-        pagination: service::page_meta(page, size, total),
+        pagination: crate::api::page_meta(page, size, total),
     })
 }
 pub async fn admin_list(
@@ -333,6 +333,6 @@ pub async fn admin_list(
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistPage {
         items,
-        pagination: service::page_meta(page, size, total),
+        pagination: crate::api::page_meta(page, size, total),
     })
 }

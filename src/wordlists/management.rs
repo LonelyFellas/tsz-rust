@@ -101,7 +101,7 @@ pub async fn list(
     tx.commit().await.map_err(AppError::internal)?;
     Ok(AdminWordlistPage {
         items,
-        pagination: service::page_meta(page, size, total),
+        pagination: crate::api::page_meta(page, size, total),
     })
 }
 pub async fn detail(pool: &PgPool, auth: &AdminAuth, id: Uuid) -> Result<AdminWordlist, AppError> {
@@ -310,6 +310,6 @@ pub async fn recommended(pool: &PgPool, query: WordlistQuery) -> Result<Wordlist
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistPage {
         items,
-        pagination: service::page_meta(page, size, total),
+        pagination: crate::api::page_meta(page, size, total),
     })
 }
