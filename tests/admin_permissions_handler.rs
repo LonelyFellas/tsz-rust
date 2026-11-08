@@ -1169,9 +1169,16 @@ async fn audio_upload_migration_preserves_effective_writers_without_expanding_re
 async fn retired_wordlist_permissions_do_not_break_tag_authorization_after_upgrade(pool: PgPool) {
     let migrator = sqlx::migrate!("./migrations");
     migrator.run_to(20261018140000, &pool).await.unwrap();
-    let super_id = seed(&pool, AdminRole::SuperAdmin).await;
-    let holder = seed(&pool, AdminRole::Admin).await;
-    let recipient = seed(&pool, AdminRole::Admin).await;
+    // 升级前 fixture 只使用当时已存在的列，不调用当前 schema 的 repository。
+    let [super_id, holder, recipient] = [Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()];
+    for (id, role) in [
+        (super_id, "super_admin"),
+        (holder, "admin"),
+        (recipient, "admin"),
+    ] {
+        sqlx::query("INSERT INTO admins(id,phone,display_name,password_hash,role,must_change_password) VALUES($1,$2,'历史权限测试','unused',$3,false)")
+            .bind(id).bind(id.to_string()).bind(role).execute(&pool).await.unwrap();
+    }
     let tag_id = Uuid::now_v7();
     sqlx::query("INSERT INTO permission_tags(id,name,color) VALUES($1,'历史词表管理','blue')")
         .bind(tag_id)

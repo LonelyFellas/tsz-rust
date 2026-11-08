@@ -72,6 +72,7 @@ EXPECTED_TARGETS = {
         "teacher_certification_handler",
         "user_authenticate",
         "user_profile_handler",
+        "user_interface_preferences",
         "user_register_handler",
         "user_repository",
         "user_roles_schema",

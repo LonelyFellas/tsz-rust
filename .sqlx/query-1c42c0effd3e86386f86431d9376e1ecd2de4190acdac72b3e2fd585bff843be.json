@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, phone, display_name, password_hash, security_version, role as \"role: AdminRole\", status as \"status: AdminStatus\", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as \"dialect_preference: AdminDialectPreference\", created_at, updated_at\n            FROM admins\n            WHERE id = $1\n            ",
+  "query": "\n            SELECT id, phone, display_name, password_hash, security_version, role as \"role: AdminRole\", status as \"status: AdminStatus\", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as \"dialect_preference: AdminDialectPreference\", interface_locale as \"interface_locale: InterfaceLocaleV1\", created_at, updated_at\n            FROM admins\n            WHERE phone = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -137,6 +137,17 @@
       },
       {
         "ordinal": 12,
+        "name": "interface_locale: InterfaceLocaleV1",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "interface_locale"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -147,7 +158,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -160,7 +171,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Text"
       ]
     },
     "nullable": [
@@ -176,9 +187,10 @@
       true,
       true,
       false,
+      true,
       false,
       false
     ]
   },
-  "hash": "0646181876686cf6fe4b840674e588f28bda92dd69fcaa6416f762c2e89b756e"
+  "hash": "1c42c0effd3e86386f86431d9376e1ecd2de4190acdac72b3e2fd585bff843be"
 }

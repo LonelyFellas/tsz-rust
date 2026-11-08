@@ -33,6 +33,9 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::i18n::capabilities,
+        crate::user::preferences::get,
+        crate::user::preferences::update,
         crate::lexicon::assistant::ask,
         crate::lexicon::assistant::candidates::generate,
         crate::lexicon::assistant::ask_stream,
@@ -421,6 +424,12 @@ use utoipa::{
             crate::auth::security::PasswordStatus,
             // user
             crate::user::handler::MeResponse,
+            crate::i18n::InterfaceLocaleV1,
+            crate::i18n::InterfaceSurface,
+            crate::i18n::InterfaceCapabilities,
+            crate::user::preferences::UserInterfacePreferences,
+            crate::user::preferences::UserInterfacePreferencesResponse,
+            crate::user::preferences::UpdateUserInterfacePreferences,
             crate::user::handler::LearningSettingsResponse,
             crate::user::model::LearningSettings,
             crate::user::model::CefrLevel,

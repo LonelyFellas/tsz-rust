@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            RETURNING id, phone, display_name, password_hash, security_version,\n                      role as \"role: AdminRole\",\n                      status as \"status: AdminStatus\",\n                      must_change_password, failed_login_count, locked_until,\n                      created_by_admin_id,\n                      dialect_preference as \"dialect_preference: AdminDialectPreference\",\n                      created_at, updated_at\n            ",
+  "query": "\n            SELECT id, phone, display_name, password_hash, security_version, role as \"role: AdminRole\", status as \"status: AdminStatus\", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as \"dialect_preference: AdminDialectPreference\", interface_locale as \"interface_locale: InterfaceLocaleV1\", created_at, updated_at\n            FROM admins\n            WHERE id = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -137,6 +137,17 @@
       },
       {
         "ordinal": 12,
+        "name": "interface_locale: InterfaceLocaleV1",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "interface_locale"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -147,7 +158,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -160,12 +171,6 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Varchar",
-        "Text",
-        "Text",
-        "Text",
-        "Bool",
         "Uuid"
       ]
     },
@@ -182,9 +187,10 @@
       true,
       true,
       false,
+      true,
       false,
       false
     ]
   },
-  "hash": "1116a49c6e4c52d2c55a6bebdf4307b41cee36b8f0678477f478355da328f2bd"
+  "hash": "db48aedba8c290fc3d56263877eb71a6c008abfcb3effb30f59c9ec49b341c18"
 }

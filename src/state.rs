@@ -16,6 +16,7 @@ use axum::extract::FromRef;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub interface_languages: crate::i18n::InterfaceLanguages,
     pub opencode: Option<Arc<crate::admin::opencode::OpenCodeConfig>>,
     pub vocabulary_agent: Option<Arc<crate::question_bank::worker::AgentConfig>>,
     pub pool: PgPool,
@@ -82,6 +83,7 @@ impl AppState {
             5,                           // max_attempts
         ));
         Self {
+            interface_languages: Default::default(),
             pool,
             token_manager: Arc::new(TokenManager::new(
                 "test-secret",

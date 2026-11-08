@@ -100,6 +100,8 @@ impl SmartLexiconV3Flags {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
+    #[serde(skip)]
+    pub interface_languages: crate::i18n::InterfaceLanguages,
     #[serde(default = "default_port")]
     pub port: NonZeroU16,
     #[serde(default = "default_bind_ip")]
@@ -250,7 +252,9 @@ impl Config {
         let test_resources =
             crate::test_resources::TestResourcesConfig::from_pairs(&pairs, &object_storage)
                 .map_err(envy::Error::Custom)?;
+        let interface_languages = crate::i18n::InterfaceLanguages::from_pairs(&pairs)?;
         let mut cfg: Self = envy::from_iter(pairs)?;
+        cfg.interface_languages = interface_languages;
         cfg.object_storage = object_storage;
         cfg.test_resources = test_resources;
         cfg.azure_speech = azure_speech;
