@@ -102,13 +102,10 @@ pub async fn admin_profile(
             permissions: authorization.permissions.into_iter().collect(),
             permission_version: authorization.permission_version,
             catalog_version: crate::admin::permissions::catalog::catalog_version(),
-            preferences: sqlx::query_as::<_, AdminPreferences>(
-                "SELECT dialect_preference AS dialect,interface_locale FROM admins WHERE id=$1",
-            )
-            .bind(admin.id)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(AppError::internal)?,
+            preferences: AdminPreferences {
+                dialect: admin.dialect_preference,
+                interface_locale: admin.interface_locale,
+            },
         }),
     ))
 }

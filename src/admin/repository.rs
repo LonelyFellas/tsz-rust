@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     admin::{Admin, AdminDialectPreference, AdminRole, AdminStatus, NewAdmin},
+    i18n::InterfaceLocaleV1,
     platform::is_unique_violation,
 };
 
@@ -37,6 +38,7 @@ impl AdminRepository {
                       must_change_password, failed_login_count, locked_until,
                       created_by_admin_id,
                       dialect_preference as "dialect_preference: AdminDialectPreference",
+                      interface_locale as "interface_locale: InterfaceLocaleV1",
                       created_at, updated_at
             "#,
             admin.id,
@@ -55,7 +57,7 @@ impl AdminRepository {
         sqlx::query_as!(
             Admin,
             r#"
-            SELECT id, phone, display_name, password_hash, security_version, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", created_at, updated_at
+            SELECT id, phone, display_name, password_hash, security_version, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", interface_locale as "interface_locale: InterfaceLocaleV1", created_at, updated_at
             FROM admins
             WHERE id = $1
             "#,
@@ -70,7 +72,7 @@ impl AdminRepository {
         sqlx::query_as!(
             Admin,
             r#"
-            SELECT id, phone, display_name, password_hash, security_version, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", created_at, updated_at
+            SELECT id, phone, display_name, password_hash, security_version, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", interface_locale as "interface_locale: InterfaceLocaleV1", created_at, updated_at
             FROM admins
             WHERE phone = $1
             "#,

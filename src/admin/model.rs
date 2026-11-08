@@ -65,6 +65,7 @@ pub struct Admin {
     pub locked_until: Option<DateTime<Utc>>,
     pub created_by_admin_id: Option<Uuid>,
     pub dialect_preference: AdminDialectPreference,
+    pub interface_locale: Option<crate::i18n::InterfaceLocaleV1>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -125,6 +126,7 @@ mod tests {
             locked_until,
             created_by_admin_id: None,
             dialect_preference: AdminDialectPreference::Uk,
+            interface_locale: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

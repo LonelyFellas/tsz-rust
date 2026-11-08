@@ -406,7 +406,10 @@ async fn admin_security_version_cannot_be_removed_after_password_change(pool: Pg
         .run_to(20261027100000, &pool)
         .await
         .unwrap();
-    let id = seed_admin(&pool, AdminRole::Admin, "old-hash", false).await;
+    // 历史 schema fixture 不依赖当前 Admin 投影中的新增列。
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO admins(id,phone,display_name,password_hash,role,must_change_password) VALUES($1,$2,'历史管理员','old-hash','admin',false)")
+        .bind(id).bind(id.to_string()).execute(&pool).await.unwrap();
     AdminRepository::new(pool.clone())
         .set_password(&id, "new-hash", false)
         .await
@@ -421,11 +424,11 @@ async fn admin_security_version_cannot_be_removed_after_password_change(pool: Pg
         .unwrap_err();
     assert!(format!("{error:#}").contains("cannot remove admin security_version"));
     assert_eq!(
-        AdminRepository::new(pool)
-            .get_by_id(&id)
+        sqlx::query_scalar::<_, i64>("SELECT security_version FROM admins WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
             .await
-            .unwrap()
-            .security_version,
+            .unwrap(),
         1
     );
 }

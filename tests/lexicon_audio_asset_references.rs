@@ -2528,7 +2528,9 @@ async fn reclamation_marker_blocks_historical_native_downgrade(pool: PgPool) {
         .run_to(20261027100000, &pool)
         .await
         .unwrap();
-    let actor = seed_admin(&pool).await;
+    let actor = Uuid::now_v7();
+    sqlx::query("INSERT INTO admins(id,phone,display_name,password_hash,role,must_change_password) VALUES($1,$2,'历史音频测试','unused','super_admin',false)")
+        .bind(actor).bind(actor.to_string()).execute(&pool).await.unwrap();
     let asset = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id,reclamation_started_at) VALUES($1,$2,$2,'audio/mpeg',3,'en-GB','female','historical-guard.mp3',$3,now())")
         .bind(asset).bind(format!("fixtures/{asset}.mp3")).bind(actor).execute(&pool).await.unwrap();

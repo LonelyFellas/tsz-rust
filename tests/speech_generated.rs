@@ -48,18 +48,9 @@ impl SpeechProvider for Provider {
 }
 async fn actor(pool: &PgPool) -> Uuid {
     let id = Uuid::now_v7();
-    AdminRepository::new(pool.clone())
-        .create(NewAdmin {
-            id,
-            phone: format!("generated-{id}"),
-            display_name: "Generated audio test".into(),
-            password_hash: "hash".into(),
-            role: AdminRole::Admin,
-            must_change_password: false,
-            created_by_admin_id: None,
-        })
-        .await
-        .unwrap();
+    // 与升级前 schema 的迁移用例共用，只使用各版本共有的 fixture 字段。
+    sqlx::query("INSERT INTO admins(id,phone,display_name,password_hash,role,must_change_password) VALUES($1,$2,'Generated audio test','hash','admin',false)")
+        .bind(id).bind(format!("generated-{id}")).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1,unnest(ARRAY['words.access','words.edit','speech.generate']),$1").bind(id).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,'sonia','azure','en-GB-SoniaNeural','en-GB','female','[]','v1')").bind(Uuid::now_v7()).execute(pool).await.unwrap();
     id
