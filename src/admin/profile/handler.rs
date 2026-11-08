@@ -5,11 +5,11 @@ use uuid::Uuid;
 
 use crate::{
     admin::{
-        AdminDialectPreference, AdminRepository, AdminRepositoryError, AdminRole,
-        authorization::require_active_admin, extract::AdminAuth,
+        AdminDialectPreference, AdminRole, authorization::require_active_admin, extract::AdminAuth,
     },
     api::ApiJson,
     error::{AppError, ErrorCode},
+    i18n::{InterfaceLocaleV1, InterfaceSurface, present_nullable},
     state::AppState,
 };
 
@@ -28,19 +28,36 @@ pub struct AdminProfileResponse {
     pub preferences: AdminPreferences,
 }
 
-/// 管理员个人偏好。眼下只有方言一项，仍嵌一层对象：将来加第二项时
-/// profile 响应的形状不用再变，前端也不必区分「顶层字段」与「偏好」。
-#[derive(Serialize, ToSchema)]
+/// 管理员个人偏好；英语方言与界面语言分别保存。
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub struct AdminPreferences {
     /// 英语方言偏好；**默认值只由后端持有**，前端不再保留第二处默认。
     pub dialect: AdminDialectPreference,
+    #[schema(required = true)]
+    pub interface_locale: Option<InterfaceLocaleV1>,
 }
 
 /// PATCH /profile/preferences 的请求体。只带要改的偏好，改的恒是自己的。
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAdminPreferencesRequest {
-    /// 目标方言偏好；枚举外的取值由 `ApiJson` 统一挡成 422 invalid_request_body。
-    pub dialect: AdminDialectPreference,
+    /// 仅提供时修改；不接受 null，非法值返回 422 invalid_request_body。
+    #[serde(default, deserialize_with = "optional_dialect")]
+    #[schema(nullable = false)]
+    pub dialect: Option<AdminDialectPreference>,
+    #[serde(default, deserialize_with = "present_nullable")]
+    #[schema(value_type = Option<InterfaceLocaleV1>)]
+    pub interface_locale: Option<Option<InterfaceLocaleV1>>,
+}
+
+fn optional_dialect<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<AdminDialectPreference>, D::Error> {
+    match String::deserialize(deserializer)?.as_str() {
+        "uk" => Ok(Some(AdminDialectPreference::Uk)),
+        "us" => Ok(Some(AdminDialectPreference::Us)),
+        _ => Err(serde::de::Error::custom("invalid dialect")),
+    }
 }
 
 /// PATCH /profile/preferences 的响应：落库后的完整偏好。
@@ -73,6 +90,7 @@ pub async fn admin_profile(
     let admin = require_active_admin(&state, &admin).await?;
     Ok((
         StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(AdminProfileResponse {
             can_publish_lexicon: crate::admin::permissions::legacy_publication_allowed(
                 &authorization,
@@ -84,9 +102,13 @@ pub async fn admin_profile(
             permissions: authorization.permissions.into_iter().collect(),
             permission_version: authorization.permission_version,
             catalog_version: crate::admin::permissions::catalog::catalog_version(),
-            preferences: AdminPreferences {
-                dialect: admin.dialect_preference,
-            },
+            preferences: sqlx::query_as::<_, AdminPreferences>(
+                "SELECT dialect_preference AS dialect,interface_locale FROM admins WHERE id=$1",
+            )
+            .bind(admin.id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(AppError::internal)?,
         }),
     ))
 }
@@ -115,24 +137,24 @@ pub async fn update_admin_preferences(
     ApiJson(request): ApiJson<UpdateAdminPreferencesRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
-    let dialect = AdminRepository::new(state.pool.clone())
-        .set_dialect_preference(&admin.id, request.dialect)
-        .await
-        .map_err(map_admin_error)?;
+    if request.dialect.is_none() && request.interface_locale.is_none() {
+        return Err(AppError::unprocessable(
+            ErrorCode::InvalidRequestBody,
+            "at least one preference is required",
+        ));
+    }
+    state
+        .interface_languages
+        .require_supported(InterfaceSurface::Admin, request.interface_locale.flatten())?;
+    let preferences = sqlx::query_as::<_, AdminPreferences>(
+        "UPDATE admins SET dialect_preference=COALESCE($3,dialect_preference),interface_locale=CASE WHEN $4 THEN $5 ELSE interface_locale END,updated_at=NOW() WHERE id=$1 AND security_version=$2 AND status='active' AND NOT must_change_password RETURNING dialect_preference AS dialect,interface_locale")
+        .bind(admin.id).bind(auth.security_version).bind(request.dialect).bind(request.interface_locale.is_some()).bind(request.interface_locale.flatten())
+        .fetch_optional(&state.pool).await.map_err(AppError::internal)?
+        .ok_or_else(|| AppError::unauthorized(ErrorCode::InvalidToken,"invalid token"))?;
 
     Ok((
         StatusCode::OK,
-        Json(UpdateAdminPreferencesResponse {
-            preferences: AdminPreferences { dialect },
-        }),
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(UpdateAdminPreferencesResponse { preferences }),
     ))
-}
-
-fn map_admin_error(err: AdminRepositoryError) -> AppError {
-    match err {
-        AdminRepositoryError::NotFound => {
-            AppError::unauthorized(ErrorCode::AdminNotFound, "admin not found")
-        }
-        _ => AppError::internal(err),
-    }
 }

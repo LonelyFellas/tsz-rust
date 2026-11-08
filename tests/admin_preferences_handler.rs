@@ -205,3 +205,90 @@ async fn disabled_or_must_change_password_admin_is_403(pool: PgPool) {
     assert_eq!(status, StatusCode::FORBIDDEN, "{problem}");
     assert_eq!(problem["code"], "must_change_password");
 }
+
+#[sqlx::test]
+async fn locale_and_dialect_are_independent_partial_updates(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let id = seed_admin(&pool, false).await;
+    let token = admin_token(&state, id);
+    // 已保存但当前停用的语言不能被旧客户端的方言写入清除。
+    sqlx::query("UPDATE admins SET interface_locale='en-GB' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (s, b) = patch_preferences(&state, Some(&token), Some(json!({"dialect":"us"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["preferences"]["interface_locale"], "en-GB");
+    let (s, b) = patch_preferences(
+        &state,
+        Some(&token),
+        Some(json!({"interface_locale":"zh-Hans"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        b["preferences"],
+        json!({"dialect":"us","interface_locale":"zh-Hans"})
+    );
+    let (s, b) =
+        patch_preferences(&state, Some(&token), Some(json!({"interface_locale":null}))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        b["preferences"],
+        json!({"dialect":"us","interface_locale":null})
+    );
+    let (_, b) = call(&state, "GET", "/api/v1/admin/profile", Some(&token), None).await;
+    assert_eq!(
+        b["preferences"],
+        json!({"dialect":"us","interface_locale":null})
+    );
+}
+
+#[sqlx::test]
+async fn invalid_partial_update_is_atomic_and_null_dialect_is_rejected(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let id = seed_admin(&pool, false).await;
+    let token = admin_token(&state, id);
+    for body in [
+        json!({"dialect":null}),
+        json!({"dialect":{"us":null}}),
+        json!({"interface_locale":"zh-CN"}),
+        json!({"interface_locale":"zh-Hans","admin_id":id}),
+    ] {
+        let (s, b) = patch_preferences(&state, Some(&token), Some(body)).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["code"], "invalid_request_body");
+    }
+    let (s, b) = patch_preferences(
+        &state,
+        Some(&token),
+        Some(json!({"dialect":"us","interface_locale":"en-US"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(b["code"], "unsupported_language");
+    assert_eq!(profile_dialect(&state, &token).await, "uk");
+}
+
+#[sqlx::test]
+async fn concurrent_different_fields_survive_both_commits(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let id = seed_admin(&pool, false).await;
+    let token = admin_token(&state, id);
+    let (a, b) = tokio::join!(
+        patch_preferences(&state, Some(&token), Some(json!({"dialect":"us"}))),
+        patch_preferences(
+            &state,
+            Some(&token),
+            Some(json!({"interface_locale":"zh-Hans"}))
+        )
+    );
+    assert_eq!(a.0, StatusCode::OK);
+    assert_eq!(b.0, StatusCode::OK);
+    let (_, read) = call(&state, "GET", "/api/v1/admin/profile", Some(&token), None).await;
+    assert_eq!(
+        read["preferences"],
+        json!({"dialect":"us","interface_locale":"zh-Hans"})
+    );
+}

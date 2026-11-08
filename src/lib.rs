@@ -11,6 +11,7 @@ pub mod dashboard;
 pub mod deployment_migrations;
 pub mod dictionary;
 pub mod error;
+pub mod i18n;
 pub mod invitations;
 mod learning_memory;
 pub mod learning_tasks;
@@ -59,6 +60,13 @@ use crate::{
 /// 集成测试能拿它做oneshot, 不必真起服务器
 pub fn router(state: AppState) -> Router {
     let router = Router::new()
+        .route("/api/v1/i18n/capabilities", get(i18n::capabilities))
+        .route(
+            "/api/v1/me/preferences",
+            get(user::preferences::get)
+                .patch(user::preferences::update)
+                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024)),
+        )
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
         // .nest(
@@ -313,6 +321,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     ));
     let invitation_reward_amount = config.active_invitation_reward_amount();
     let state = AppState {
+        interface_languages: config.interface_languages,
         pool,
         token_manager,
         admin_token_manager,

@@ -338,3 +338,15 @@ Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写�
 主记录见前端仓库 `docs/features/task-160-default-form-template/README.md`。词形配置与目录新增 `is_default`；新建省略时开启，修改省略时保留当前值，原形禁止关闭。`allowed_form_types` 继续列出全部可添加类型，`default_form_types` 仅列出开启项，顺序沿用词形排序。前端仅在新建词条/新增词性时铺默认模版，不删除历史内容。
 
 迁移 `20261102020000` 为历史词形默认开启，down 会丢失开关设置但保留词形。旧客户端请求可继续使用；旧前端仍自动铺全部可用项。新前端遇旧 API 禁用开关，建议后端先更新，再更新前端。本地实施与隔离联调已完成，前后端关联 PR 记录提交、审查与 CI 状态；未执行合并或部署。
+## 界面语言目录与偏好（第二批，尚未部署）
+
+主记录：前端仓库 `docs/features/internationalization/README.md` 与 `phase-2-contract.md`。
+`GET /api/v1/i18n/capabilities?surface=web|admin` 公开返回各端语言目录，默认仅 `zh-Hans`。
+`GET/PATCH /api/v1/me/preferences` 保存本人可空 `interface_locale`，免手机号绑定或学习引导；
+后台复用 profile/preferences，`dialect` 与 `interface_locale` 按字段原子更新，后者 null 为清除。
+旧客户端仍可只写 dialect，新客户端遇到旧 API 目录 404/405 时关闭新增写入。
+错误文案语言、目标语、媒介语、语音及学习设置均不变。
+
+迁移 `20261108010000_interface_preferences` 为 users/admins 添加可空列，已有偏好时 down 拒绝丢数据。
+注意 SQLx 严格启动校验：旧二进制会因未知迁移账本拒绝启动，不能通过保留新增列直接回退旧 main。
+发布前须准备理解此迁移的兼容回退版本；本批未放宽通用迁移校验，也未部署。
