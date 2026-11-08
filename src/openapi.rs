@@ -425,6 +425,7 @@ use utoipa::{
             // user
             crate::user::handler::MeResponse,
             crate::i18n::InterfaceLocaleV1,
+            crate::i18n::InterfaceSurface,
             crate::i18n::InterfaceCapabilities,
             crate::user::preferences::UserInterfacePreferences,
             crate::user::preferences::UserInterfacePreferencesResponse,

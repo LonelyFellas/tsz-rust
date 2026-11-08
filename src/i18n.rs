@@ -46,6 +46,7 @@ impl<'de> Deserialize<'de> for InterfaceLocaleV1 {
 
 #[derive(Debug, Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
 pub struct CapabilitiesQuery {
     pub surface: InterfaceSurface,
 }
@@ -171,6 +172,28 @@ pub async fn capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use utoipa::OpenApi;
+
+    #[test]
+    fn capabilities_schema_declares_resolvable_surface_query() {
+        let spec = serde_json::to_value(crate::openapi::ApiDoc::openapi()).unwrap();
+        let surface = spec["paths"]["/api/v1/i18n/capabilities"]["get"]["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "surface")
+            .unwrap();
+        assert_eq!(surface["in"], "query");
+        assert_eq!(surface["required"], true);
+        assert_eq!(
+            surface["schema"]["$ref"],
+            "#/components/schemas/InterfaceSurface"
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["InterfaceSurface"]["enum"],
+            serde_json::json!(["web", "admin"])
+        );
+    }
     #[test]
     fn configuration_is_strict_and_surfaces_are_independent() {
         for value in ["", "zh-CN", "en", "zh-Hans,zh-Hans", "ja"] {
