@@ -336,6 +336,72 @@ fn details_for(
         )],
         ErrorCode::InvalidRequestBody => &[
             (
+                "当前没有可重新确认的词义，请先恢复来源或补足可靠干扰项",
+                "当前没有可重新确认的词义，请先恢复来源或补足可靠干扰项",
+                "目前沒有可重新確認的詞義，請先恢復來源或補足可靠干擾項",
+                "There are no senses available to reconfirm. Restore the sources or add reliable distractors first.",
+            ),
+            (
+                "单选策略无效",
+                "单选策略无效",
+                "單選策略無效",
+                "Invalid multiple-choice policy.",
+            ),
+            (
+                "所选选项不存在",
+                "所选选项不存在",
+                "找不到所選選項",
+                "The selected option does not exist.",
+            ),
+            (
+                "级别或英美档位无效",
+                "级别或英美档位无效",
+                "級別或英美檔位無效",
+                "The level or British/American variant is invalid.",
+            ),
+            (
+                "需要题干、解析和四个选项",
+                "需要题干、解析和四个选项",
+                "需要題幹、解析和四個選項",
+                "A question stem, explanation and four options are required.",
+            ),
+            (
+                "四个选项须来自不同词条且词形、档位与级别有效",
+                "四个选项须来自不同词条且词形、档位与级别有效",
+                "四個選項須來自不同詞條且詞形、檔位與級別有效",
+                "The four options must come from different entries, with valid word forms, variants and levels.",
+            ),
+            (
+                "选项之间存在相同的有效拼写",
+                "选项之间存在相同的有效拼写",
+                "選項之間存在相同的有效拼寫",
+                "The options contain identical valid spellings.",
+            ),
+            (
+                "干扰项也具有目标释义",
+                "干扰项也具有目标释义",
+                "干擾項也具有目標釋義",
+                "A distractor also has the target definition.",
+            ),
+            (
+                "正确项无效",
+                "正确项无效",
+                "正確項無效",
+                "The correct option is invalid.",
+            ),
+            (
+                "正确项必须是委托目标",
+                "正确项必须是委托目标",
+                "正確項必須是委託目標",
+                "The correct option must be the requested target.",
+            ),
+            (
+                "题干泄露正确词形",
+                "题干泄露正确词形",
+                "題幹洩露正確詞形",
+                "The question stem reveals the correct word form.",
+            ),
+            (
                 "text must be nonempty, trimmed and within limit",
                 "文本不能为空、含首尾空白或超过长度限制",
                 "文字不能為空、含首尾空白或超過長度限制",
@@ -1099,6 +1165,66 @@ fn details_for(
         )],
         ErrorCode::LearningTaskConflict => &[
             (
+                "请更新客户端后使用严格单选任务",
+                "请更新客户端后使用严格单选任务",
+                "請更新用戶端後使用嚴格單選任務",
+                "Update your client to use strict multiple-choice tasks.",
+            ),
+            (
+                "请更新客户端后使用组合题型",
+                "请更新客户端后使用组合题型",
+                "請更新用戶端後使用組合題型",
+                "Update your client to use combined question types.",
+            ),
+            (
+                "此客户端不支持拼写回退，请更新后继续",
+                "此客户端不支持拼写回退，请更新后继续",
+                "此用戶端不支援拼寫回退，請更新後繼續",
+                "This client does not support spelling fallback. Update it to continue.",
+            ),
+            (
+                "此客户端不支持单选题，请更新后继续",
+                "此客户端不支持单选题，请更新后继续",
+                "此用戶端不支援單選題，請更新後繼續",
+                "This client does not support multiple-choice questions. Update it to continue.",
+            ),
+            (
+                "请更新客户端后继续组合题型练习",
+                "请更新客户端后继续组合题型练习",
+                "請更新用戶端後繼續組合題型練習",
+                "Update your client to continue practising combined question types.",
+            ),
+            (
+                "请更新客户端后管理严格单选任务",
+                "请更新客户端后管理严格单选任务",
+                "請更新用戶端後管理嚴格單選任務",
+                "Update your client to manage strict multiple-choice tasks.",
+            ),
+            (
+                "此客户端不支持当前练习题型，请更新后继续",
+                "此客户端不支持当前练习题型，请更新后继续",
+                "此用戶端不支援目前練習題型，請更新後繼續",
+                "This client does not support the current practice question type. Update it to continue.",
+            ),
+            (
+                "单选选项已失效，请重新检查来源后继续",
+                "单选选项已失效，请重新检查来源后继续",
+                "單選選項已失效，請重新檢查來源後繼續",
+                "The multiple-choice options are no longer valid. Check the sources again before continuing.",
+            ),
+            (
+                "当前词库没有足够可靠且不含已知歧义的干扰项，请检查来源后重试",
+                "当前词库没有足够可靠且不含已知歧义的干扰项，请检查来源后重试",
+                "目前詞庫沒有足夠可靠且不含已知歧義的干擾項，請檢查來源後重試",
+                "The current lexicon does not have enough reliable distractors without known ambiguity. Check the sources and try again.",
+            ),
+            (
+                "题目快照缺失",
+                "题目快照缺失",
+                "題目快照缺失",
+                "The question snapshot is missing.",
+            ),
+            (
                 "任务版本已变化",
                 "任务版本已变化",
                 "任務版本已變更",
@@ -1245,6 +1371,12 @@ fn details_for(
         ],
         ErrorCode::LearningRunUnavailable => &[
             (
+                "题目来源已改变，请重新生成",
+                "题目来源已改变，请重新生成",
+                "題目來源已變更，請重新產生",
+                "The question sources have changed. Generate the questions again.",
+            ),
+            (
                 "判定版本不支持",
                 "判定版本不支持",
                 "不支援此判定版本",
@@ -1254,7 +1386,7 @@ fn details_for(
                 "来源已失效、任务已结束或轮次不可继续，请查看进度后明确重新开始",
                 "来源已失效、任务已结束或轮次不可继续，请查看进度后明确重新开始",
                 "來源已失效、任務已結束或輪次無法繼續，請查看進度後明確重新開始",
-                "The sources have expired, the task has ended or the run cannot continue. Check your progress, then explicitly restart.",
+                "The sources are no longer valid, the task has ended or the run cannot continue. Check your progress, then explicitly restart.",
             ),
         ],
         ErrorCode::AudioStorageNotConfigured => &[(
@@ -1264,6 +1396,18 @@ fn details_for(
             "Published audio storage is temporarily unavailable.",
         )],
         ErrorCode::SpeechStorageUnavailable => &[
+            (
+                "语音存储暂不可用",
+                "语音存储暂不可用",
+                "語音儲存暫時無法使用",
+                "Audio storage is temporarily unavailable.",
+            ),
+            (
+                "语音服务暂不可用",
+                "语音服务暂不可用",
+                "語音服務暫時無法使用",
+                "The speech service is temporarily unavailable.",
+            ),
             (
                 "测试语音存储暂不可用",
                 "测试语音存储暂不可用",
@@ -1278,6 +1422,18 @@ fn details_for(
             ),
         ],
         ErrorCode::NotFound => &[
+            (
+                "语音暂不可用",
+                "语音暂不可用",
+                "語音暫時無法使用",
+                "Audio is temporarily unavailable.",
+            ),
+            (
+                "manual operation not found",
+                "手动操作记录不存在",
+                "找不到手動操作記錄",
+                "Manual operation not found.",
+            ),
             (
                 "该题正式音频暂不可用",
                 "该题正式音频暂不可用",
@@ -1571,6 +1727,18 @@ fn details_for(
         )],
         ErrorCode::ValidationFailed => &[
             (
+                "invalid refresh request id",
+                "刷新请求标识无效",
+                "更新請求識別碼無效",
+                "Invalid refresh request identifier.",
+            ),
+            (
+                "invalid current-only refresh request",
+                "仅当前会话的刷新请求无效",
+                "僅目前工作階段的更新請求無效",
+                "Invalid request to refresh only the current session.",
+            ),
+            (
                 "语音生成参数无效",
                 "语音生成参数无效",
                 "語音產生參數無效",
@@ -1777,6 +1945,24 @@ mod tests {
     #[test]
     fn common_error_details_keep_the_reason_and_recovery_action() {
         for (code, source, hant, english) in [
+            (
+                ErrorCode::LearningTaskConflict,
+                "此客户端不支持拼写回退，请更新后继续",
+                "此用戶端不支援拼寫回退，請更新後繼續",
+                "This client does not support spelling fallback. Update it to continue.",
+            ),
+            (
+                ErrorCode::LearningTaskConflict,
+                "单选选项已失效，请重新检查来源后继续",
+                "單選選項已失效，請重新檢查來源後繼續",
+                "The multiple-choice options are no longer valid. Check the sources again before continuing.",
+            ),
+            (
+                ErrorCode::InvalidRequestBody,
+                "当前没有可重新确认的词义，请先恢复来源或补足可靠干扰项",
+                "目前沒有可重新確認的詞義，請先恢復來源或補足可靠干擾項",
+                "There are no senses available to reconfirm. Restore the sources or add reliable distractors first.",
+            ),
             (
                 ErrorCode::LearningTaskConflict,
                 "任务版本已变化",
