@@ -378,6 +378,20 @@ pub(super) async fn save_start(
     sqlx::query("INSERT INTO learning_run_start_requests(user_id,request_key,task_id,request_hash,run_id) VALUES($1,$2,$3,$4,$5)").bind(auth.subject).bind(input.idempotency_key).bind(task_id).bind(h).bind(id).execute(&mut **tx).await.map_err(AppError::internal)?;
     Ok(())
 }
+pub(crate) fn insufficient_questions(available: usize, required: i32) -> AppError {
+    AppError::conflict(
+        ErrorCode::LearningInsufficientQuestions,
+        None,
+        format!("仅有 {available} 道可出题内容，需要 {required} 道；请查看预览排除原因"),
+    )
+    .with_detail_template(
+        crate::i18n::errors::DetailTemplate::LearningInsufficientQuestions {
+            available,
+            required,
+        },
+    )
+}
+
 pub async fn start(
     pool: &PgPool,
     auth: &AuthUser,
@@ -459,14 +473,7 @@ pub async fn start(
             .unwrap_or(candidates.candidates.len() as i32);
         if count == 0 || candidates.candidates.len() < (count as usize) {
             tx.commit().await.map_err(AppError::internal)?;
-            return Err(AppError::conflict(
-                ErrorCode::LearningInsufficientQuestions,
-                None,
-                format!(
-                    "仅有 {} 道可出题内容，需要 {count} 道；请查看预览排除原因",
-                    candidates.candidates.len()
-                ),
-            ));
+            return Err(insufficient_questions(candidates.candidates.len(), count));
         }
         let seed = Uuid::now_v7();
         if t.task_type == LearningTaskType::Daily {
