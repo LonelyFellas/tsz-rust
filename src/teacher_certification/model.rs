@@ -95,6 +95,11 @@ pub struct RevokeCertification {
 
 #[derive(Serialize, FromRow, ToSchema)]
 pub struct UserNotification {
+    /// Present only for explicitly negotiated V1 output; never stored in the notification row.
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub localized: Option<crate::i18n::notifications::LocalizedNotification>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wordlist_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -22,6 +22,8 @@ flate2 = "1.1.9"
 futures-util = "0.3.33"
 getrandom = "0.4.3"
 http = "1.4.0"
+# Already locked through URL/IDNA; reuse its BCP 47 parser for interface negotiation.
+icu_locale_core = { version = "2.4.0", features = ["alloc"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 jsonwebtoken = { version = "10.4.0", default-features = false, features = [
     "aws_lc_rs",

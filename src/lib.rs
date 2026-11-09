@@ -203,6 +203,7 @@ pub fn router(state: AppState) -> Router {
                 })
                 .on_failure(()),
         )
+        .layer(middleware::from_fn_with_state(state.clone(), i18n::output::localize_request))
         .layer(middleware::from_fn(request_id_middleware));
 
     router.with_state(state)

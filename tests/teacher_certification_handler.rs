@@ -1400,3 +1400,119 @@ async fn certificate_and_identity_permissions_enforce_stored_kind_for_bytes(pool
         }
     }
 }
+
+#[sqlx::test]
+async fn notification_localization_is_a_read_time_view_and_read_retries_do_not_rewrite_rows(
+    pool: PgPool,
+) {
+    let owner = user(&pool).await;
+    let mut state = AppState::for_test(pool.clone());
+    state.interface_languages = tsz_rust::i18n::InterfaceLanguages::from_pairs(&[(
+        "I18N_WEB_SUPPORTED_LOCALES".into(),
+        "zh-Hans,zh-Hant,en-GB,en-US".into(),
+    )])
+    .unwrap();
+    let token = state.token_manager.generate(owner, "student").unwrap();
+    let reason = "词表「原始名称 {{actor}}」已被删除。已开始的学习轮次请在本轮正常截止前完成：日任务仍受当天窗口限制，长期任务最晚可在 2026-11-16 12:00（北京时间）前完成。完成后任务将结束；未开始的轮次无法再开始。";
+    let mut target = Uuid::nil();
+    for kind in [
+        "teacher_approved",
+        "teacher_rejected",
+        "teacher_revoked",
+        "wordlist_liked",
+        "wordlist_tipped",
+        "wordlist_deleted",
+    ] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO user_notifications(id,user_id,kind,reason,amount) VALUES($1,$2,$3,$4,$5)",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(kind)
+        .bind(if kind == "wordlist_deleted" {
+            reason
+        } else {
+            "原始审核原因 <b>"
+        })
+        .bind((kind == "wordlist_tipped").then_some(9_223_372_036_854_775_807i64))
+        .execute(&pool)
+        .await
+        .unwrap();
+        if kind == "wordlist_deleted" {
+            target = id;
+        }
+    }
+    async fn request(
+        state: &AppState,
+        token: &str,
+        method: &str,
+        path: &str,
+        locale: Option<&str>,
+    ) -> Value {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        if let Some(locale) = locale {
+            req = req
+                .header("X-TSZ-Localization", "v1")
+                .header(header::ACCEPT_LANGUAGE, locale);
+        }
+        let response = tsz_rust::router(state.clone())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_LANGUAGE)
+                .and_then(|v| v.to_str().ok()),
+            locale
+        );
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+    }
+    let legacy = request(&state, &token, "GET", "/api/v1/me/notifications", None).await;
+    assert_eq!(legacy["total"], 6);
+    assert!(
+        legacy["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n.get("localized").is_none())
+    );
+    for locale in ["zh-Hans", "zh-Hant", "en-GB", "en-US"] {
+        let view = request(
+            &state,
+            &token,
+            "GET",
+            "/api/v1/me/notifications",
+            Some(locale),
+        )
+        .await;
+        let mut unlocalized = view.clone();
+        for item in unlocalized["items"].as_array_mut().unwrap() {
+            item.as_object_mut().unwrap().remove("localized");
+        }
+        assert_eq!(unlocalized, legacy);
+        for item in view["items"].as_array().unwrap() {
+            assert_eq!(item["localized"]["locale"], locale);
+            assert!(!item["localized"]["title"].as_str().unwrap().is_empty());
+            if item["kind"] == "wordlist_deleted" {
+                let body = item["localized"]["body"].as_str().unwrap();
+                assert!(body.contains("原始名称 {{actor}}"));
+                assert!(body.contains("2026-11-16 12:00"));
+                assert!(!body.is_empty());
+            }
+        }
+    }
+    let path = format!("/api/v1/me/notifications/{target}/read");
+    let first = request(&state, &token, "PATCH", &path, Some("en-US")).await;
+    let retry = request(&state, &token, "PATCH", &path, Some("zh-Hant")).await;
+    assert_eq!(first["read_at"], retry["read_at"]);
+    let reread = request(&state, &token, "GET", "/api/v1/me/notifications", None).await;
+    assert_eq!(reread["unread_count"], 5);
+    let stored: (String, String, i64) = sqlx::query_as("SELECT kind,reason,(SELECT count(*) FROM user_notifications WHERE user_id=$2) FROM user_notifications WHERE id=$1").bind(target).bind(owner).fetch_one(&pool).await.unwrap();
+    assert_eq!(stored, ("wordlist_deleted".into(), reason.into(), 6));
+}
