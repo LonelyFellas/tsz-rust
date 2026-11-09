@@ -164,7 +164,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 141] = [
+    pub const ALL: [Self; 143] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -272,6 +272,8 @@ impl ErrorCode {
         Self::EntryHasInboundPublicationRefs,
         Self::EntryHasUnavailablePublicationRefs,
         Self::WordNotFound,
+        Self::SentenceNotFound,
+        Self::SentenceAssociationsUnresolved,
         Self::SentenceAssociationClientUpgradeRequired,
         Self::FormContentsClientUpgradeRequired,
         Self::PendingSentenceAssociationNotFound,
@@ -1269,7 +1271,11 @@ impl Error for AppError {
 }
 
 impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
+    fn into_response(mut self) -> Response {
+        let locale = crate::i18n::output::current_locale();
+        if let Some(locale) = locale {
+            crate::i18n::errors::localize(&mut self.response, locale);
+        }
         if let Some(source) = &self.source {
             tracing::error!(
                 error_kind = crate::safe_log::error_kind(source.as_ref()),
@@ -1283,6 +1289,9 @@ impl IntoResponse for AppError {
             header::CONTENT_TYPE,
             header::HeaderValue::from_static("application/problem+json"),
         );
+        if let Some(locale) = locale {
+            crate::i18n::output::localized_headers(locale, response.headers_mut());
+        }
         if let Some(seconds) = self.retry_after {
             response.headers_mut().insert(
                 header::RETRY_AFTER,

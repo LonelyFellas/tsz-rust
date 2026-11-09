@@ -24,7 +24,7 @@ use utoipa::{
     info(
         title = "tsz-rust API",
         version = "0.1.0",
-        description = "tsz 核心服务（Rust 版）接口文档"
+        description = "tsz 核心服务（Rust 版）接口文档。可选本地化协议：/api/v1（能力目录除外）请求同时携带 X-TSZ-Localization: v1 与 Accept-Language；缺少标记保持原响应。按 Web/Admin 目录协商，非法、不支持或停用语言回退目录默认值。本地化 Problem Details 只改变 title/detail，稳定 code/type/status/field/meta 与重试语义不变；未知安全说明保持原文。通知按当前请求语言读取时呈现，可附加 localized。实际本地化响应携带 Content-Language 与 private, no-store；API Vary 包含 X-TSZ-Localization, Accept-Language。"
     ),
     modifiers(
         &SecurityAddon,

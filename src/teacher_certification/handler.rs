@@ -118,13 +118,16 @@ pub async fn notifications(
     State(state): State<AppState>,
     auth: AuthUser,
     ApiQuery(query): ApiQuery<ListQuery>,
-) -> Result<Json<NotificationList>, AppError> {
+) -> Result<axum::response::Response, AppError> {
     let (limit, offset) = query.pagination()?;
-    let items = sqlx::query_as::<_, UserNotification>(sqlx::AssertSqlSafe(format!("{NOTIFICATION_SELECT} WHERE n.user_id=$1 ORDER BY n.created_at DESC,n.id DESC LIMIT $2 OFFSET $3")))
+    let mut items = sqlx::query_as::<_, UserNotification>(sqlx::AssertSqlSafe(format!("{NOTIFICATION_SELECT} WHERE n.user_id=$1 ORDER BY n.created_at DESC,n.id DESC LIMIT $2 OFFSET $3")))
         .bind(auth.subject).bind(limit).bind(offset).fetch_all(&state.pool).await.map_err(AppError::internal)?;
     let (total, unread_count) = sqlx::query_as::<_, (i64,i64)>("SELECT count(*), count(*) FILTER (WHERE read_at IS NULL) FROM user_notifications WHERE user_id = $1")
         .bind(auth.subject).fetch_one(&state.pool).await.map_err(AppError::internal)?;
-    Ok(Json(NotificationList {
+    for item in &mut items {
+        item.localize();
+    }
+    Ok(notification_response(NotificationList {
         items,
         total,
         unread_count,
@@ -189,14 +192,14 @@ pub async fn read_notification(
     State(state): State<AppState>,
     auth: AuthUser,
     ApiPath(id): ApiPath<Uuid>,
-) -> Result<Json<UserNotification>, AppError> {
+) -> Result<axum::response::Response, AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let updated = sqlx::query("UPDATE user_notifications SET read_at = COALESCE(read_at, now()) WHERE id = $1 AND user_id = $2")
         .bind(id).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?;
     if updated.rows_affected() == 0 {
         return Err(AppError::not_found("通知不存在"));
     }
-    let notification = sqlx::query_as::<_, UserNotification>(sqlx::AssertSqlSafe(format!(
+    let mut notification = sqlx::query_as::<_, UserNotification>(sqlx::AssertSqlSafe(format!(
         "{NOTIFICATION_SELECT} WHERE n.id=$1 AND n.user_id=$2"
     )))
     .bind(id)
@@ -205,5 +208,15 @@ pub async fn read_notification(
     .await
     .map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(Json(notification))
+    notification.localize();
+    Ok(notification_response(notification))
+}
+
+fn notification_response(value: impl serde::Serialize) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut response = Json(value).into_response();
+    if let Some(locale) = crate::i18n::output::current_locale() {
+        crate::i18n::output::localized_headers(locale, response.headers_mut());
+    }
+    response
 }
