@@ -27,39 +27,32 @@ impl Locale {
 }
 
 fn match_language(tag: &str) -> Option<Locale> {
-    let parts: Vec<_> = tag.split('-').collect();
-    if parts.is_empty()
-        || parts
-            .iter()
-            .any(|p| p.is_empty() || p.len() > 8 || !p.bytes().all(|b| b.is_ascii_alphanumeric()))
-    {
-        return None;
-    }
-    if parts[0].eq_ignore_ascii_case("zh") {
-        if parts.iter().any(|p| p.eq_ignore_ascii_case("Hans")) {
-            return Some(Locale::ZhHans);
-        }
-        if parts.iter().any(|p| p.eq_ignore_ascii_case("Hant")) {
-            return Some(Locale::ZhHant);
-        }
-        return Some(
-            if parts
-                .iter()
-                .any(|p| ["TW", "HK", "MO"].iter().any(|r| p.eq_ignore_ascii_case(r)))
-            {
+    // Read only the actual language identifier; private-use/Unicode extensions
+    // must not impersonate its script or region. Mirrors the frontend Intl.Locale path.
+    let parsed = tag.parse::<icu_locale_core::Locale>().ok()?;
+    let id = parsed.id;
+    match (id.language.as_str(), id.script.as_ref().map(|s| s.as_str())) {
+        ("zh", Some("Hans")) => Some(Locale::ZhHans),
+        ("zh", Some("Hant")) => Some(Locale::ZhHant),
+        ("zh", None) => Some(
+            if matches!(
+                id.region.as_ref().map(|r| r.as_str()),
+                Some("TW" | "HK" | "MO")
+            ) {
                 Locale::ZhHant
             } else {
                 Locale::ZhHans
             },
-        );
-    }
-    parts[0].eq_ignore_ascii_case("en").then(|| {
-        if parts.iter().any(|p| p.eq_ignore_ascii_case("US")) {
-            Locale::EnUs
-        } else {
-            Locale::EnGb
+        ),
+        ("en", None | Some("Latn")) => {
+            Some(if id.region.as_ref().map(|r| r.as_str()) == Some("US") {
+                Locale::EnUs
+            } else {
+                Locale::EnGb
+            })
         }
-    })
+        _ => None,
+    }
 }
 
 // Integer quality values avoid accepting NaN, exponent notation or out-of-range weights.
@@ -188,6 +181,15 @@ mod tests {
         headers.insert(LOCALIZATION_HEADER, HeaderValue::from_static("v1"));
         for (input, expected) in [
             ("en-US", Locale::EnUs),
+            ("en-GB-x-US", Locale::EnGb),
+            ("zh-Hant-x-Hans", Locale::ZhHant),
+            ("en-Cyrl,en-US;q=0.9", Locale::EnUs),
+            ("zh-Latn,en-US;q=0.9", Locale::EnUs),
+            ("en-US-US,en-GB;q=0.9", Locale::EnGb),
+            ("en-u-rg-uszzzz", Locale::EnGb),
+            ("zh-Hans-CN-u-nu-hanidec", Locale::ZhHans),
+            ("en-Latn-US", Locale::EnUs),
+            ("en-US-u-ca-gregory-u-nu-latn,zh-Hant;q=0.9", Locale::ZhHant),
             ("zh-TW", Locale::ZhHant),
             ("zh-Hans-TW", Locale::ZhHans),
             ("en-AU", Locale::EnGb),
