@@ -455,12 +455,12 @@ impl GeneratedAudioService {
             )
         })
         .map_err(|error| {
-            AppError::bad_request(ErrorCode::InvalidSpeechPreview, error.to_string())
+            crate::speech::model::model_error(ErrorCode::InvalidSpeechPreview, error)
         })?;
         let format = input.setting.output_format.unwrap_or_default();
         let options = options.with_output_format(format);
         let request = SynthesisRequest::new(voice.voice, options, content).map_err(|error| {
-            AppError::bad_request(ErrorCode::InvalidSpeechPreview, error.to_string())
+            crate::speech::model::model_error(ErrorCode::InvalidSpeechPreview, error)
         })?;
         let effect_hash = effect_hash(&request, &voice.provider_version)?;
         let provider = self.provider.clone().ok_or_else(unavailable)?;
@@ -912,10 +912,10 @@ pub(crate) async fn validate_bindings_with_forms(
             )
         })
         .map_err(|error| {
-            AppError::bad_request(ErrorCode::InvalidSpeechPreview, error.to_string())
+            crate::speech::model::model_error(ErrorCode::InvalidSpeechPreview, error)
         })?;
         SynthesisRequest::new(model, options, content).map_err(|error| {
-            AppError::bad_request(ErrorCode::InvalidSpeechPreview, error.to_string())
+            crate::speech::model::model_error(ErrorCode::InvalidSpeechPreview, error)
         })?;
     }
     fn uploaded_ids(value: &Value, ids: &mut Vec<Uuid>) {

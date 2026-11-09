@@ -316,10 +316,15 @@ pub async fn validate(
     if !state.smart_lexicon_v3_flags.read {
         return Err(v3_storage_unavailable());
     }
-    let response = service(&state)
+    let mut response = service(&state)
         .validate_v3(auth.subject, path.id, input)
         .await
         .map_err(map_error)?;
+    if let Some(locale) = crate::i18n::output::current_locale() {
+        for issue in &mut response.issues {
+            crate::i18n::errors::localize_issue(issue, locale);
+        }
+    }
     Ok((StatusCode::OK, Json(response)))
 }
 

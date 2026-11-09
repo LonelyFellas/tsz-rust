@@ -107,7 +107,8 @@ pub(crate) fn require_positive_revision(field: &'static str, value: i64) -> Resu
             ErrorCode::InvalidRequestBody,
             field,
             format!("{field} must be at least 1"),
-        ));
+        )
+        .with_detail_template(crate::i18n::errors::DetailTemplate::PositiveRevision { field }));
     }
     Ok(())
 }

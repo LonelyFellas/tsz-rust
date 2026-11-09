@@ -25,6 +25,19 @@ fn shared_pair() -> SharedFormsStepContentV3 {
 }
 
 #[test]
+fn invalid_content_preserves_legacy_message_and_typed_identity() {
+    let mut shared = legacy().shared_representation().unwrap();
+    let content_id = shared.contents[0].id;
+    shared.contents.push(shared.contents[0].clone());
+    let error = shared.resolve().unwrap_err();
+    assert_eq!(error.to_string(), format!("invalid content {content_id}"));
+    assert_eq!(error.0.node_location.content_id, Some(content_id));
+    assert!(
+        matches!(error.1, Some(crate::i18n::errors::IssueTemplate::InvalidContent(id)) if id == content_id)
+    );
+}
+
+#[test]
 fn reassignment_capability_is_negotiated_separately_from_shared_v1() {
     for header in [None, Some("v1"), Some("future")] {
         let mut headers = axum::http::HeaderMap::new();
