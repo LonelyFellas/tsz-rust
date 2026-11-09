@@ -296,7 +296,9 @@ pub async fn create(
         ));
     }
     if !p.can_create {
-        return Err(invalid(&p.reasons.join("；")));
+        return Err(invalid(&p.reasons.join("；")).with_detail_template(
+            crate::i18n::errors::DetailTemplate::LearningPlanReasons(p.reasons),
+        ));
     }
     let direct_key = if input.reuse_active {
         let mut scope: Vec<_> = candidates
@@ -581,7 +583,9 @@ pub async fn cycle_create(
         ));
     }
     if !p.preview.can_create {
-        return Err(invalid(&p.preview.reasons.join("；")));
+        return Err(invalid(&p.preview.reasons.join("；")).with_detail_template(
+            crate::i18n::errors::DetailTemplate::LearningPlanReasons(p.preview.reasons),
+        ));
     }
     let refreshed = if input.operation == CycleOperation::RefreshSources {
         Some(source_refresh::apply(&mut tx, &c, &candidates).await?)

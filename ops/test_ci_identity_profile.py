@@ -4,12 +4,40 @@ from pathlib import Path
 import sys
 import unittest
 import tempfile
+import tomllib
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ci_identity_profile import BATCH_COUNTS, BATCH_FIXTURES, BATCH_HTTP_REQUESTS, BATCH_TEST, PACKAGES, audit_router_pilot, audit_template_uses, instrument_core, instrument_maximum_batch, instrument_postgres, profile_lock, replace_once, summarize, summarize_maximum_batch, template_cases, validate_profile_lock
+from ci_identity_profile import BATCH_COUNTS, BATCH_FIXTURES, BATCH_HTTP_REQUESTS, BATCH_TEST, PACKAGES, audit_router_pilot, audit_template_uses, instrument_core, instrument_maximum_batch, instrument_postgres, profile_lock, profile_manifest, replace_once, summarize, summarize_maximum_batch, template_cases, validate_profile_lock
 
 
 class IdentityProfileTests(unittest.TestCase):
+    def test_profile_manifest_preserves_unrelated_patch_and_helper_target(self):
+        prefix = '[package]\nname = "fixture"\nversion = "0.1.0"\n'
+        unrelated = '[patch.crates-io]\nsqlx-sqlite = { git = "https://example.invalid/sqlx", rev = "fixed" }\n'
+        for original in [prefix, prefix + unrelated]:
+            patches = {name: f"/profile/{name}" for name in sorted(PACKAGES)}
+            helper = '\n[[bin]]\nname = "ci-identity-template"\npath = "helper.rs"\n'
+            result = tomllib.loads(profile_manifest(original, patches, helper))
+            for name in PACKAGES:
+                self.assertEqual(result["patch"]["crates-io"][name], {"path": f"/profile/{name}"})
+            if original.endswith(unrelated):
+                self.assertEqual(result["patch"]["crates-io"]["sqlx-sqlite"], {"git": "https://example.invalid/sqlx", "rev": "fixed"})
+            self.assertEqual(result["bin"], [{"name": "ci-identity-template", "path": "helper.rs"}])
+
+    def test_profile_manifest_rejects_existing_profiled_crate_override(self):
+        for name in PACKAGES:
+            with self.assertRaises(ValueError):
+                profile_manifest(f'[patch.crates-io]\n{name} = {{ path = "/other" }}\n', {}, "")
+
+    def test_profile_manifest_keeps_reviewed_git_alias_on_same_timed_core(self):
+        source = '[patch."https://github.com/launchbadge/sqlx"]\nsqlx-core = { version = "=0.9.0" }\n'
+        paths = {name: f"/profile/{name}" for name in sorted(PACKAGES)}
+        result = tomllib.loads(profile_manifest(source, paths, ""))
+        self.assertEqual(result["patch"]["https://github.com/launchbadge/sqlx"]["sqlx-core"], {"path": "/profile/sqlx-core"})
+        for invalid in [source.replace("=0.9.0", "0.9"), source.replace("launchbadge", "other")]:
+            with self.assertRaises(ValueError):
+                profile_manifest(invalid, paths, "")
+
     def test_lock_guard_allows_only_source_change_for_two_exact_versions(self):
         original = {(name, "0.9.0"): {"name": name, "version": "0.9.0", "source": "registry", "checksum": "locked", "dependencies": ["same"]} for name in PACKAGES}
         original[("other", "1.0")] = {"name": "other", "version": "1.0", "checksum": "unchanged"}

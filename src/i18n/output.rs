@@ -161,7 +161,9 @@ pub fn localized_headers(locale: Locale, headers: &mut HeaderMap) {
 mod tests {
     use super::*;
     use crate::error::{AppError, ErrorCode};
-    use axum::{Router, body::Body, http::Request as HttpRequest, routing::get};
+    use axum::{
+        Router, body::Body, http::Request as HttpRequest, response::IntoResponse, routing::get,
+    };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -171,6 +173,61 @@ mod tests {
             "zh-Hans,zh-Hant,en-GB,en-US".into(),
         )])
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn typed_details_preserve_legacy_wire_and_concurrent_locales() {
+        async fn body(error: AppError) -> (http::HeaderMap, serde_json::Value) {
+            let response = error.into_response();
+            assert_eq!(response.status(), 409);
+            let headers = response.headers().clone();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (headers, serde_json::from_slice(&bytes).unwrap())
+        }
+        fn error() -> AppError {
+            crate::learning_tasks::service::insufficient_questions(3, 20)
+                .with_meta(crate::error::ProblemMeta {
+                    current_revision: Some(9_007_199_254_740_993),
+                    ..Default::default()
+                })
+                .with_retry_after(17)
+        }
+        let (legacy_headers, legacy) = body(error()).await;
+        assert_eq!(
+            legacy["detail"],
+            "仅有 3 道可出题内容，需要 20 道；请查看预览排除原因"
+        );
+        assert!(!legacy_headers.contains_key(header::CONTENT_LANGUAGE));
+        let requests = [Locale::ZhHans, Locale::ZhHant, Locale::EnGb, Locale::EnUs].map(|locale| {
+            let legacy = legacy.clone();
+            REQUEST_LOCALE.scope(Some(locale), async move {
+                tokio::task::yield_now().await;
+                let (headers, mut localized) = body(error()).await;
+                assert_eq!(headers[header::CONTENT_LANGUAGE], locale.as_str());
+                assert_eq!(headers[header::RETRY_AFTER], "17");
+                assert_eq!(localized["code"], "learning_insufficient_questions");
+                assert_eq!(localized["meta"]["current_revision"], 9_007_199_254_740_993_i64);
+                assert_eq!(localized.as_object().unwrap().len(), 6);
+                assert_eq!(localized["detail"], match locale {
+                    Locale::ZhHans => "仅有 3 道可出题内容，需要 20 道；请查看预览排除原因",
+                    Locale::ZhHant => "僅有 3 道可出題內容，需要 20 道；請查看預覽排除原因",
+                    Locale::EnGb | Locale::EnUs => "Only 3 questions are available; 20 are required. Check the preview for exclusion reasons.",
+                });
+                let mut expected = legacy;
+                for key in ["title", "detail"] {
+                    expected.as_object_mut().unwrap().remove(key);
+                    localized.as_object_mut().unwrap().remove(key);
+                }
+                assert_eq!(localized, expected);
+
+                let response = AppError::internal(anyhow::anyhow!("password=private"))
+                    .into_response();
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                assert!(!String::from_utf8_lossy(&bytes).contains("private"));
+            })
+        });
+        futures_util::future::join_all(requests).await;
+        assert!(current_locale().is_none());
     }
 
     #[test]

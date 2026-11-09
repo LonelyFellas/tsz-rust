@@ -161,6 +161,29 @@ def profile_lock(text):
     return "\n[[package]]\n".join(blocks)
 
 
+def profile_manifest(text, patches, helper_bin):
+    sources = tomllib.loads(text).get("patch", {})
+    existing = sources.get("crates-io", {})
+    if PACKAGES.intersection(existing):
+        raise ValueError("profiled SQLx crate patches require explicit profiling review")
+    for source, entries in sources.items():
+        if source == "crates-io":
+            continue
+        for name in PACKAGES.intersection(entries):
+            if source != "https://github.com/launchbadge/sqlx" or entries[name] != {"version": "=0.9.0"}:
+                raise ValueError("profiled SQLx source aliases require explicit profiling review")
+            # The reviewed Git driver must use the same timed, registry-derived core.
+            text = replace_once(text, f'{name} = {{ version = "=0.9.0" }}',
+                                f'{name} = {{ path = {json.dumps(patches[name])} }}')
+    header = "[patch.crates-io]\n"
+    additions = "\n".join(f'{name} = {{ path = {json.dumps(path)} }}' for name, path in patches.items()) + "\n"
+    if existing or header in text:
+        text = replace_once(text, header, header + additions)
+    else:
+        text += "\n" + header + additions
+    return text + helper_bin
+
+
 def instrument_units(snapshot):
     units = []
     pattern = re.compile(r"(?m)^#\[(?:test|tokio::test(?:\([^\n]*\))?)\]\s*(?:async\s+)?fn\s+(\w+)\s*\(\s*\)\s*\{")
@@ -277,7 +300,7 @@ def prepare(root, state, shard="identity"):
         shutil.copy2(root / name, destination, follow_symlinks=False)
     original = locked_packages(root / "Cargo.lock")
     metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--offline", "--all-features", "--format-version=1"], cwd=root))
-    patches = []
+    patches = {}
     evidence = {}
     for name in sorted(PACKAGES):
         item = next(p for p in metadata["packages"] if p["name"] == name and p["version"] == "0.9.0")
@@ -303,12 +326,10 @@ def prepare(root, state, shard="identity"):
         patched = instrument_core(upstream.decode()) if name == "sqlx-core" else instrument_postgres(upstream.decode(), template_cases(root) if shard == "identity" else (), fingerprint)
         (copy / relative).write_text(patched)
         evidence[name] = {"version": "0.9.0", "upstream_sha256": hashlib.sha256(upstream).hexdigest(), "timed_sha256": hashlib.sha256(patched.encode()).hexdigest()}
-        patches.append(f'{name} = {{ path = {json.dumps(str(copy))} }}')
+        patches[name] = str(copy)
     manifest = snapshot / "Cargo.toml"
-    if "[patch.crates-io]" in manifest.read_text():
-        raise ValueError("existing crate patches require explicit profiling review")
     helper_bin = '\n[[bin]]\nname = "ci-identity-template"\npath = "ops/ci_identity_template.rs"\n' if shard == "identity" else ""
-    manifest.write_text(manifest.read_text() + helper_bin + '\n[patch.crates-io]\n' + "\n".join(patches) + "\n")
+    manifest.write_text(profile_manifest(manifest.read_text(), patches, helper_bin))
     # Preserve every pinned transitive version; only the two reviewed path sources change.
     (snapshot / "Cargo.lock").write_text(profile_lock((root / "Cargo.lock").read_text()))
     subprocess.run(["cargo", "metadata", "--locked", "--offline", "--all-features", "--format-version=1"], cwd=snapshot, check=True, stdout=subprocess.DEVNULL)

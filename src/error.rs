@@ -1079,6 +1079,12 @@ pub struct ProblemReferenceLocation {
 }
 
 #[derive(Debug)]
+struct ErrorResponse {
+    problem: ProblemDetails,
+    detail: Option<crate::i18n::errors::DetailTemplate>,
+}
+
+#[derive(Debug)]
 pub struct AppError {
     status: StatusCode,
     /// 装箱：`ProblemDetails` 有 472 字节（其中 `ProblemMeta` 独占 360），内联会让每个
@@ -1086,7 +1092,7 @@ pub struct AppError {
     /// 全仓库 62 处报错。装箱后 `AppError` 降到 24 字节，且 `ProblemDetails` 之后再长也
     /// 不会重新触发——只装箱 `meta` 只能降到 136，离阈值 128 太近，加一个字段就又炸。
     /// 错误是异常路径，一次堆分配的代价可以忽略。
-    response: Box<ProblemDetails>,
+    response: Box<ErrorResponse>,
     source: Option<anyhow::Error>,
     retry_after: Option<u64>,
 }
@@ -1109,15 +1115,18 @@ impl AppError {
         let descriptor = code.descriptor();
         Self {
             status,
-            response: Box::new(ProblemDetails {
-                type_uri: code.type_uri(),
-                title: descriptor.title,
-                status: status.as_u16(),
-                detail: message.into(),
-                code,
-                field,
-                field_issues: None,
-                meta: None,
+            response: Box::new(ErrorResponse {
+                problem: ProblemDetails {
+                    type_uri: code.type_uri(),
+                    title: descriptor.title,
+                    status: status.as_u16(),
+                    detail: message.into(),
+                    code,
+                    field,
+                    field_issues: None,
+                    meta: None,
+                },
+                detail: None,
             }),
             source: None,
             retry_after: None,
@@ -1173,6 +1182,14 @@ impl AppError {
         self
     }
 
+    pub(crate) fn with_detail_template(
+        mut self,
+        detail: crate::i18n::errors::DetailTemplate,
+    ) -> Self {
+        self.response.detail = Some(detail);
+        self
+    }
+
     pub fn unavailable(code: ErrorCode, message: impl Into<String>) -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, code, message, None)
     }
@@ -1198,6 +1215,7 @@ impl AppError {
 
     pub fn with_word_id(mut self, id: uuid::Uuid) -> Self {
         self.response
+            .problem
             .meta
             .get_or_insert_with(ProblemMeta::default)
             .word_id = Some(id);
@@ -1206,6 +1224,7 @@ impl AppError {
 
     pub fn with_sentence_id(mut self, id: uuid::Uuid) -> Self {
         self.response
+            .problem
             .meta
             .get_or_insert_with(ProblemMeta::default)
             .sentence_id = Some(id);
@@ -1213,7 +1232,7 @@ impl AppError {
     }
 
     pub fn with_meta(mut self, meta: ProblemMeta) -> Self {
-        self.response.meta = Some(meta);
+        self.response.problem.meta = Some(meta);
         self
     }
 
@@ -1221,7 +1240,7 @@ impl AppError {
         mut self,
         issues: Vec<crate::lexicon::dto::V3DraftValidationIssue>,
     ) -> Self {
-        self.response.field_issues = Some(issues);
+        self.response.problem.field_issues = Some(issues);
         self
     }
 
@@ -1254,13 +1273,13 @@ impl AppError {
     }
 
     pub fn code(&self) -> ErrorCode {
-        self.response.code
+        self.response.problem.code
     }
 }
 
 impl fmt::Display for AppError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.response.detail)
+        formatter.write_str(&self.response.problem.detail)
     }
 }
 
@@ -1274,17 +1293,20 @@ impl IntoResponse for AppError {
     fn into_response(mut self) -> Response {
         let locale = crate::i18n::output::current_locale();
         if let Some(locale) = locale {
-            crate::i18n::errors::localize(&mut self.response, locale);
+            crate::i18n::errors::localize(&mut self.response.problem, locale);
+            if let Some(detail) = &self.response.detail {
+                self.response.problem.detail = detail.render(locale);
+            }
         }
         if let Some(source) = &self.source {
             tracing::error!(
                 error_kind = crate::safe_log::error_kind(source.as_ref()),
                 status = %self.status,
-                code = ?self.response.code,
+                code = ?self.response.problem.code,
                 "request failed"
             );
         }
-        let mut response = (self.status, Json(self.response)).into_response();
+        let mut response = (self.status, Json(self.response.problem)).into_response();
         response.headers_mut().insert(
             header::CONTENT_TYPE,
             header::HeaderValue::from_static("application/problem+json"),
