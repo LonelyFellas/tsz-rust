@@ -8531,8 +8531,13 @@ async fn v3_sense_phrase_component_issues_cover_the_closed_code_catalog(pool: Pg
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = fixture_state(pool.clone(), redis)
+    let mut state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    state.interface_languages = tsz_rust::i18n::InterfaceLanguages::from_pairs(&[(
+        "I18N_ADMIN_SUPPORTED_LOCALES".into(),
+        "zh-Hans,zh-Hant,en-GB,en-US".into(),
+    )])
+    .unwrap();
     let ((), router_stats) = with_test_router(&state, async {
         let admin_id = seed_admin(&pool).await;
         let bearer = token(&state, admin_id);
@@ -8558,11 +8563,26 @@ async fn v3_sense_phrase_component_issues_cover_the_closed_code_catalog(pool: Pg
             &bearer,
             &word_entry_id,
             word_published["word"]["revision"].as_i64().unwrap(),
-            word_meanings,
+            word_meanings.clone(),
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{not_allowed}");
         let issue = sense_component_issue(&not_allowed, "phrase_component_not_allowed");
+        let localized = tsz_rust::router(state.clone())
+            .oneshot(Request::builder().method(Method::PUT).uri(format!("{ROOT}/entries/{word_entry_id}/steps/meanings"))
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-TSZ-Voice-Versions", "v1").header("X-TSZ-Spelling-Markup", "v1")
+                .header("X-TSZ-Sentence-Formatting", "v1").header("X-TSZ-Spelling-Speech", "v1")
+                .header("X-TSZ-Phoneme-Speech", "v1").header("X-TSZ-Localization", "v1")
+                .header(header::ACCEPT_LANGUAGE, "zh-Hant")
+                .body(Body::from(json!({"schema_version":3,"base_revision":word_published["word"]["revision"],"intent":"complete","content":word_meanings}).to_string())).unwrap())
+            .await.unwrap();
+        assert_eq!(localized.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let localized: Value = serde_json::from_slice(&localized.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let localized_issue = sense_component_issue(&localized, "phrase_component_not_allowed");
+        assert_eq!(localized_issue["message"], "成分用法僅適用於片語詞條");
+        assert_eq!(localized_issue["node_id"], issue["node_id"]);
         assert_eq!(issue["step"], "meanings");
         assert_eq!(issue["field"], "component_usages");
         assert_eq!(

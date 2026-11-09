@@ -361,6 +361,48 @@ pub(crate) fn localize_issue(
         return;
     }
     let first_party_english = match (issue.code.as_str(), issue.message.as_str()) {
+        (
+            "phrase_component_not_allowed",
+            "component usages are only available for phrase entries",
+        ) => Some(("成分用法仅适用于短语词条", "成分用法僅適用於片語詞條")),
+        (
+            "phrase_component_limit_exceeded",
+            "a sense may carry at most 100 phrase component usages",
+        ) => Some((
+            "一个词义最多包含 100 个短语成分用法",
+            "一個詞義最多包含 100 個片語成分用法",
+        )),
+        (
+            "phrase_component_literal_invalid",
+            "component literal must be trimmed and 1-200 characters long",
+        ) => Some((
+            "成分文本须去除首尾空白并包含 1–200 个字符",
+            "成分文字須去除首尾空白並包含 1–200 個字元",
+        )),
+        ("phrase_component_self_target", "phrase component must not target the phrase itself") => {
+            Some(("短语成分不能指向短语自身", "片語成分不能指向片語本身"))
+        }
+        (
+            "phrase_component_target_unavailable",
+            "phrase component target is missing, archived or not a V3 word",
+        ) => Some((
+            "短语成分目标不存在、已归档或不是 V3 单词",
+            "片語成分目標不存在、已封存或不是 V3 單字",
+        )),
+        (
+            "phrase_component_target_nested",
+            "phrase component target must not itself reference another phrase",
+        ) => Some((
+            "短语成分目标不能再引用其他短语",
+            "片語成分目標不能再引用其他片語",
+        )),
+        (
+            "phrase_component_target_stale",
+            "resolved component must match the target word or phrase form and sense",
+        ) => Some((
+            "已解析成分必须匹配目标单词或短语的词形和词义",
+            "已解析成分必須符合目標單字或片語的詞形和詞義",
+        )),
         ("forbidden_v3_field", "field is not part of the V3 writable contract") => {
             Some(("字段不属于 V3 可写契约", "欄位不屬於 V3 可寫契約"))
         }
@@ -696,6 +738,12 @@ pub(crate) fn localize_issue(
         return;
     }
     let translations = match (issue.code.as_str(), issue.message.as_str()) {
+        ("invalid_form_type_for_part_of_speech", "词形类型不存在或已删除，请刷新配置") => {
+            Some((
+                "詞形類型不存在或已刪除，請重新整理設定",
+                "The form type does not exist or has been deleted. Reload the configuration.",
+            ))
+        }
         (
             "meanings_storage_unsafe",
             "此内容包含新版加粗或下划线格式，请保留本地输入并刷新页面后再保存",
@@ -1057,6 +1105,13 @@ pub(crate) fn localize_issue(
 
 fn english_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'static str> {
     let (hans, hant) = match (code, source) {
+        (ErrorCode::NotFound, "avatar not found") => Some(("头像不存在", "找不到頭像")),
+        (ErrorCode::NotFound, "target admin not found") => {
+            Some(("目标管理员不存在", "找不到目標管理員"))
+        }
+        (ErrorCode::NotFound, "tag not found") => Some(("标签不存在", "找不到標籤")),
+        (ErrorCode::NotFound, "user not found") => Some(("用户不存在", "找不到使用者")),
+        (ErrorCode::NotFound, "admin not found") => Some(("管理员不存在", "找不到管理員")),
         (ErrorCode::InvalidDisplayName, "display name cannot be empty") => {
             Some(("显示名称不能为空", "顯示名稱不能為空"))
         }
@@ -1539,6 +1594,25 @@ fn english_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'sta
 
 fn extra_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'static str> {
     let (hant, english) = match (code, source) {
+        (ErrorCode::NotFound, "申请不存在") => Some(("找不到申請", "Application not found.")),
+        (ErrorCode::NotFound, "用户不存在") => Some(("找不到使用者", "User not found.")),
+        (ErrorCode::NotFound, "音频暂不可用") => {
+            Some(("音訊暫時無法使用", "Audio is temporarily unavailable."))
+        }
+        (
+            ErrorCode::InvalidRequestBody,
+            "此内容包含新版加粗或下划线格式，请保留本地输入并刷新页面后再保存",
+        ) => Some((
+            "此內容包含新版粗體或底線格式，請保留本機輸入並重新整理頁面後再儲存",
+            "This content uses newer bold or underline formatting. Preserve your local input and reload before saving.",
+        )),
+        (
+            ErrorCode::InvalidRequestBody,
+            "此内容包含新版文本配音版本，请保留本地输入并刷新页面后再保存",
+        ) => Some((
+            "此內容包含新版文字配音版本，請保留本機輸入並重新整理頁面後再儲存",
+            "This content uses newer text dubbing versions. Preserve your local input and reload before saving.",
+        )),
         (
             ErrorCode::InvalidSpeechPreview | ErrorCode::InvalidRequestBody,
             "该模型暂仅支持原速、原调、原音量的自然朗读，不支持风格、停顿或指定音素",
@@ -4060,6 +4134,31 @@ mod tests {
             issue.message,
             format!("文本或发音变体最多引用 {limit} 条音频")
         );
+        issue.code = V3ValidationIssueCode::PhraseComponentTargetUnavailable;
+        issue.message = "phrase component target is missing, archived or not a V3 word".into();
+        let mut response_issue = issue.clone();
+        localize_issue(&mut response_issue, Locale::ZhHant);
+        assert_eq!(
+            response_issue.message,
+            "片語成分目標不存在、已封存或不是 V3 單字"
+        );
+        let mut problem = ProblemDetails {
+            type_uri: ErrorCode::ValidationFailed.type_uri(),
+            title: "Validation failed",
+            status: 422,
+            detail: "V3 draft validation failed".into(),
+            code: ErrorCode::ValidationFailed,
+            field: None,
+            field_issues: Some(vec![issue.clone()]),
+            meta: None,
+        };
+        localize(&mut problem, Locale::ZhHans);
+        let failed_issue = &problem.field_issues.unwrap()[0];
+        assert_eq!(
+            failed_issue.message,
+            "短语成分目标不存在、已归档或不是 V3 单词"
+        );
+        assert_eq!(failed_issue.node_id, response_issue.node_id);
         issue.message = "供应商原文".into();
         localize_issue(&mut issue, Locale::EnUs);
         assert_eq!(issue.message, "供应商原文");
@@ -4067,6 +4166,24 @@ mod tests {
 
     #[test]
     fn extra_details_require_exact_code_and_source() {
+        for source in [
+            crate::lexicon::sentence_formatting::UPGRADE_MESSAGE,
+            crate::lexicon::voice_versions::UPGRADE_MESSAGE,
+        ] {
+            assert!(
+                detail(ErrorCode::InvalidRequestBody, source, Locale::EnUs)
+                    .unwrap()
+                    .contains("Preserve your local input")
+            );
+        }
+        assert_eq!(
+            detail(ErrorCode::NotFound, "申请不存在", Locale::EnUs),
+            Some("Application not found.")
+        );
+        assert_eq!(
+            detail(ErrorCode::NotFound, "user not found", Locale::ZhHans),
+            Some("用户不存在")
+        );
         let source = "音频存储暂不可用，请使用相同请求重试";
         assert_eq!(
             detail(ErrorCode::SpeechStorageUnavailable, source, Locale::EnUs),
