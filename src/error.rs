@@ -1082,6 +1082,7 @@ pub struct ProblemReferenceLocation {
 struct ErrorResponse {
     problem: ProblemDetails,
     detail: Option<crate::i18n::errors::DetailTemplate>,
+    issue_detail: Option<crate::i18n::errors::IssueTemplate>,
 }
 
 #[derive(Debug)]
@@ -1127,6 +1128,7 @@ impl AppError {
                     meta: None,
                 },
                 detail: None,
+                issue_detail: None,
             }),
             source: None,
             retry_after: None,
@@ -1187,6 +1189,14 @@ impl AppError {
         detail: crate::i18n::errors::DetailTemplate,
     ) -> Self {
         self.response.detail = Some(detail);
+        self
+    }
+
+    pub(crate) fn with_issue_template(
+        mut self,
+        detail: Option<crate::i18n::errors::IssueTemplate>,
+    ) -> Self {
+        self.response.issue_detail = detail;
         self
     }
 
@@ -1296,6 +1306,14 @@ impl IntoResponse for AppError {
             crate::i18n::errors::localize(&mut self.response.problem, locale);
             if let Some(detail) = &self.response.detail {
                 self.response.problem.detail = detail.render(locale);
+            }
+            if let (Some(template), Some(issues)) = (
+                &self.response.issue_detail,
+                &mut self.response.problem.field_issues,
+            ) && let Some(issue) = issues.first_mut()
+                && let Some(message) = template.render(locale)
+            {
+                issue.message = message;
             }
         }
         if let Some(source) = &self.source {

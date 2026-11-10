@@ -35,6 +35,22 @@ pub enum SpeechModelError {
     UnsupportedModelCapability,
 }
 
+pub(crate) fn model_error(
+    code: crate::error::ErrorCode,
+    error: SpeechModelError,
+) -> crate::error::AppError {
+    let field = match &error {
+        SpeechModelError::InvalidVoiceField { field } => Some(*field),
+        _ => None,
+    };
+    let result = crate::error::AppError::bad_request(code, error.to_string());
+    match field {
+        Some(field) => result
+            .with_detail_template(crate::i18n::errors::DetailTemplate::InvalidVoiceField { field }),
+        None => result,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Voice {
     provider: String,

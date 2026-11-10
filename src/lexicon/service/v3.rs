@@ -4219,7 +4219,7 @@ fn preserve_missing_sense_component_usages(
 }
 
 /// 单个正文或发音变体最多挂几条录音，与 DTO 的 `max_items` 一致。
-const MAX_VARIANT_AUDIO_ASSETS: usize = 8;
+pub(crate) const MAX_VARIANT_AUDIO_ASSETS: usize = 8;
 
 /// 按草稿内容重建音频资产的引用行。整条删掉再插，与 `replace_v3_sense_component_usages` 同款：
 /// 词义保存本来就是整块替换，增量对账只会多一份出错的可能。

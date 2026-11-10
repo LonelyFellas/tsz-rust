@@ -509,9 +509,12 @@ fn expand_variant(
     binding: &FormVariantBindingV3,
     dialect: &str,
     all_nodes: &mut HashSet<Uuid>,
-) -> Result<Value, String> {
+) -> Result<Value, MappingMessage> {
     if content.id != binding.content_slot_id || !all_nodes.insert(binding.id) {
-        return Err(format!("invalid variant binding {}", binding.id));
+        return Err(MappingMessage::typed(
+            format!("invalid variant binding {}", binding.id),
+            crate::i18n::errors::IssueTemplate::InvalidVariantBinding(binding.id),
+        ));
     }
     let slots: HashMap<_, _> = content
         .pronunciations
@@ -519,18 +522,24 @@ fn expand_variant(
         .map(|row| (row.id, row))
         .collect();
     if binding.pronunciations.len() != slots.len() {
-        return Err(format!("incomplete pronunciation mapping {}", binding.id));
+        return Err(MappingMessage::typed(
+            format!("incomplete pronunciation mapping {}", binding.id),
+            crate::i18n::errors::IssueTemplate::IncompletePronunciationMapping(binding.id),
+        ));
     }
     let mut mapped = HashSet::new();
     let mut references = HashMap::new();
     for row in &binding.pronunciations {
         if !mapped.insert(row.content_slot_id) || !all_nodes.insert(row.id) {
-            return Err(format!("duplicate pronunciation binding {}", row.id));
+            return Err(MappingMessage::typed(
+                format!("duplicate pronunciation binding {}", row.id),
+                crate::i18n::errors::IssueTemplate::DuplicatePronunciationBinding(row.id),
+            ));
         }
         if !slots.contains_key(&row.content_slot_id) {
-            return Err(format!(
-                "unknown pronunciation slot {}",
-                row.content_slot_id
+            return Err(MappingMessage::typed(
+                format!("unknown pronunciation slot {}", row.content_slot_id),
+                crate::i18n::errors::IssueTemplate::UnknownPronunciationSlot(row.content_slot_id),
             ));
         }
         references.insert(row.content_slot_id, row.id);
@@ -544,26 +553,59 @@ fn expand_variant(
             pronunciation
         })
         .collect();
-    let mut value = serde_json::to_value(content).map_err(|e| e.to_string())?;
-    let object = value.as_object_mut().ok_or("invalid content")?;
+    let mut value =
+        serde_json::to_value(content).map_err(|e| MappingMessage::from(e.to_string()))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| MappingMessage::from("invalid content"))?;
     object.insert("id".into(), serde_json::json!(binding.id));
     object.insert("dialect".into(), serde_json::json!(dialect));
     object.insert("is_regular".into(), serde_json::json!(binding.is_regular));
     object.insert(
         "pronunciations".into(),
-        serde_json::to_value(rows).map_err(|e| e.to_string())?,
+        serde_json::to_value(rows).map_err(|e| MappingMessage::from(e.to_string()))?,
     );
     if binding.component_usages.was_present() {
         object.insert(
             "component_usages".into(),
-            serde_json::to_value(&binding.component_usages).map_err(|e| e.to_string())?,
+            serde_json::to_value(&binding.component_usages)
+                .map_err(|e| MappingMessage::from(e.to_string()))?,
         );
     }
     Ok(value)
 }
 
 #[derive(Debug)]
-pub(crate) struct MappingError(Box<V3DraftValidationIssue>);
+pub(crate) struct MappingError(
+    Box<V3DraftValidationIssue>,
+    Option<crate::i18n::errors::IssueTemplate>,
+);
+
+struct MappingMessage {
+    original: String,
+    template: Option<crate::i18n::errors::IssueTemplate>,
+}
+impl MappingMessage {
+    fn typed(original: String, template: crate::i18n::errors::IssueTemplate) -> Self {
+        Self {
+            original,
+            template: Some(template),
+        }
+    }
+}
+impl From<String> for MappingMessage {
+    fn from(original: String) -> Self {
+        Self {
+            original,
+            template: None,
+        }
+    }
+}
+impl From<&str> for MappingMessage {
+    fn from(original: &str) -> Self {
+        original.to_owned().into()
+    }
+}
 
 impl std::fmt::Display for MappingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -578,11 +620,12 @@ impl MappingError {
             "invalid shared form mapping",
         )
         .with_v3_field_issues(vec![*self.0])
+        .with_issue_template(self.1)
     }
 }
 
 fn mapping_error(
-    message: String,
+    message: MappingMessage,
     content_id: Option<Uuid>,
     pos: Option<&SharedPosFormsV3>,
     binding: Option<&FormContentBindingV3>,
@@ -601,49 +644,52 @@ fn mapping_error(
         .or_else(|| binding.map(|binding| binding.id))
         .or(content_id)
         .unwrap_or_default();
-    MappingError(Box::new(V3DraftValidationIssue {
-        schema_version: 3,
-        step: PersistedWordStep::Forms,
-        node_id,
-        field: if variant.is_some() {
-            "regional_bindings"
-        } else {
-            "content_id"
-        }
-        .into(),
-        code: V3ValidationIssueCode::FormContentMappingInvalid,
-        message,
-        node_location: V3DraftNodeLocation {
-            content_id,
-            content_slot_id: variant.map(|variant| variant.content_slot_id),
-            node_role: "forms.content".into(),
-            ancestor_node_ids: [
-                pos.map(|pos| pos.pos_id),
-                group.map(|group| group.id),
-                binding.map(|binding| binding.id),
-            ]
-            .into_iter()
-            .flatten()
-            .filter(|id| *id != node_id)
-            .collect(),
-            pos_id: pos.map(|pos| pos.pos_id),
-            form_group_id: group.map(|group| group.id),
-            membership_id: group
-                .zip(binding)
-                .and_then(|(group, binding)| {
-                    group
-                        .members
-                        .iter()
-                        .find(|member| member.form_id == binding.id)
-                })
-                .map(|member| member.id),
-            form_id: binding.map(|binding| binding.id),
-            variant_id: variant.map(|variant| variant.id),
-            pronunciation_id: None,
-            form_type: binding.map(|binding| binding.form_type.clone()),
-            dialect: None,
-        },
-    }))
+    MappingError(
+        Box::new(V3DraftValidationIssue {
+            schema_version: 3,
+            step: PersistedWordStep::Forms,
+            node_id,
+            field: if variant.is_some() {
+                "regional_bindings"
+            } else {
+                "content_id"
+            }
+            .into(),
+            code: V3ValidationIssueCode::FormContentMappingInvalid,
+            message: message.original,
+            node_location: V3DraftNodeLocation {
+                content_id,
+                content_slot_id: variant.map(|variant| variant.content_slot_id),
+                node_role: "forms.content".into(),
+                ancestor_node_ids: [
+                    pos.map(|pos| pos.pos_id),
+                    group.map(|group| group.id),
+                    binding.map(|binding| binding.id),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|id| *id != node_id)
+                .collect(),
+                pos_id: pos.map(|pos| pos.pos_id),
+                form_group_id: group.map(|group| group.id),
+                membership_id: group
+                    .zip(binding)
+                    .and_then(|(group, binding)| {
+                        group
+                            .members
+                            .iter()
+                            .find(|member| member.form_id == binding.id)
+                    })
+                    .map(|member| member.id),
+                form_id: binding.map(|binding| binding.id),
+                variant_id: variant.map(|variant| variant.id),
+                pronunciation_id: None,
+                form_type: binding.map(|binding| binding.form_type.clone()),
+                dialect: None,
+            },
+        }),
+        message.template,
+    )
 }
 
 fn pronunciation_slots(
@@ -660,7 +706,7 @@ fn pronunciation_slots(
 
 impl SharedFormsStepContentV3 {
     pub(crate) fn resolve(self) -> Result<DraftFormsStepContentV3, MappingError> {
-        let content_error = |content_id: Uuid, message: String| {
+        let content_error = |content_id: Uuid, message: MappingMessage| {
             let context = self.pos.iter().find_map(|pos| {
                 pos.forms
                     .iter()
@@ -681,7 +727,10 @@ impl SharedFormsStepContentV3 {
             if !slots.insert(content.id) || !content.dialect_rules.is_valid() {
                 return Err(content_error(
                     content.id,
-                    format!("invalid content {}", content.id),
+                    MappingMessage::typed(
+                        format!("invalid content {}", content.id),
+                        crate::i18n::errors::IssueTemplate::InvalidContent(content.id),
+                    ),
                 ));
             }
             let variants = content
@@ -699,7 +748,10 @@ impl SharedFormsStepContentV3 {
                 {
                     return Err(content_error(
                         content.id,
-                        format!("duplicate content slot {}", variant.id),
+                        MappingMessage::typed(
+                            format!("duplicate content slot {}", variant.id),
+                            crate::i18n::errors::IssueTemplate::DuplicateContentSlot(variant.id),
+                        ),
                     ));
                 }
             }
@@ -802,9 +854,15 @@ impl SharedFormsStepContentV3 {
                     )
                 };
                 let content = contents.get(&binding.content_id).ok_or_else(|| {
-                    error(format!(
-                        "unknown content {} for form {}",
-                        binding.content_id, binding.id
+                    error(MappingMessage::typed(
+                        format!(
+                            "unknown content {} for form {}",
+                            binding.content_id, binding.id
+                        ),
+                        crate::i18n::errors::IssueTemplate::UnknownContent {
+                            content: binding.content_id,
+                            form: binding.id,
+                        },
                     ))
                 })?;
                 let expand = |content,
@@ -884,9 +942,9 @@ impl SharedFormsStepContentV3 {
                         ],
                     ),
                     _ => {
-                        return Err(error(format!(
-                            "regional mapping differs for form {}",
-                            binding.id
+                        return Err(error(MappingMessage::typed(
+                            format!("regional mapping differs for form {}", binding.id),
+                            crate::i18n::errors::IssueTemplate::RegionalMappingDiffers(binding.id),
                         )));
                     }
                 };
@@ -898,7 +956,7 @@ impl SharedFormsStepContentV3 {
                     id: binding.id,
                     form_type: binding.form_type.clone(),
                     regional_variants: serde_json::from_value(regional)
-                        .map_err(|e| error(e.to_string()))?,
+                        .map_err(|e| error(e.to_string().into()))?,
                 });
             }
             let mut groups = Vec::new();
@@ -912,7 +970,10 @@ impl SharedFormsStepContentV3 {
                         && !labels.insert((binding.content_id, binding.form_type.as_str()))
                     {
                         return Err(mapping_error(
-                            format!("duplicate content label in group {}", group.id),
+                            MappingMessage::typed(
+                                format!("duplicate content label in group {}", group.id),
+                                crate::i18n::errors::IssueTemplate::DuplicateContentLabel(group.id),
+                            ),
                             Some(binding.content_id),
                             Some(pos),
                             Some(binding),

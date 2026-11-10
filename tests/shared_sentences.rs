@@ -886,7 +886,12 @@ async fn rejects_invalid_targets_positions_and_foreign_draft_without_partial_wri
 async fn named_voice_versions_survive_shared_sentence_save_and_protect_legacy_writes(pool: PgPool) {
     let owner = admin(&pool).await;
     let source = entry(&pool, owner, "wonderful").await;
-    let state = AppState::for_test(pool.clone());
+    let mut state = AppState::for_test(pool.clone());
+    state.interface_languages = tsz_rust::i18n::InterfaceLanguages::from_pairs(&[(
+        "I18N_ADMIN_SUPPORTED_LOCALES".into(),
+        "zh-Hans,zh-Hant,en-GB,en-US".into(),
+    )])
+    .unwrap();
     let mut proposed = content(source);
     let profile = json!({"voices":[
         {"voice_id":"sonia","enabled":false,"rate_percent":-25,"version_id":Uuid::now_v7(),"version_name":"慢读","locale":"en-GB"},
@@ -941,7 +946,7 @@ async fn named_voice_versions_survive_shared_sentence_save_and_protect_legacy_wr
     let legacy: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert!(!legacy["content"].to_string().contains("version_id"));
-    let response = tsz_rust::router(state)
+    let response = tsz_rust::router(state.clone())
         .oneshot(
             Request::builder()
                 .method(Method::PUT)
@@ -957,6 +962,40 @@ async fn named_voice_versions_survive_shared_sentence_save_and_protect_legacy_wr
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let legacy_error: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(
+        legacy_error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("保留本地输入")
+    );
+    let response = tsz_rust::router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("{ROOT}/{id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-tsz-localization", "v1")
+                .header(header::ACCEPT_LANGUAGE, "en-US")
+                .body(Body::from(
+                    json!({"base_revision":saved["revision"],"content":legacy["content"]})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let localized: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(
+        localized["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve your local input")
+    );
 }
 
 #[sqlx::test]

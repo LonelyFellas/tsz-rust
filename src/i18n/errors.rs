@@ -181,13 +181,116 @@ pub fn title(code: ErrorCode, locale: Locale) -> &'static str {
 /// Internal display context; never serialized or included in OpenAPI.
 #[derive(Debug)]
 pub(crate) enum DetailTemplate {
+    PositiveRevision { field: &'static str },
+    InvalidVoiceField { field: &'static str },
     LearningInsufficientQuestions { available: usize, required: i32 },
     LearningPlanReasons(Vec<String>),
+}
+
+#[derive(Debug)]
+pub(crate) enum IssueTemplate {
+    InvalidContent(uuid::Uuid),
+    DuplicateContentSlot(uuid::Uuid),
+    InvalidVariantBinding(uuid::Uuid),
+    IncompletePronunciationMapping(uuid::Uuid),
+    DuplicatePronunciationBinding(uuid::Uuid),
+    UnknownPronunciationSlot(uuid::Uuid),
+    UnknownContent {
+        content: uuid::Uuid,
+        form: uuid::Uuid,
+    },
+    RegionalMappingDiffers(uuid::Uuid),
+    DuplicateContentLabel(uuid::Uuid),
+}
+
+impl IssueTemplate {
+    pub(crate) fn render(&self, locale: Locale) -> Option<String> {
+        let hant = match locale {
+            Locale::ZhHans => false,
+            Locale::ZhHant => true,
+            Locale::EnGb | Locale::EnUs => return None,
+        };
+        Some(match self {
+            Self::InvalidContent(id) => {
+                if hant {
+                    format!("內容 {id} 無效")
+                } else {
+                    format!("内容 {id} 无效")
+                }
+            }
+            Self::DuplicateContentSlot(id) => {
+                if hant {
+                    format!("內容槽位 {id} 重複")
+                } else {
+                    format!("内容槽位 {id} 重复")
+                }
+            }
+            Self::InvalidVariantBinding(id) => {
+                if hant {
+                    format!("變體綁定 {id} 無效")
+                } else {
+                    format!("变体绑定 {id} 无效")
+                }
+            }
+            Self::IncompletePronunciationMapping(id) => {
+                if hant {
+                    format!("發音對應 {id} 不完整")
+                } else {
+                    format!("发音映射 {id} 不完整")
+                }
+            }
+            Self::DuplicatePronunciationBinding(id) => {
+                if hant {
+                    format!("發音綁定 {id} 重複")
+                } else {
+                    format!("发音绑定 {id} 重复")
+                }
+            }
+            Self::UnknownPronunciationSlot(id) => {
+                if hant {
+                    format!("找不到發音槽位 {id}")
+                } else {
+                    format!("找不到发音槽位 {id}")
+                }
+            }
+            Self::UnknownContent { content, form } => {
+                if hant {
+                    format!("詞形 {form} 的內容 {content} 不存在")
+                } else {
+                    format!("词形 {form} 的内容 {content} 不存在")
+                }
+            }
+            Self::RegionalMappingDiffers(id) => {
+                if hant {
+                    format!("詞形 {id} 的地區對應不一致")
+                } else {
+                    format!("词形 {id} 的地区映射不一致")
+                }
+            }
+            Self::DuplicateContentLabel(id) => {
+                if hant {
+                    format!("詞形組 {id} 中的內容標籤重複")
+                } else {
+                    format!("词形组 {id} 中的内容标签重复")
+                }
+            }
+        })
+    }
 }
 
 impl DetailTemplate {
     pub(crate) fn render(&self, locale: Locale) -> String {
         match self {
+            Self::InvalidVoiceField { field } => match locale {
+                Locale::ZhHans => format!("音色字段 {field} 无效"),
+                Locale::ZhHant => format!("音色欄位 {field} 無效"),
+                Locale::EnGb | Locale::EnUs => format!("voice field '{field}' is invalid"),
+            },
+            Self::PositiveRevision { field } => match locale {
+                Locale::ZhHans => format!("{field} 必须至少为 1"),
+                Locale::ZhHant => format!("{field} 必須至少為 1"),
+                Locale::EnGb | Locale::EnUs => format!("{field} must be at least 1"),
+            },
             Self::LearningInsufficientQuestions {
                 available,
                 required,
@@ -227,21 +330,1918 @@ pub fn localize(problem: &mut ProblemDetails, locale: Locale) {
     if let Some(detail) = detail(problem.code, &problem.detail, locale) {
         problem.detail = detail.to_owned();
     }
+    if let Some(issues) = &mut problem.field_issues {
+        for issue in issues {
+            localize_issue(issue, locale);
+        }
+    }
+}
+
+/// Only first-party diagnostics registered by code and exact source are translated.
+pub(crate) fn localize_issue(
+    issue: &mut crate::lexicon::dto::V3DraftValidationIssue,
+    locale: Locale,
+) {
+    let audio_limit = crate::lexicon::service::v3::MAX_VARIANT_AUDIO_ASSETS;
+    if issue.code.as_str() == "audio_asset_invalid"
+        && issue.message
+            == format!(
+                "a text or pronunciation variant may reference at most {audio_limit} audio assets"
+            )
+    {
+        match locale {
+            Locale::ZhHans => {
+                issue.message = format!("文本或发音变体最多引用 {audio_limit} 条音频")
+            }
+            Locale::ZhHant => {
+                issue.message = format!("文字或發音變體最多引用 {audio_limit} 條音訊")
+            }
+            Locale::EnGb | Locale::EnUs => {}
+        }
+        return;
+    }
+    let first_party_english = match (issue.code.as_str(), issue.message.as_str()) {
+        (
+            "phrase_component_not_allowed",
+            "component usages are only available for phrase entries",
+        ) => Some(("成分用法仅适用于短语词条", "成分用法僅適用於片語詞條")),
+        (
+            "phrase_component_limit_exceeded",
+            "a sense may carry at most 100 phrase component usages",
+        ) => Some((
+            "一个词义最多包含 100 个短语成分用法",
+            "一個詞義最多包含 100 個片語成分用法",
+        )),
+        (
+            "phrase_component_literal_invalid",
+            "component literal must be trimmed and 1-200 characters long",
+        ) => Some((
+            "成分文本须去除首尾空白并包含 1–200 个字符",
+            "成分文字須去除首尾空白並包含 1–200 個字元",
+        )),
+        ("phrase_component_self_target", "phrase component must not target the phrase itself") => {
+            Some(("短语成分不能指向短语自身", "片語成分不能指向片語本身"))
+        }
+        (
+            "phrase_component_target_unavailable",
+            "phrase component target is missing, archived or not a V3 word",
+        ) => Some((
+            "短语成分目标不存在、已归档或不是 V3 单词",
+            "片語成分目標不存在、已封存或不是 V3 單字",
+        )),
+        (
+            "phrase_component_target_nested",
+            "phrase component target must not itself reference another phrase",
+        ) => Some((
+            "短语成分目标不能再引用其他短语",
+            "片語成分目標不能再引用其他片語",
+        )),
+        (
+            "phrase_component_target_stale",
+            "resolved component must match the target word or phrase form and sense",
+        ) => Some((
+            "已解析成分必须匹配目标单词或短语的词形和词义",
+            "已解析成分必須符合目標單字或片語的詞形和詞義",
+        )),
+        ("forbidden_v3_field", "field is not part of the V3 writable contract") => {
+            Some(("字段不属于 V3 可写契约", "欄位不屬於 V3 可寫契約"))
+        }
+        (
+            "audio_asset_invalid",
+            "a text or pronunciation variant must not reference the same audio asset twice",
+        ) => Some((
+            "文本或发音变体不能重复引用同一音频",
+            "文字或發音變體不能重複引用同一音訊",
+        )),
+        ("audio_asset_invalid", "audio asset does not exist") => {
+            Some(("音频资源不存在", "找不到音訊資源"))
+        }
+        ("audio_asset_invalid", "audio asset is already used by another entry") => {
+            Some(("音频资源已被其他词条使用", "音訊資源已被其他詞條使用"))
+        }
+        ("form_content_mapping_invalid", "too many pronunciation mappings") => {
+            Some(("发音映射过多", "發音對應過多"))
+        }
+        ("form_content_mapping_invalid", "duplicate pronunciation mapping ID") => {
+            Some(("发音映射 ID 重复", "發音對應 ID 重複"))
+        }
+        ("form_content_mapping_invalid", "invalid pronunciation slot correspondence") => {
+            Some(("发音槽位对应关系无效", "發音槽位對應關係無效"))
+        }
+        ("form_content_mapping_invalid", "pronunciation slot identity differs") => {
+            Some(("发音槽位标识不一致", "發音槽位識別碼不一致"))
+        }
+        ("form_content_mapping_invalid", "pronunciation correspondence requires two regions") => {
+            Some(("发音对应关系需要两个地区", "發音對應關係需要兩個地區"))
+        }
+        (
+            "form_content_mapping_invalid",
+            "pronunciation mapping ID collides with a content slot",
+        ) => Some(("发音映射 ID 与内容槽位冲突", "發音對應 ID 與內容槽位衝突")),
+        ("form_content_mapping_invalid", "shared content exceeds node limit") => {
+            Some(("共享内容超过节点上限", "共用內容超過節點上限"))
+        }
+        (
+            "form_content_mapping_invalid",
+            "each dialect requires a complete nonempty spelling list",
+        ) => Some((
+            "每个方言都需要完整且非空的拼写列表",
+            "每個方言都需要完整且非空的拼寫清單",
+        )),
+        ("form_content_mapping_invalid", "duplicate spelling mapping") => {
+            Some(("拼写映射重复", "拼寫對應重複"))
+        }
+        ("form_content_mapping_invalid", "missing spelling mapping") => {
+            Some(("缺少拼写映射", "缺少拼寫對應"))
+        }
+        ("form_content_mapping_invalid", "content requires at least one binding") => {
+            Some(("内容至少需要一个绑定", "內容至少需要一個綁定"))
+        }
+        (
+            "relation_target_shape_invalid",
+            "relation target must provide both entry and sense, or neither",
+        ) => Some((
+            "关联目标必须同时提供词条和词义，或均不提供",
+            "關聯目標必須同時提供詞條和詞義，或均不提供",
+        )),
+        (
+            "content_limit_exceeded",
+            "pronunciation field exceeds the shared 200-codepoint limit",
+        ) => Some((
+            "发音字段超过 200 个 Unicode 码点的上限",
+            "發音欄位超過 200 個 Unicode 碼點的上限",
+        )),
+        (
+            "phonetic_rich_text_invalid",
+            "phonetic rich text must match the plain field and contain valid annotations",
+        ) => Some((
+            "音标富文本必须与普通字段一致且标注有效",
+            "音標富文字必須與一般欄位一致且標註有效",
+        )),
+        (
+            "phonetic_rich_text_invalid",
+            "synthesis settings must match spelling and contain only valid word-boundary pauses",
+        ) => Some((
+            "合成设置必须与拼写一致，且只包含有效的单词边界停顿",
+            "合成設定必須與拼寫一致，且只包含有效的單字邊界停頓",
+        )),
+        (
+            "content_limit_exceeded",
+            "synthesis input exceeds its length limit or contains control characters",
+        ) => Some((
+            "合成输入超过长度上限或包含控制字符",
+            "合成輸入超過長度上限或包含控制字元",
+        )),
+        (
+            "pronunciation_required",
+            "selected phoneme accent must be confirmed and match the regional variant",
+        ) => Some((
+            "所选音素口音必须已确认且与地区变体一致",
+            "所選音素口音必須已確認且與地區變體一致",
+        )),
+        ("pronunciation_required", "configured synthesis requires the selected phoneme input") => {
+            Some((
+                "已配置的合成需要所选音素输入",
+                "已設定的合成需要所選音素輸入",
+            ))
+        }
+        ("pronunciation_required", "a complete pronunciation requires all fields") => {
+            Some(("完整发音需要填写所有字段", "完整發音需要填寫所有欄位"))
+        }
+        ("duplicate_node_id", "the same stable UUID appears more than once") => {
+            Some(("同一稳定 UUID 出现多次", "同一穩定 UUID 出現多次"))
+        }
+        ("duplicate_node_id", "the same stable UUID is used for different node roles") => Some((
+            "同一稳定 UUID 被用于不同节点角色",
+            "同一穩定 UUID 被用於不同節點角色",
+        )),
+        ("sense_form_group_invalid", "too many form group bindings") => {
+            Some(("词形组绑定过多", "詞形組綁定過多"))
+        }
+        (
+            "sense_form_group_invalid",
+            "form groups must be distinct dedicated groups of the same part of speech",
+        ) => Some((
+            "词形组必须是同一词性下互不重复的专用组",
+            "詞形組必須是同一詞性下互不重複的專用組",
+        )),
+        (
+            "sense_form_group_required",
+            "a sense without a dedicated form group requires a general form group in its part of speech",
+        ) => Some((
+            "没有专用词形组的词义需要其词性下的通用词形组",
+            "沒有專用詞形組的詞義需要其詞性下的通用詞形組",
+        )),
+        ("content_limit_exceeded", "entry content exceeds the shared 2000-node limit") => Some((
+            "词条内容超过 2000 个节点的共享上限",
+            "詞條內容超過 2000 個節點的共用上限",
+        )),
+        (
+            "meanings_storage_unsafe",
+            "sense group rich text must match name_en and contain valid annotations",
+        ) => Some((
+            "语义区间富文本必须与 name_en 一致且标注有效",
+            "語義區間富文字必須與 name_en 一致且標註有效",
+        )),
+        ("content_limit_exceeded", "sense group name exceeds the shared 200-codepoint limit") => {
+            Some((
+                "语义区间名称超过 200 个 Unicode 码点的上限",
+                "語義區間名稱超過 200 個 Unicode 碼點的上限",
+            ))
+        }
+        ("sentence_translation_required", "Chinese translation content is required") => {
+            Some(("请填写中文译文", "請填寫中文譯文"))
+        }
+        ("sentence_translation_invalid", "Chinese translation RichText is invalid") => {
+            Some(("中文译文富文本无效", "中文譯文富文字無效"))
+        }
+        ("definition_invalid", "invalid reading link ranges") => {
+            Some(("读法关联范围无效", "讀法關聯範圍無效"))
+        }
+        ("definition_invalid", "invalid text link ranges") => {
+            Some(("文本关联范围无效", "文字關聯範圍無效"))
+        }
+        (
+            "voice_profile_invalid",
+            "voice profile must list at most 2000 distinct non-empty voice ids, each with a rate within -50..=100",
+        ) => Some((
+            "音色配置最多包含 2000 个不重复且非空的音色 ID，语速均须在 -50 到 100 之间",
+            "音色設定最多包含 2000 個不重複且非空的音色 ID，語速均須在 -50 到 100 之間",
+        )),
+        ("content_limit_exceeded", "rich text exceeds the shared 5000-codepoint limit") => Some((
+            "富文本超过 5000 个 Unicode 码点的共享上限",
+            "富文字超過 5000 個 Unicode 碼點的共用上限",
+        )),
+        ("content_limit_exceeded", "rich text decorations exceed the shared 2000-node limit") => {
+            Some((
+                "富文本标注超过 2000 个节点的共享上限",
+                "富文字標註超過 2000 個節點的共用上限",
+            ))
+        }
+        ("pos_required", "a complete entry requires at least one part of speech") => {
+            Some(("完整词条至少需要一个词性", "完整詞條至少需要一個詞性"))
+        }
+        ("duplicate_pos_code", "the same POS code cannot appear twice in one entry") => Some((
+            "同一词条不能重复使用同一词性代码",
+            "同一詞條不能重複使用同一詞性代碼",
+        )),
+        ("form_group_required", "a complete POS requires at least one form group") => {
+            Some(("完整词性至少需要一个词形组", "完整詞性至少需要一個詞形組"))
+        }
+        ("duplicate_node_id", "a concrete form ID cannot belong to two POS nodes") => Some((
+            "同一具体词形 ID 不能属于两个词性节点",
+            "同一具體詞形 ID 不能屬於兩個詞性節點",
+        )),
+        (
+            "invalid_form_type_for_part_of_speech",
+            "form_type is not allowed for this part of speech",
+        ) => Some((
+            "此词性不允许使用该 form_type",
+            "此詞性不允許使用該 form_type",
+        )),
+        ("empty_form_group", "a complete entry cannot retain an empty form group") => {
+            Some(("完整词条不能保留空词形组", "完整詞條不能保留空詞形組"))
+        }
+        ("base_form_required_in_group", "the first form group requires at least one base form") => {
+            Some((
+                "第一个词形组至少需要一个基本词形",
+                "第一個詞形組至少需要一個基本詞形",
+            ))
+        }
+        ("form_group_membership_invalid", "the same group cannot reference one form twice") => {
+            Some((
+                "同一词形组不能重复引用同一词形",
+                "同一詞形組不能重複引用同一詞形",
+            ))
+        }
+        ("form_group_membership_invalid", "a concrete form can belong to only one form group") => {
+            Some(("具体词形只能属于一个词形组", "具體詞形只能屬於一個詞形組"))
+        }
+        (
+            "form_group_membership_invalid",
+            "a membership cannot reference a form owned by another POS",
+        ) => Some((
+            "成员不能引用属于其他词性的词形",
+            "成員不能引用屬於其他詞性的詞形",
+        )),
+        (
+            "form_group_membership_invalid",
+            "membership form_id does not exist in the submitted entry",
+        ) => Some((
+            "成员的 form_id 在提交的词条中不存在",
+            "成員的 form_id 在提交的詞條中不存在",
+        )),
+        ("orphan_form", "every saved concrete form requires at least one membership") => Some((
+            "每个保存的具体词形至少需要一个成员关系",
+            "每個儲存的具體詞形至少需要一個成員關係",
+        )),
+        (
+            "dialect_rules_invalid",
+            "distinguish/unified is not a valid dialect rule combination",
+        ) => Some((
+            "distinguish/unified 不是有效的方言规则组合",
+            "distinguish/unified 不是有效的方言規則組合",
+        )),
+        (
+            "invalid_regional_variant_shape",
+            "regional_variants do not match the dialect_rules of the form's group",
+        ) => Some((
+            "regional_variants 与词形组的 dialect_rules 不一致",
+            "regional_variants 與詞形組的 dialect_rules 不一致",
+        )),
+        (
+            "dedicated_form_group_unused",
+            "a dedicated form group must be bound by at least one sense",
+        ) => Some((
+            "专用词形组至少需要绑定一个词义",
+            "專用詞形組至少需要綁定一個詞義",
+        )),
+        ("variant_spelling_required", "a complete regional variant requires spelling") => {
+            Some(("完整地区变体需要拼写", "完整地區變體需要拼寫"))
+        }
+        ("content_limit_exceeded", "variant spelling exceeds the shared 200-codepoint limit") => {
+            Some((
+                "变体拼写超过 200 个 Unicode 码点的上限",
+                "變體拼寫超過 200 個 Unicode 碼點的上限",
+            ))
+        }
+        (
+            "spelling_rich_text_invalid",
+            "spelling speech must match spelling and contain only valid pauses",
+        ) => Some((
+            "拼写语音必须与拼写一致，且只能包含有效停顿",
+            "拼寫語音必須與拼寫一致，且只能包含有效停頓",
+        )),
+        (
+            "spelling_rich_text_invalid",
+            "spelling rich text must match the normalized spelling and contain only valid italic or liaison annotations",
+        ) => Some((
+            "拼写富文本必须与规范化拼写一致，且只能包含有效斜体或连读标注",
+            "拼寫富文字必須與正規化拼寫一致，且只能包含有效斜體或連讀標註",
+        )),
+        (
+            "pronunciation_required",
+            "a complete regional variant requires at least one pronunciation",
+        ) => Some((
+            "完整地区变体至少需要一个发音",
+            "完整地區變體至少需要一個發音",
+        )),
+        (
+            "content_limit_exceeded",
+            "UPS word metadata must contain 1-30 bounded, nonempty text/phoneme pairs",
+        ) => Some((
+            "UPS 单词元数据须包含 1–30 组长度合规且非空的文本与音素",
+            "UPS 單字中繼資料須包含 1–30 組長度合規且非空的文字與音素",
+        )),
+        (
+            "pronunciation_required",
+            "UPS phrase word boundaries are missing or stale; convert again from actual pronunciation",
+        ) => Some((
+            "UPS 短语单词边界缺失或已过期，请根据实际发音重新转换",
+            "UPS 片語單字邊界缺失或已過期，請根據實際發音重新轉換",
+        )),
+        (
+            "duplicate_pronunciation",
+            "complete normalized pronunciation triples must be unique per variant",
+        ) => Some((
+            "同一变体的完整规范化发音三元组不能重复",
+            "同一變體的完整正規化發音三元組不能重複",
+        )),
+        (
+            "dialect_rules_invalid",
+            "dialect_rules must be one of unified/unified, unified/distinguish, or distinguish/distinguish",
+        ) => Some((
+            "dialect_rules 必须是 unified/unified、unified/distinguish 或 distinguish/distinguish",
+            "dialect_rules 必須是 unified/unified、unified/distinguish 或 distinguish/distinguish",
+        )),
+        ("invalid_form_type_for_part_of_speech", "form_type must be a valid catalog code") => {
+            Some((
+                "form_type 必须是有效的目录代码",
+                "form_type 必須是有效的目錄代碼",
+            ))
+        }
+        (
+            "invalid_regional_variant_shape",
+            "regional_variants must be common xor complete uk_us",
+        ) => Some((
+            "regional_variants 必须是 common 或完整的 uk_us，不能同时使用",
+            "regional_variants 必須是 common 或完整的 uk_us，不能同時使用",
+        )),
+        _ => None,
+    };
+    if let Some((hans, hant)) = first_party_english {
+        match locale {
+            Locale::ZhHans => issue.message = hans.to_owned(),
+            Locale::ZhHant => issue.message = hant.to_owned(),
+            Locale::EnGb | Locale::EnUs => {}
+        }
+        return;
+    }
+    let translations = match (issue.code.as_str(), issue.message.as_str()) {
+        ("invalid_form_type_for_part_of_speech", "词形类型不存在或已删除，请刷新配置") => {
+            Some((
+                "詞形類型不存在或已刪除，請重新整理設定",
+                "The form type does not exist or has been deleted. Reload the configuration.",
+            ))
+        }
+        (
+            "meanings_storage_unsafe",
+            "此内容包含新版加粗或下划线格式，请保留本地输入并刷新页面后再保存",
+        ) => Some((
+            "此內容包含新版粗體或底線格式，請保留本機輸入並重新整理頁面後再儲存",
+            "This content uses newer bold or underline formatting. Preserve your local input and reload before saving.",
+        )),
+        (
+            "voice_profile_invalid",
+            "此内容包含新版文本配音版本，请保留本地输入并刷新页面后再保存",
+        ) => Some((
+            "此內容包含新版文字配音版本，請保留本機輸入並重新整理頁面後再儲存",
+            "This content uses newer text dubbing versions. Preserve your local input and reload before saving.",
+        )),
+        ("node_id_reused", "节点 ID 在请求中重复") => Some((
+            "節點 ID 在請求中重複",
+            "The node ID is duplicated in the request.",
+        )),
+        ("node_id_reused", "节点 ID 不能用于不同节点类型") => Some((
+            "節點 ID 不能用於不同節點類型",
+            "A node ID cannot be used for different node types.",
+        )),
+        ("node_id_reused", "节点 ID 不能跨步骤复用") => Some((
+            "節點 ID 不能跨步驟重複使用",
+            "A node ID cannot be reused across steps.",
+        )),
+        ("grammar_form_link_invalid", "关联词形的第一个发音未配置，请先完善该发音") => {
+            Some((
+                "關聯詞形的第一個發音未設定，請先完善該發音",
+                "The first pronunciation of the linked form is not configured. Complete it first.",
+            ))
+        }
+        ("grammar_form_link_invalid", "关联词形的第一个发音与当前口音不匹配，请先完善该发音") => {
+            Some((
+                "關聯詞形的第一個發音與目前口音不符，請先完善該發音",
+                "The first pronunciation of the linked form does not match the current accent. Complete it first.",
+            ))
+        }
+        ("sentence_context_target_unavailable", "例句 context 必须指向当前草稿中的有效词义") => {
+            Some((
+                "例句 context 必須指向目前草稿中的有效詞義",
+                "The sentence context must point to a valid sense in the current draft.",
+            ))
+        }
+        (
+            "sentence_context_target_unavailable",
+            "例句 context 必须是目标词条当前发布版本中的有效词义",
+        ) => Some((
+            "例句 context 必須是目標詞條目前發布版本中的有效詞義",
+            "The sentence context must be a valid sense in the target entry's current publication.",
+        )),
+        ("relation_self_target", "关联词不能指向当前词条自身") => Some((
+            "關聯詞不能指向目前詞條本身",
+            "A related word cannot point to the current entry.",
+        )),
+        ("relation_target_unavailable", "关联词目标词义尚未发布，请先发布具体目标词义") => {
+            Some((
+                "關聯詞目標詞義尚未發布，請先發布具體目標詞義",
+                "The target sense is not published. Publish the specific target sense first.",
+            ))
+        }
+        (
+            "relation_target_unavailable",
+            "关联词目标必须是未归档词条当前草稿或当前发布中的有效词义",
+        ) => Some((
+            "關聯詞目標必須是未封存詞條目前草稿或目前發布中的有效詞義",
+            "The related word target must be a valid sense in the current draft or publication of an unarchived entry.",
+        )),
+        ("relation_target_stale", "关联词目标的当前发布内容已变化，请重新保存词义步骤") => {
+            Some((
+                "關聯詞目標的目前發布內容已變更，請重新儲存詞義步驟",
+                "The target's current publication has changed. Save the meanings step again.",
+            ))
+        }
+        ("relation_pending_gloss_without_headword", "文本注释必须跟随关联词文本") => {
+            Some((
+                "文字註解必須跟隨關聯詞文字",
+                "The text note requires related word text.",
+            ))
+        }
+        ("relation_pending_gloss_invalid", "预定义词义不能超过 5000 个字符") => Some((
+            "預定義詞義不能超過 5000 個字元",
+            "A predefined sense cannot exceed 5000 characters.",
+        )),
+        ("relation_pending_headword_invalid", "关联词文本不能含控制字符，且不超过 200 个字符") => {
+            Some((
+                "關聯詞文字不能含控制字元，且不超過 200 個字元",
+                "Related word text cannot contain control characters or exceed 200 characters.",
+            ))
+        }
+        (
+            "relation_target_unavailable"
+            | "sentence_context_target_unavailable"
+            | "phrase_component_target_unavailable"
+            | "definition_invalid",
+            "具体引用目标尚未发布或已不在当前发布内容中，请先发布目标或修复引用",
+        ) => Some((
+            "具體引用目標尚未發布或已不在目前發布內容中，請先發布目標或修復引用",
+            "The referenced target is unpublished or no longer in the current publication. Publish the target or fix the reference first.",
+        )),
+        ("definition_invalid", "请选择语法结构") => {
+            Some(("請選擇語法結構", "Select a grammar structure."))
+        }
+        ("meanings_storage_unsafe", "词义内容无法安全存储") => Some((
+            "詞義內容無法安全儲存",
+            "The meaning content cannot be stored safely.",
+        )),
+        ("sense_group_required", "至少需要一个语义区间") => Some((
+            "至少需要一個語義區間",
+            "At least one sense group is required.",
+        )),
+        ("sense_group_name_required", "语义区间名称不能为空") => {
+            Some(("語義區間名稱不能為空", "Enter a sense group name."))
+        }
+        ("sense_group_name_too_long", "语义区间名称不能超过 200 个字符") => Some((
+            "語義區間名稱不能超過 200 個字元",
+            "The sense group name must not exceed 200 characters.",
+        )),
+        ("pos_not_found", "词义引用了不存在的基本词性") => Some((
+            "詞義引用了不存在的基本詞性",
+            "The sense refers to a part of speech that does not exist.",
+        )),
+        ("duplicate_pos_meanings", "同一基本词性只能有一组词义数据") => Some((
+            "同一基本詞性只能有一組詞義資料",
+            "Each part of speech can have only one set of meanings.",
+        )),
+        ("grammar_required", "每个词性至少需要一条语法结构") => Some((
+            "每個詞性至少需要一條語法結構",
+            "Each part of speech requires at least one grammar structure.",
+        )),
+        ("grammar_variants_invalid", "语法结构必须包含当前方言的完整文本") => {
+            Some((
+                "語法結構必須包含目前方言的完整文字",
+                "The grammar structure must contain complete text for the current dialect.",
+            ))
+        }
+        ("sense_required", "每个词性至少需要一个词义") => Some((
+            "每個詞性至少需要一個詞義",
+            "Each part of speech requires at least one sense.",
+        )),
+        ("level_invalid", "CEFR 等级无效") => Some(("CEFR 等級無效", "Invalid CEFR level.")),
+        ("sub_pos_required", "请选择细分词性") => {
+            Some(("請選擇細分詞性", "Select a sub-part of speech."))
+        }
+        ("invalid_sub_part_of_speech", "细分词性不属于当前基本词性") => Some((
+            "細分詞性不屬於目前基本詞性",
+            "The sub-part of speech does not belong to the selected part of speech.",
+        )),
+        ("frequency_invalid", "词义词频必须是 0–100 且最多两位小数") => Some((
+            "詞義詞頻必須是 0–100 且最多兩位小數",
+            "Sense frequency must be between 0 and 100 with at most two decimal places.",
+        )),
+        ("sense_group_not_found", "请选择有效的语义区间") => {
+            Some(("請選擇有效的語義區間", "Select a valid sense group."))
+        }
+        ("definition_required", "每个词义至少需要一条释义") => Some((
+            "每個詞義至少需要一條釋義",
+            "Each sense requires at least one definition.",
+        )),
+        ("definition_level_invalid", "释义 CEFR 等级无效") => {
+            Some(("釋義 CEFR 等級無效", "Invalid definition CEFR level."))
+        }
+        ("definition_invalid", "释义文本或语法结构引用无效") => Some((
+            "釋義文字或語法結構引用無效",
+            "The definition text or grammar structure reference is invalid.",
+        )),
+        ("native_definition_required", "至少填写一条中文释义") => Some((
+            "至少填寫一條中文釋義",
+            "Enter at least one Chinese definition.",
+        )),
+        ("sentence_level_invalid", "例句 CEFR 等级无效") => {
+            Some(("例句 CEFR 等級無效", "Invalid example sentence CEFR level."))
+        }
+        ("sentence_link_role_invalid", "例句链接角色必须是 focus 或 context") => Some((
+            "例句連結角色必須是 focus 或 context",
+            "The sentence link role must be focus or context.",
+        )),
+        ("duplicate_sentence_link", "同一例句不能重复链接同一词义") => Some((
+            "同一例句不能重複連結同一詞義",
+            "The same sentence cannot be linked to the same sense twice.",
+        )),
+        ("sentence_incomplete", "例句需包含完整中英文和唯一当前词义焦点") => {
+            Some((
+                "例句需包含完整中英文和唯一目前詞義焦點",
+                "The sentence requires complete Chinese and English text and one focus on the current sense.",
+            ))
+        }
+        ("relation_score_invalid", "关联度必须是 0–100 且最多两位小数") => Some((
+            "關聯度必須是 0–100 且最多兩位小數",
+            "The relation score must be between 0 and 100 with at most two decimal places.",
+        )),
+        ("relation_type_invalid", "关联词类型无效") => {
+            Some(("關聯詞類型無效", "Invalid related word type."))
+        }
+        (
+            "relation_target_shape_invalid",
+            "关联词要么同时给出目标词条与目标词义，要么只留待关联词面",
+        ) => Some((
+            "關聯詞須同時提供目標詞條與目標詞義，或只保留待關聯詞面",
+            "Provide both the target entry and sense, or only the text to link later.",
+        )),
+        ("relation_target_shape_invalid", "已绑定关联词不能再携带待建词面或预定义词义") => {
+            Some((
+                "已綁定關聯詞不能再包含待建詞面或預定義詞義",
+                "A bound related word cannot also include pending text or a predefined sense.",
+            ))
+        }
+        ("pos_meanings_required", "每个基本词性都需要词义数据") => Some((
+            "每個基本詞性都需要詞義資料",
+            "Each part of speech requires meaning data.",
+        )),
+        ("node_id_reused", "节点 ID 已属于其他词条或节点类型") => Some((
+            "節點 ID 已屬於其他詞條或節點類型",
+            "The node ID already belongs to another entry or node type.",
+        )),
+        ("node_binding_unknown", "历史节点缺少可验证的父子绑定，不能重新用于草稿内容") => {
+            Some((
+                "歷史節點缺少可驗證的父子綁定，不能重新用於草稿內容",
+                "This historical node has no verifiable parent binding and cannot be reused in the draft.",
+            ))
+        }
+        ("node_binding_changed", "节点 ID 不能更换父节点或内容槽位") => Some((
+            "節點 ID 不能更換父節點或內容槽位",
+            "A node ID cannot change its parent or content slot.",
+        )),
+        ("stable_node_id_changed", "已有内容槽位必须保留原节点 ID") => Some((
+            "既有內容槽位必須保留原節點 ID",
+            "An existing content slot must retain its original node ID.",
+        )),
+        ("definition_invalid", "正文已改变，请使用支持关联的编辑器重新确认关联") => {
+            Some((
+                "正文已變更，請使用支援關聯的編輯器重新確認關聯",
+                "The text has changed. Reconfirm the links in an editor that supports linking.",
+            ))
+        }
+        ("definition_invalid", "关联词段无效、重叠或超过上限，请重新选择") => {
+            Some((
+                "關聯詞段無效、重疊或超過上限，請重新選擇",
+                "The linked text spans are invalid, overlap or exceed the limit. Select them again.",
+            ))
+        }
+        ("definition_invalid", "关联标识重复，请重新选择") => Some((
+            "關聯識別碼重複，請重新選擇",
+            "Link identifiers are duplicated. Select them again.",
+        )),
+        ("definition_invalid", "当前词条请直接关联，不通过短语成分中转") => {
+            Some((
+                "目前詞條請直接關聯，不透過片語成分中轉",
+                "Link the current entry directly, without an intermediate phrase component.",
+            ))
+        }
+        ("definition_invalid", "关联的词形或词义已不在当前词条里，请重新选择") => {
+            Some((
+                "關聯的詞形或詞義已不在目前詞條中，請重新選擇",
+                "The linked form or sense is no longer in the current entry. Select it again.",
+            ))
+        }
+        ("definition_invalid", "关联目标已不可用，请重新选择") => Some((
+            "關聯目標已無法使用，請重新選擇",
+            "The linked target is no longer available. Select it again.",
+        )),
+        ("definition_invalid", "同一正文的同一目标词义须使用同一发布版本") => {
+            Some((
+                "同一正文的同一目標詞義須使用同一發布版本",
+                "The same target sense in one text must use the same published version.",
+            ))
+        }
+        ("definition_invalid", "关联的词形或词义已不在目标词条里，请重新选择") => {
+            Some((
+                "關聯的詞形或詞義已不在目標詞條中，請重新選擇",
+                "The linked form or sense is no longer in the target entry. Select it again.",
+            ))
+        }
+        ("definition_invalid", "短语成分与关联目标不一致，请重新选择") => Some((
+            "片語成分與關聯目標不一致，請重新選擇",
+            "The phrase component does not match the linked target. Select it again.",
+        )),
+        ("grammar_form_link_invalid", "正文已改变，请使用支持关联词形的编辑器重新确认关联") => {
+            Some((
+                "正文已變更，請使用支援關聯詞形的編輯器重新確認關聯",
+                "The text has changed. Reconfirm the links in an editor that supports form links.",
+            ))
+        }
+        ("grammar_form_link_invalid", "正文已改变，请重新确认读法关联") => Some((
+            "正文已變更，請重新確認讀法關聯",
+            "The text has changed. Reconfirm the pronunciation link.",
+        )),
+        ("grammar_form_link_invalid", "请以完整单词关联词形，不得重复或重叠关联") => {
+            Some((
+                "請以完整單字關聯詞形，不得重複或重疊關聯",
+                "Link forms to complete words without duplicate or overlapping links.",
+            ))
+        }
+        ("grammar_form_link_invalid", "请重新打开语法结构编辑器确认词形关联") => {
+            Some((
+                "請重新開啟語法結構編輯器確認詞形關聯",
+                "Reopen the grammar structure editor to confirm the form links.",
+            ))
+        }
+        ("grammar_form_link_invalid", "关联词形只支持单词") => {
+            Some(("關聯詞形只支援單字", "Form links support words only."))
+        }
+        ("grammar_form_link_invalid", "读法义项不属于当前词性或词形") => Some((
+            "讀法義項不屬於目前詞性或詞形",
+            "The pronunciation sense does not belong to the current part of speech or form.",
+        )),
+        ("grammar_form_link_invalid", "关联词形目标已失效，请重新关联") => Some((
+            "關聯詞形目標已失效，請重新關聯",
+            "The linked form target is no longer valid. Link it again.",
+        )),
+        ("grammar_form_link_invalid", "请先发布目标单词，再关联其已发布词形") => {
+            Some((
+                "請先發布目標單字，再關聯其已發布詞形",
+                "Publish the target word before linking its published form.",
+            ))
+        }
+        ("grammar_form_link_invalid", "关联词形已失效，请重新关联") => Some((
+            "關聯詞形已失效，請重新關聯",
+            "The linked form is no longer valid. Link it again.",
+        )),
+        (
+            "grammar_form_link_invalid",
+            "关联词形的第一个发音包含不可用于合成的音素，请检查发音配置",
+        ) => Some((
+            "關聯詞形的第一個發音包含無法用於合成的音素，請檢查發音設定",
+            "The first pronunciation of the linked form contains phonemes that cannot be synthesised. Check the pronunciation settings.",
+        )),
+        ("grammar_form_link_invalid", "读法关联必须绑定完整单词且不能重叠") => {
+            Some((
+                "讀法關聯必須綁定完整單字且不能重疊",
+                "Pronunciation links must bind complete words and cannot overlap.",
+            ))
+        }
+        ("grammar_form_link_invalid", "读法目标已失效") => Some((
+            "讀法目標已失效",
+            "The pronunciation target is no longer valid.",
+        )),
+        ("grammar_form_link_invalid", "请先发布读法目标单词") => Some((
+            "請先發布讀法目標單字",
+            "Publish the pronunciation target word first.",
+        )),
+        ("grammar_form_link_invalid", "读法词形已失效") => Some((
+            "讀法詞形已失效",
+            "The pronunciation form is no longer valid.",
+        )),
+        ("grammar_form_link_invalid", "请选择具体读法") => {
+            Some(("請選擇具體讀法", "Select a specific pronunciation."))
+        }
+        _ => None,
+    };
+    if let Some((hant, english)) = translations {
+        match locale {
+            Locale::ZhHans => {}
+            Locale::ZhHant => issue.message = hant.to_owned(),
+            Locale::EnGb | Locale::EnUs => issue.message = english.to_owned(),
+        }
+    }
+}
+
+fn english_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'static str> {
+    let (hans, hant) = match (code, source) {
+        (ErrorCode::NotFound, "avatar not found") => Some(("头像不存在", "找不到頭像")),
+        (ErrorCode::NotFound, "target admin not found") => {
+            Some(("目标管理员不存在", "找不到目標管理員"))
+        }
+        (ErrorCode::NotFound, "tag not found") => Some(("标签不存在", "找不到標籤")),
+        (ErrorCode::NotFound, "user not found") => Some(("用户不存在", "找不到使用者")),
+        (ErrorCode::NotFound, "admin not found") => Some(("管理员不存在", "找不到管理員")),
+        (ErrorCode::InvalidDisplayName, "display name cannot be empty") => {
+            Some(("显示名称不能为空", "顯示名稱不能為空"))
+        }
+        (ErrorCode::InvalidDisplayName, "display name cannot be longer than 50 characters") => {
+            Some(("显示名称不能超过 50 个字符", "顯示名稱不能超過 50 個字元"))
+        }
+        (ErrorCode::InvalidDisplayName, "display name contains forbidden characters") => {
+            Some(("显示名称包含不允许的字符", "顯示名稱包含不允許的字元"))
+        }
+        (
+            ErrorCode::InvalidSpeechPreview | ErrorCode::InvalidRequestBody,
+            "speech style is not supported by this voice",
+        ) => Some(("该音色不支持此语音风格", "此音色不支援此語音風格")),
+        (
+            ErrorCode::InvalidSpeechPreview | ErrorCode::InvalidRequestBody,
+            "speech rate must be between -50 and 100 percent",
+        ) => Some(("语速须在 -50% 到 100% 之间", "語速須在 -50% 到 100% 之間")),
+        (
+            ErrorCode::InvalidSpeechPreview | ErrorCode::InvalidRequestBody,
+            "speech pitch must be between -12 and 12 semitones",
+        ) => Some(("音调须在 -12 到 12 半音之间", "音調須在 -12 到 12 半音之間")),
+        (
+            ErrorCode::InvalidSpeechPreview | ErrorCode::InvalidRequestBody,
+            "speech volume must be between 0 and 100 percent",
+        ) => Some(("音量须在 0% 到 100% 之间", "音量須在 0% 到 100% 之間")),
+        (
+            ErrorCode::InvalidSpeechPreview | ErrorCode::InvalidRequestBody,
+            "only canonical RichTextV2 can be synthesized",
+        ) => Some((
+            "仅支持合成规范化的 RichTextV2",
+            "僅支援合成正規化的 RichTextV2",
+        )),
+        (
+            ErrorCode::InvalidSpeechPreview | ErrorCode::InvalidRequestBody,
+            "there is nothing left to read in this text",
+        ) => Some(("文本中没有可朗读的内容", "文字中沒有可朗讀的內容")),
+        (ErrorCode::InvalidRequestBody, "invalid pagination") => {
+            Some(("分页参数无效", "分頁參數無效"))
+        }
+        (ErrorCode::InvalidQuery, "base_revision must be at least 1") => {
+            Some(("base_revision 必须至少为 1", "base_revision 必須至少為 1"))
+        }
+        (ErrorCode::ValidationFailed, "q must not have leading or trailing whitespace") => {
+            Some(("q 不能以空白字符开头或结尾", "q 不能以空白字元開頭或結尾"))
+        }
+        (ErrorCode::ValidationFailed, "q must contain between 1 and 100 codepoints") => Some((
+            "q 须包含 1–100 个 Unicode 码点",
+            "q 須包含 1–100 個 Unicode 碼點",
+        )),
+        (ErrorCode::ValidationFailed, "q must not contain NUL characters") => {
+            Some(("q 不能包含 NUL 字符", "q 不能包含 NUL 字元"))
+        }
+        (ErrorCode::Forbidden, "unregistered admin route") => {
+            Some(("后台路由未注册", "後台路由未註冊"))
+        }
+        (ErrorCode::Forbidden, "learning settings require a student profile") => {
+            Some(("学习设置需要学生身份", "學習設定需要學生身分"))
+        }
+        (ErrorCode::SurfaceMatchSnapshotExpired, "surface confirmation snapshot expired") => {
+            Some(("词面确认快照已过期", "詞面確認快照已過期"))
+        }
+        (ErrorCode::EntryDeleteForbidden, "only a super admin may permanently delete entries") => {
+            Some(("仅超管可以永久删除词条", "僅超管可以永久刪除詞條"))
+        }
+        (
+            ErrorCode::EntryEditForbidden,
+            "entry editing requires ownership or words.edit_others",
+        ) => Some((
+            "编辑词条需要创建者身份或 words.edit_others 权限",
+            "編輯詞條需要建立者身分或 words.edit_others 權限",
+        )),
+        (
+            ErrorCode::EntryAnnotationForbidden,
+            "annotation editing requires ownership or words.edit_others",
+        ) => Some((
+            "编辑标注需要创建者身份或 words.edit_others 权限",
+            "編輯標註需要建立者身分或 words.edit_others 權限",
+        )),
+        (ErrorCode::ServiceUnavailable, "detection service unavailable") => {
+            Some(("检测服务暂不可用", "偵測服務暫時無法使用"))
+        }
+        (ErrorCode::ServiceUnavailable, "impact confirmation service unavailable") => {
+            Some(("影响确认服务暂不可用", "影響確認服務暫時無法使用"))
+        }
+        (ErrorCode::ServiceUnavailable, "surface snapshot service unavailable") => {
+            Some(("词面快照服务暂不可用", "詞面快照服務暫時無法使用"))
+        }
+        (ErrorCode::ServiceUnavailable, "surface policy service unavailable") => {
+            Some(("词面规则服务暂不可用", "詞面規則服務暫時無法使用"))
+        }
+        (ErrorCode::Forbidden, "audio asset permission required") => {
+            Some(("需要音频资源权限", "需要音訊資源權限"))
+        }
+        (ErrorCode::Forbidden, "audio upload is not owned by this admin") => {
+            Some(("音频上传不属于当前管理员", "音訊上傳不屬於目前管理員"))
+        }
+        (ErrorCode::Forbidden, "lexicon action permission required") => {
+            Some(("需要词库操作权限", "需要詞庫操作權限"))
+        }
+        (ErrorCode::Forbidden, "content editing permission required") => {
+            Some(("需要内容编辑权限", "需要內容編輯權限"))
+        }
+        (ErrorCode::Forbidden, "content ownership required") => {
+            Some(("需要内容所有者身份", "需要內容擁有者身分"))
+        }
+        (ErrorCode::InvalidHeadword, "headword is required") => Some(("请输入词头", "請輸入詞頭")),
+        (ErrorCode::InvalidHeadword, "headword is too long") => Some(("词头过长", "詞頭過長")),
+        (ErrorCode::InvalidHeadword, "headword contains control characters") => {
+            Some(("词头不能包含控制字符", "詞頭不能包含控制字元"))
+        }
+        (
+            ErrorCode::InvalidHeadword,
+            "headword must contain only Latin letters, digits and - ' . & / , characters",
+        ) => Some((
+            "词头只能包含拉丁字母、数字和 - ' . & / , 字符",
+            "詞頭只能包含拉丁字母、數字和 - ' . & / , 字元",
+        )),
+        (ErrorCode::InvalidHeadword, "headword must contain at least one Latin letter") => {
+            Some(("词头至少需要一个拉丁字母", "詞頭至少需要一個拉丁字母"))
+        }
+        (ErrorCode::PartOfSpeechInUse, "part of speech is in use") => {
+            Some(("词性正在使用", "詞性正在使用"))
+        }
+        (ErrorCode::SubPartOfSpeechInUse, "sub part of speech is in use") => {
+            Some(("细分词性正在使用", "細分詞性正在使用"))
+        }
+        (ErrorCode::FormTypeConflict, "form type already exists") => {
+            Some(("词形类型已存在", "詞形類型已存在"))
+        }
+        (ErrorCode::InvalidFormType, "base form type must not belong to a part of speech") => {
+            Some((
+                "基本词形类型不能属于某个词性",
+                "基本詞形類型不能屬於某個詞性",
+            ))
+        }
+        (ErrorCode::FormTypeInUse, "form type is in use") => {
+            Some(("词形类型正在使用", "詞形類型正在使用"))
+        }
+        (ErrorCode::InvalidFormType, "invalid text length") => {
+            Some(("文本长度无效", "文字長度無效"))
+        }
+        (ErrorCode::InvalidFormType, "form types belong to word parts of speech only") => {
+            Some(("词形类型仅适用于单词词性", "詞形類型僅適用於單字詞性"))
+        }
+        (ErrorCode::InvalidFormType, "invalid form type code") => {
+            Some(("词形类型代码无效", "詞形類型代碼無效"))
+        }
+        (ErrorCode::InvalidQuery, "revision must be positive") => {
+            Some(("revision 必须为正数", "revision 必須為正數"))
+        }
+        (ErrorCode::InvalidFormType, "base form type must remain in the default template") => {
+            Some((
+                "默认模板必须保留基本词形类型",
+                "預設範本必須保留基本詞形類型",
+            ))
+        }
+        (ErrorCode::InvalidFormType, "base form type is global") => {
+            Some(("基本词形类型是全局类型", "基本詞形類型是全域類型"))
+        }
+        (ErrorCode::InvalidFormType, "form type must belong to a part of speech") => {
+            Some(("词形类型必须属于一个词性", "詞形類型必須屬於一個詞性"))
+        }
+        (ErrorCode::FormTypeRequired, "base form type cannot be deleted") => {
+            Some(("不能删除基本词形类型", "不能刪除基本詞形類型"))
+        }
+        (
+            ErrorCode::SmartLexiconV3StorageUnavailable,
+            "Smart Lexicon V3 storage or projection capability is disabled",
+        ) => Some((
+            "Smart Lexicon V3 存储或投影能力未启用",
+            "Smart Lexicon V3 儲存或投影功能未啟用",
+        )),
+        (
+            ErrorCode::SmartLexiconV3DetectionUnavailable,
+            "Smart Lexicon V3 form-surface detection requires the C2 projection capability",
+        ) => Some((
+            "Smart Lexicon V3 词形检测需要 C2 投影能力",
+            "Smart Lexicon V3 詞形偵測需要 C2 投影功能",
+        )),
+        (ErrorCode::UnsupportedSchemaVersion, "unsupported lexicon schema version") => {
+            Some(("不支持该词库数据版本", "不支援此詞庫資料版本"))
+        }
+        (ErrorCode::DetectionMismatch, "detection does not match create request") => {
+            Some(("检测结果与创建请求不一致", "偵測結果與建立請求不一致"))
+        }
+        (
+            ErrorCode::SurfaceMatchAcknowledgementRequired,
+            "surface match acknowledgement is required",
+        ) => Some(("请确认词面匹配", "請確認詞面比對")),
+        (ErrorCode::SurfaceMatchesChanged, "surface matches changed since confirmation") => {
+            Some(("确认后词面匹配结果已变化", "確認後詞面比對結果已變更"))
+        }
+        (
+            ErrorCode::SurfaceMatchesChanged,
+            "surface matches changed since confirmation; retry without the stale token",
+        ) => Some((
+            "确认后词面匹配结果已变化，请不使用过期令牌重试",
+            "確認後詞面比對結果已變更，請不使用過期權杖重試",
+        )),
+        (ErrorCode::SurfacePolicyChanged, "surface policy changed since confirmation") => {
+            Some(("确认后词面规则已变化", "確認後詞面規則已變更"))
+        }
+        (
+            ErrorCode::MultipleActiveExactHeadwordPublicationsNotEnabled,
+            "multiple active exact headword publications are not enabled",
+        ) => Some((
+            "尚未启用相同词头的多份有效发布",
+            "尚未啟用相同詞頭的多份有效發布",
+        )),
+        (ErrorCode::IdempotencyConflict, "idempotency key was reused with a different request") => {
+            Some(("幂等键已用于不同请求", "冪等鍵已用於不同請求"))
+        }
+        (ErrorCode::EntryArchived, "entry is archived and must be restored before editing") => {
+            Some(("词条已归档，编辑前请先恢复", "詞條已封存，編輯前請先恢復"))
+        }
+        (
+            ErrorCode::EntryNotDeletable,
+            "only never-published entries without inbound references can be deleted",
+        ) => Some((
+            "只有从未发布且没有外部引用的词条可以删除",
+            "只有從未發布且沒有外部引用的詞條可以刪除",
+        )),
+        (
+            ErrorCode::EntryHasInboundPreboundRelations,
+            "entry is selected by another draft relation; remove that prebinding first",
+        ) => Some((
+            "其他草稿关联已选择此词条，请先解除该预绑定",
+            "其他草稿關聯已選擇此詞條，請先解除該預綁定",
+        )),
+        (
+            ErrorCode::EntryHasInboundPublicationRefs,
+            "entry is referenced by another active current publication",
+        ) => Some((
+            "其他当前有效发布引用了此词条",
+            "其他目前有效發布引用了此詞條",
+        )),
+        (
+            ErrorCode::EntryHasUnavailablePublicationRefs,
+            "entry current publication references an archived or unavailable target",
+        ) => Some((
+            "词条当前发布引用了已归档或不可用的目标",
+            "詞條目前發布引用了已封存或無法使用的目標",
+        )),
+        (ErrorCode::ReferenceConflict, "a referenced target is changing; retry the command") => {
+            Some((
+                "引用目标正在变化，请重试操作",
+                "引用目標正在變更，請重試操作",
+            ))
+        }
+        (
+            ErrorCode::RelationPrebindingFanoutExceeded,
+            "relation prebinding reconciliation exceeds the 500 relation limit",
+        ) => Some((
+            "关联预绑定处理超过 500 条关联的上限",
+            "關聯預綁定處理超過 500 條關聯的上限",
+        )),
+        (ErrorCode::StableNodeIdChanged, "a stable V3 node identity changed") => {
+            Some(("稳定的 V3 节点标识已变化", "穩定的 V3 節點識別碼已變更"))
+        }
+        (ErrorCode::StepNotReachable, "previous step is incomplete") => {
+            Some(("请先完成前一步", "請先完成前一步"))
+        }
+        (ErrorCode::ValidationFailed, "V3 draft validation failed") => {
+            Some(("V3 草稿校验失败", "V3 草稿驗證失敗"))
+        }
+        (ErrorCode::ValidationFailed, "invalid shared form mapping") => {
+            Some(("共享词形映射无效", "共用詞形對應無效"))
+        }
+        (ErrorCode::InvalidRequestBody, "schema_version is required") => {
+            Some(("必须提供 schema_version", "必須提供 schema_version"))
+        }
+        (ErrorCode::InvalidRequestBody, "schema_version must be integer 3") => {
+            Some(("schema_version 必须是整数 3", "schema_version 必須是整數 3"))
+        }
+        (ErrorCode::UnsupportedSchemaVersion, "unsupported schema_version") => {
+            Some(("不支持该 schema_version", "不支援此 schema_version"))
+        }
+        (ErrorCode::ValidationFailed, "V3 contract validation failed") => {
+            Some(("V3 契约校验失败", "V3 契約驗證失敗"))
+        }
+        (ErrorCode::InvalidQuery, "invalid invitation pagination") => {
+            Some(("邀请分页参数无效", "邀請分頁參數無效"))
+        }
+        (ErrorCode::InvalidQuery, "snapshot cursor is invalid or reused") => {
+            Some(("快照游标无效或已使用", "快照游標無效或已使用"))
+        }
+        (ErrorCode::AudioFileTooLarge, "audio file exceeds the size limit") => {
+            Some(("音频文件超过大小上限", "音訊檔案超過大小上限"))
+        }
+        (
+            ErrorCode::InvalidAudioKey,
+            "invalid or unowned audio upload key; request a new upload URL and upload again",
+        ) => Some((
+            "音频上传凭据无效或不属于当前账号，请重新获取上传地址并上传",
+            "音訊上傳憑證無效或不屬於目前帳號，請重新取得上傳網址並上傳",
+        )),
+        (ErrorCode::AudioUploadNotCompleted, "audio upload was not completed") => {
+            Some(("音频尚未上传完成", "音訊尚未上傳完成"))
+        }
+        (
+            ErrorCode::InvalidRequestBody,
+            "original_name must be 1 to 120 characters without control characters",
+        ) => Some((
+            "original_name 须为 1–120 个字符且不能包含控制字符",
+            "original_name 須為 1–120 個字元且不能包含控制字元",
+        )),
+        (ErrorCode::ServiceUnavailable, "audio storage unavailable") => {
+            Some(("音频存储暂不可用", "音訊儲存暫時無法使用"))
+        }
+        (ErrorCode::InvalidRequestBody, "invalid voice library settings") => {
+            Some(("音色库设置无效", "音色庫設定無效"))
+        }
+        (ErrorCode::SpeechVoiceNotFound, "voice not available") => {
+            Some(("音色不可用", "音色無法使用"))
+        }
+        (ErrorCode::InvalidSpeechPreview, "invalid synthesis request") => {
+            Some(("语音合成请求无效", "語音合成請求無效"))
+        }
+        (ErrorCode::InvalidPathParameter, "invalid preview hash") => {
+            Some(("试听摘要无效", "試聽摘要無效"))
+        }
+        (ErrorCode::InvalidSpeechPreview, "speech provider rejected request") => {
+            Some(("语音供应商拒绝了请求", "語音供應商拒絕了請求"))
+        }
+        (ErrorCode::ServiceUnavailable, "speech preview coordination unavailable") => {
+            Some(("语音试听协调服务暂不可用", "語音試聽協調服務暫時無法使用"))
+        }
+        (ErrorCode::InvalidQuery, "cursor is invalid for this search") => {
+            Some(("游标对本次搜索无效", "游標對本次搜尋無效"))
+        }
+        (ErrorCode::ValidationFailed, "q must normalize to a valid word or phrase surface") => {
+            Some((
+                "q 规范化后必须是有效的单词或短语",
+                "q 正規化後必須是有效的單字或片語",
+            ))
+        }
+        (ErrorCode::InvalidQuery, "page_size must be between 1 and 200") => Some((
+            "page_size 必须在 1 到 200 之间",
+            "page_size 必須在 1 到 200 之間",
+        )),
+        (ErrorCode::InvalidHeadword, "surface normalization does not match detection") => {
+            Some(("词面规范化结果与检测不一致", "詞面正規化結果與偵測不一致"))
+        }
+        (
+            ErrorCode::InvalidRequestBody,
+            "refresh the editor before saving multi-group sense bindings",
+        ) => Some((
+            "保存多组词义绑定前请刷新编辑器",
+            "儲存多組詞義綁定前請重新整理編輯器",
+        )),
+        (ErrorCode::ValidationFailed, "meanings must belong to a POS in the current V3 forms") => {
+            Some((
+                "词义必须属于当前 V3 词形中的词性",
+                "詞義必須屬於目前 V3 詞形中的詞性",
+            ))
+        }
+        (
+            ErrorCode::InvalidRequestBody,
+            "component usages are only available for phrase entries",
+        ) => Some(("成分用法仅适用于短语词条", "成分用法僅適用於片語詞條")),
+        (ErrorCode::InvalidRequestBody, "phrase component must not target the phrase itself") => {
+            Some(("短语成分不能指向短语自身", "片語成分不能指向片語本身"))
+        }
+        (
+            ErrorCode::InvalidRequestBody,
+            "phrase component target must not itself reference another phrase",
+        ) => Some((
+            "短语成分目标不能再引用其他短语",
+            "片語成分目標不能再引用其他片語",
+        )),
+        (
+            ErrorCode::InvalidRequestBody,
+            "resolved component must match a published word or phrase form and sense",
+        ) => Some((
+            "已解析成分必须匹配已发布单词或短语的词形和词义",
+            "已解析成分必須符合已發布單字或片語的詞形和詞義",
+        )),
+        (
+            ErrorCode::ValidationFailed,
+            "spelling must contain between 1 and 200 valid codepoints",
+        ) => Some((
+            "拼写须包含 1–200 个有效 Unicode 码点",
+            "拼寫須包含 1–200 個有效 Unicode 碼點",
+        )),
+        (
+            ErrorCode::InvalidRequestBody,
+            "select 1 to 50 distinct entries and sentences with positive revisions",
+        ) => Some((
+            "请选择 1–50 个不重复且版本为正数的词条和例句",
+            "請選擇 1–50 個不重複且版本為正數的詞條和例句",
+        )),
+        (
+            ErrorCode::InvalidRequestBody,
+            "annotation must contain at most 20 characters and no control characters",
+        ) => Some((
+            "标注最多 20 个字符且不能包含控制字符",
+            "標註最多 20 個字元且不能包含控制字元",
+        )),
+        (ErrorCode::InvalidRequestBody, "entry ids must be unique and revisions positive") => {
+            Some((
+                "词条 ID 不能重复且版本必须为正数",
+                "詞條 ID 不能重複且版本必須為正數",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "form type is not in the catalog") => {
+            Some(("词形类型不在目录中", "詞形類型不在目錄中"))
+        }
+        (ErrorCode::ValidationFailed, "base_lifecycle_revision must be at least 1") => Some((
+            "base_lifecycle_revision 必须至少为 1",
+            "base_lifecycle_revision 必須至少為 1",
+        )),
+        (ErrorCode::InvalidQuery, "page_size and deprecated limit must not be sent together") => {
+            Some((
+                "不能同时提供 page_size 和已弃用的 limit",
+                "不能同時提供 page_size 和已棄用的 limit",
+            ))
+        }
+        (ErrorCode::InvalidQuery, "q must not contain NUL characters") => {
+            Some(("q 不能包含 NUL 字符", "q 不能包含 NUL 字元"))
+        }
+        (ErrorCode::InvalidQuery, "q is not a valid headword search") => {
+            Some(("q 不是有效的词头搜索", "q 不是有效的詞頭搜尋"))
+        }
+        (ErrorCode::InvalidQuery, "cursor does not match this search") => {
+            Some(("游标与本次搜索不匹配", "游標與本次搜尋不符"))
+        }
+        (ErrorCode::InvalidQuery, "page must be at least 1") => {
+            Some(("page 必须至少为 1", "page 必須至少為 1"))
+        }
+        (ErrorCode::InvalidQuery, "page_size must be between 1 and 100") => Some((
+            "page_size 必须在 1 到 100 之间",
+            "page_size 必須在 1 到 100 之間",
+        )),
+        (ErrorCode::InvalidQuery, "invalid CEFR level") => Some(("CEFR 等级无效", "CEFR 等級無效")),
+        (ErrorCode::InvalidQuery, "created_to must be later than created_from") => Some((
+            "created_to 必须晚于 created_from",
+            "created_to 必須晚於 created_from",
+        )),
+        (ErrorCode::InvalidRequestBody, "bindings must reference distinct existing senses") => {
+            Some((
+                "绑定必须引用不同且已存在的词义",
+                "綁定必須引用不同且已存在的詞義",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "unknown permission") => Some(("未知权限", "未知權限")),
+        (ErrorCode::InvalidRequestBody, "unknown permission or excessive selection") => {
+            Some(("权限未知或选择数量过多", "權限未知或選擇數量過多"))
+        }
+        (ErrorCode::InvalidRequestBody, "duplicate permission") => Some(("权限重复", "權限重複")),
+        (ErrorCode::InvalidRequestBody, "permission dependency missing") => {
+            Some(("缺少权限依赖", "缺少權限依賴"))
+        }
+        (ErrorCode::InvalidRequestBody, "select 1 to 100 distinct targets") => {
+            Some(("请选择 1–100 个不重复的目标", "請選擇 1–100 個不重複的目標"))
+        }
+        (ErrorCode::InvalidRequestBody, "grant and revoke overlap") => {
+            Some(("授予和撤销的权限不能重叠", "授予和撤銷的權限不能重疊"))
+        }
+        (
+            ErrorCode::InvalidRequestBody,
+            "cannot grant a permission while revoking its dependency",
+        ) => Some(("不能在撤销依赖时授予该权限", "不能在撤銷依賴時授予該權限")),
+        (ErrorCode::InvalidRequestBody, "super admin permissions are intrinsic") => {
+            Some(("超管权限由身份决定", "超管權限由身分決定"))
+        }
+        (ErrorCode::InvalidRequestBody, "tag name must contain 1 to 50 characters") => {
+            Some(("标签名称须为 1–50 个字符", "標籤名稱須為 1–50 個字元"))
+        }
+        (ErrorCode::InvalidRequestBody, "invalid tag color") => {
+            Some(("标签颜色无效", "標籤顏色無效"))
+        }
+        _ => return None,
+    }?;
+    match locale {
+        Locale::ZhHans => Some(hans),
+        Locale::ZhHant => Some(hant),
+        Locale::EnGb | Locale::EnUs => None,
+    }
+}
+
+fn extra_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'static str> {
+    let (hant, english) = match (code, source) {
+        (ErrorCode::NotFound, "申请不存在") => Some(("找不到申請", "Application not found.")),
+        (ErrorCode::NotFound, "用户不存在") => Some(("找不到使用者", "User not found.")),
+        (ErrorCode::NotFound, "音频暂不可用") => {
+            Some(("音訊暫時無法使用", "Audio is temporarily unavailable."))
+        }
+        (
+            ErrorCode::InvalidRequestBody,
+            "此内容包含新版加粗或下划线格式，请保留本地输入并刷新页面后再保存",
+        ) => Some((
+            "此內容包含新版粗體或底線格式，請保留本機輸入並重新整理頁面後再儲存",
+            "This content uses newer bold or underline formatting. Preserve your local input and reload before saving.",
+        )),
+        (
+            ErrorCode::InvalidRequestBody,
+            "此内容包含新版文本配音版本，请保留本地输入并刷新页面后再保存",
+        ) => Some((
+            "此內容包含新版文字配音版本，請保留本機輸入並重新整理頁面後再儲存",
+            "This content uses newer text dubbing versions. Preserve your local input and reload before saving.",
+        )),
+        (
+            ErrorCode::InvalidSpeechPreview | ErrorCode::InvalidRequestBody,
+            "该模型暂仅支持原速、原调、原音量的自然朗读，不支持风格、停顿或指定音素",
+        ) => Some((
+            "此模型暫僅支援原速、原調、原音量的自然朗讀，不支援風格、停頓或指定音素",
+            "This model currently supports natural reading at the original rate, pitch and volume only; styles, pauses and specified phonemes are unavailable.",
+        )),
+        (
+            ErrorCode::InvalidRequestBody,
+            "指定音素尚未验证适用于该原生地区，请明确选择自然朗读或使用匹配地区的音色",
+        ) => Some((
+            "指定音素尚未驗證適用於該原生地區，請明確選擇自然朗讀或使用符合地區的音色",
+            "The specified phoneme has not been verified for this native locale. Choose natural reading or a voice with a matching locale.",
+        )),
+        (ErrorCode::InvalidRequestBody, "分页参数无效") => {
+            Some(("分頁參數無效", "The pagination parameters are invalid."))
+        }
+        (ErrorCode::AudioStorageNotConfigured, "音频存储尚未配置") => {
+            Some(("音訊儲存尚未設定", "Audio storage is not configured."))
+        }
+        (
+            ErrorCode::ValidationFailed,
+            "此内容包含新版加粗或下划线格式，请保留本地输入并刷新页面后再保存",
+        ) => Some((
+            "此內容包含新版粗體或底線格式，請保留本機輸入並重新整理頁面後再儲存",
+            "This content uses newer bold or underline formatting. Preserve your local input and reload before saving.",
+        )),
+        (
+            ErrorCode::ValidationFailed,
+            "此内容包含新版文本配音版本，请保留本地输入并刷新页面后再保存",
+        ) => Some((
+            "此內容包含新版文字配音版本，請保留本機輸入並重新整理頁面後再儲存",
+            "This content uses newer text dubbing versions. Preserve your local input and reload before saving.",
+        )),
+        (ErrorCode::InvalidRequestBody, "问题或上下文过长，请缩小问题范围后重试") => {
+            Some((
+                "問題或上下文過長，請縮小問題範圍後重試",
+                "The question or context is too long. Narrow the question and try again.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "归档词条不能生成导入候选") => Some((
+            "封存詞條不能產生匯入候選",
+            "Import candidates cannot be generated for an archived entry.",
+        )),
+        (ErrorCode::InvalidRequestBody, "词条或当前编辑内容无效，请缩小范围后重试") => {
+            Some((
+                "詞條或目前編輯內容無效，請縮小範圍後重試",
+                "The entry or current edit is invalid. Narrow the scope and try again.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "当前编辑内容过大，请缩小问题范围后重试") => {
+            Some((
+                "目前編輯內容過大，請縮小問題範圍後重試",
+                "The current edit is too large. Narrow the question and try again.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "查询资料过多，请缩小问题范围后重试") => {
+            Some((
+                "查詢資料過多，請縮小問題範圍後重試",
+                "Too much material was retrieved. Narrow the question and try again.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "当前编辑结构无效，请核对草稿后重试") => {
+            Some((
+                "目前編輯結構無效，請核對草稿後重試",
+                "The current edit structure is invalid. Check the draft and try again.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "当前编辑内容过多，请缩小问题范围后重试") => {
+            Some((
+                "目前編輯內容過多，請縮小問題範圍後重試",
+                "The current edit contains too much content. Narrow the question and try again.",
+            ))
+        }
+        (ErrorCode::PayloadTooLarge, "图片不能超过10MB") => {
+            Some(("圖片不能超過 10MB", "The image cannot exceed 10MB."))
+        }
+        (ErrorCode::InvalidRequestBody, "无法读取图片") => {
+            Some(("無法讀取圖片", "The image could not be read."))
+        }
+        (ErrorCode::AudioStorageNotConfigured, "音频存储未配置") => {
+            Some(("音訊儲存尚未設定", "Audio storage is not configured."))
+        }
+        (ErrorCode::InvalidQuery, "请输入有效的英文词条名称") => Some((
+            "請輸入有效的英文詞條名稱",
+            "Enter a valid English entry name.",
+        )),
+        (ErrorCode::LexiconAssistantRateLimited, "助手正在回答或提问过于频繁，请稍后重试") => {
+            Some((
+                "助手正在回答或提問過於頻繁，請稍後重試",
+                "The assistant is responding or requests are too frequent. Try again later.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "音频清单摘要无效") => {
+            Some(("音訊清單摘要無效", "The audio manifest digest is invalid."))
+        }
+        (ErrorCode::InvalidQuery, "待关联修复搜索须显式使用 draft 视图") => Some((
+            "待關聯修復搜尋須明確使用 draft 檢視",
+            "Pending link repair searches must explicitly use the draft view.",
+        )),
+        (ErrorCode::InvalidQuery, "发布序号必须为正数") => Some((
+            "發布序號必須為正數",
+            "The publication number must be positive.",
+        )),
+        (ErrorCode::SentenceNotFound, "例句不存在或已删除") => Some((
+            "例句不存在或已刪除",
+            "The sentence does not exist or has been deleted.",
+        )),
+        (ErrorCode::InvalidQuery, "分页或查询参数无效") => Some((
+            "分頁或查詢參數無效",
+            "The pagination or query parameters are invalid.",
+        )),
+        (ErrorCode::NotFound, "复习不存在") => Some(("找不到複習", "Review not found.")),
+        (ErrorCode::NotFound, "复习功能尚未开放") => {
+            Some(("複習功能尚未開放", "Review is not available yet."))
+        }
+        (ErrorCode::SpeechProviderUnavailable, "正式音频生成暂不可用，请稍后重试") => {
+            Some((
+                "正式音訊產生暫時無法使用，請稍後重試",
+                "Published audio generation is temporarily unavailable. Try again later.",
+            ))
+        }
+        (ErrorCode::SpeechStorageUnavailable, "音频存储暂不可用，请使用相同请求重试") => {
+            Some((
+                "音訊儲存暫時無法使用，請使用相同請求重試",
+                "Audio storage is temporarily unavailable. Retry the same request.",
+            ))
+        }
+        (ErrorCode::SpeechPreviewInProgress, "音频正在生成，请稍后重试") => Some((
+            "音訊正在產生，請稍後重試",
+            "Audio is being generated. Try again later.",
+        )),
+        (ErrorCode::Forbidden, "生成正式音频需要内容编辑权限") => Some((
+            "產生正式音訊需要內容編輯權限",
+            "Content editing permission is required to generate published audio.",
+        )),
+        (ErrorCode::InvalidSpeechPreview, "音色或模型能力未经当前资源确认，不能生成") => {
+            Some((
+                "音色或模型能力未經目前資源確認，無法產生",
+                "The voice or model capability has not been confirmed for this resource and cannot be generated.",
+            ))
+        }
+        (ErrorCode::IdempotencyConflict, "请求编号已用于其他配音内容") => Some((
+            "請求編號已用於其他配音內容",
+            "The request ID was already used for different dubbing content.",
+        )),
+        (ErrorCode::InvalidSpeechPreview, "该模型需要新版配音能力，请刷新页面") => {
+            Some((
+                "此模型需要新版配音功能，請重新整理頁面",
+                "This model requires updated dubbing capabilities. Reload the page.",
+            ))
+        }
+        (ErrorCode::InvalidSpeechPreview, "指定发音必须提供源音素地区") => Some((
+            "指定發音必須提供來源音素地區",
+            "A source phoneme locale is required for a specified pronunciation.",
+        )),
+        (ErrorCode::InvalidSpeechPreview, "该音色需要新版配音能力，请刷新页面") => {
+            Some((
+                "此音色需要新版配音功能，請重新整理頁面",
+                "This voice requires updated dubbing capabilities. Reload the page.",
+            ))
+        }
+        (ErrorCode::InvalidSpeechPreview, "生成音频须绑定配音版本，不能作为上传录音保存") => {
+            Some((
+                "產生的音訊須綁定配音版本，不能作為上傳錄音儲存",
+                "Generated audio must be bound to a dubbing version and cannot be saved as an uploaded recording.",
+            ))
+        }
+        (ErrorCode::InvalidSpeechPreview, "正式音频与当前声音效果不一致，请重新生成或移除音频") => {
+            Some((
+                "正式音訊與目前聲音效果不一致，請重新產生或移除音訊",
+                "The published audio does not match the current voice effect. Regenerate or remove it.",
+            ))
+        }
+        (
+            ErrorCode::InvalidSpeechPreview,
+            "正式音频与当前正文、读法或参数不一致，请重新生成或移除音频",
+        ) => Some((
+            "正式音訊與目前正文、讀法或參數不一致，請重新產生或移除音訊",
+            "The published audio does not match the current text, pronunciation or settings. Regenerate or remove it.",
+        )),
+        (ErrorCode::InvalidRequestBody, "等待时长必须为 0–3600 秒") => Some((
+            "等待時間必須為 0–3600 秒",
+            "The wait must be between 0 and 3600 seconds.",
+        )),
+        (ErrorCode::NotFound, "分组不存在") => Some(("找不到分組", "Group not found.")),
+        (ErrorCode::InvalidSpeechPreview, "配音内容或参数无效，请重新打开编辑器检查") => {
+            Some((
+                "配音內容或參數無效，請重新開啟編輯器檢查",
+                "The dubbing content or settings are invalid. Reopen the editor and check them.",
+            ))
+        }
+        (ErrorCode::InvalidSpeechPreview, "音素地区必须与音色原生地区完全一致") => {
+            Some((
+                "音素地區必須與音色原生地區完全一致",
+                "The phoneme locale must exactly match the voice's native locale.",
+            ))
+        }
+        (
+            ErrorCode::InvalidSpeechPreview,
+            "指定音素或关联词形尚未验证适用于该原生地区，请明确选择自然朗读或使用匹配地区的音色",
+        ) => Some((
+            "指定音素或關聯詞形尚未驗證適用於該原生地區，請明確選擇自然朗讀或使用符合地區的音色",
+            "The specified phoneme or linked form has not been verified for this native locale. Choose natural reading or a voice with a matching locale.",
+        )),
+        (
+            ErrorCode::InvalidSpeechPreview,
+            "当前口音没有满足声音、参数和读法能力的已选推荐，请明确选择或修复配置",
+        ) => Some((
+            "目前口音沒有符合聲音、參數和讀法能力的已選推薦，請明確選擇或修復設定",
+            "No selected recommendation for this accent supports the voice, settings and pronunciation. Choose one or fix the configuration.",
+        )),
+        (
+            ErrorCode::InvalidSpeechPreview,
+            "局部池同一供应商官方音色只能保留一个配置，请明确处理历史冲突",
+        ) => Some((
+            "局部池中同一供應商官方音色只能保留一個設定，請明確處理歷史衝突",
+            "Only one configuration per provider voice is allowed in the local pool. Resolve the existing conflict.",
+        )),
+        (
+            ErrorCode::InvalidSpeechPreview,
+            "新增直接音素仅允许试听；请使用结构化读法引用或特殊读法保存",
+        ) => Some((
+            "新增直接音素僅允許試聽；請使用結構化讀法引用或特殊讀法儲存",
+            "New direct phonemes are only available for preview. Save a structured pronunciation reference or special pronunciation instead.",
+        )),
+        (ErrorCode::NotFound, "通知不存在") => Some(("找不到通知", "Notification not found.")),
+        (ErrorCode::Forbidden, "当前账号不能申请") => {
+            Some(("目前帳號無法申請", "This account cannot apply."))
+        }
+        (ErrorCode::ServiceUnavailable, "认证材料存储暂不可用") => Some((
+            "認證資料儲存暫時無法使用",
+            "Certification document storage is temporarily unavailable.",
+        )),
+        (ErrorCode::NotFound, "材料不存在") => Some(("找不到資料", "Document not found.")),
+        (ErrorCode::NotFound, "词条暂不可用") => {
+            Some(("詞條暫時無法使用", "The entry is temporarily unavailable."))
+        }
+        (ErrorCode::ServiceUnavailable, "词库助手暂时不可用，请稍后重试；当前编辑已保留") => {
+            Some((
+                "詞庫助手暫時無法使用，請稍後重試；目前編輯已保留",
+                "The lexicon assistant is temporarily unavailable. Try again later; your current edits are preserved.",
+            ))
+        }
+        (ErrorCode::Forbidden, "需要词库发布权限，且仅超管可以发布他人的草稿") => {
+            Some((
+                "需要詞庫發布權限，且僅超管可以發布他人的草稿",
+                "Lexicon publishing permission is required; only super administrators can publish another person's draft.",
+            ))
+        }
+        (
+            ErrorCode::ReferenceConflict,
+            "词条被共享例句标注，请先在多维例句库解除对应标注，再移入垃圾桶。",
+        ) => Some((
+            "詞條被共享例句標註，請先在多維例句庫解除對應標註，再移入垃圾桶。",
+            "This entry is annotated by a shared sentence. Remove the annotation in the sentence library before moving it to the trash.",
+        )),
+        (
+            ErrorCode::InboundReferenceConflict,
+            "本次修改会破坏其他内容对本词条的引用，请先解除或调整这些引用。",
+        ) => Some((
+            "本次修改會破壞其他內容對本詞條的引用，請先解除或調整這些引用。",
+            "This change would break references to this entry. Remove or adjust those references first.",
+        )),
+        (ErrorCode::InvalidQuery, "请输入 1–200 字的词条名称") => Some((
+            "請輸入 1–200 字的詞條名稱",
+            "Enter an entry name of 1–200 characters.",
+        )),
+        (ErrorCode::NotFound, "关联词已不可用") => Some((
+            "關聯詞已無法使用",
+            "The related word is no longer available.",
+        )),
+        (ErrorCode::InvalidRequestBody, "上传录音地区须为 en-GB 或 en-US") => Some((
+            "上傳錄音地區須為 en-GB 或 en-US",
+            "The uploaded recording locale must be en-GB or en-US.",
+        )),
+        (ErrorCode::NotFound, "词条不存在") => Some(("找不到詞條", "Entry not found.")),
+        (ErrorCode::ReferenceConflict, "词条正在被修改，请稍后重试") => Some((
+            "詞條正在修改，請稍後重試",
+            "The entry is being modified. Try again later.",
+        )),
+        (ErrorCode::Forbidden, "仅超管可以永久删除例句") => Some((
+            "僅超管可以永久刪除例句",
+            "Only super administrators can permanently delete sentences.",
+        )),
+        (ErrorCode::ReferenceConflict, "已有发布历史的例句不能删除，请使用全局下架") => {
+            Some((
+                "已有發布歷史的例句不能刪除，請使用全域下架",
+                "A sentence with publication history cannot be deleted. Unpublish it globally instead.",
+            ))
+        }
+        (ErrorCode::IdempotencyConflict, "此创建 ID 已用于其他内容") => Some((
+            "此建立 ID 已用於其他內容",
+            "This creation ID was already used for different content.",
+        )),
+        (ErrorCode::Forbidden, "仅创建者或超管可以改变例句发布状态") => Some((
+            "僅建立者或超管可以變更例句發布狀態",
+            "Only the creator or a super administrator can change the sentence publication status.",
+        )),
+        (ErrorCode::IdempotencyConflict, "幂等键已用于其他请求") => Some((
+            "冪等鍵已用於其他請求",
+            "The idempotency key was already used for another request.",
+        )),
+        (ErrorCode::ReferenceConflict, "引用正在被修改，请重试") => Some((
+            "引用正在修改，請重試",
+            "The reference is being modified. Try again.",
+        )),
+        (ErrorCode::ReferenceConflict, "宿主正在修改，请重试") => Some((
+            "宿主正在修改，請重試",
+            "The host is being modified. Try again.",
+        )),
+        (ErrorCode::Forbidden, "仅超管可以管理例句垃圾桶") => Some((
+            "僅超管可以管理例句垃圾桶",
+            "Only super administrators can manage the sentence trash.",
+        )),
+        (ErrorCode::ReferenceConflict, "已有发布历史的例句不能移入垃圾桶，请使用撤回") => {
+            Some((
+                "已有發布歷史的例句不能移入垃圾桶，請使用撤回",
+                "A sentence with publication history cannot be moved to the trash. Withdraw it instead.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "推荐套身份不完整或重复") => Some((
+            "推薦套識別資料不完整或重複",
+            "Recommendation set identities are incomplete or duplicated.",
+        )),
+        (ErrorCode::InvalidRequestBody, "分组身份不匹配") => {
+            Some(("分組識別資料不符", "The group identity does not match."))
+        }
+        (ErrorCode::InvalidRequestBody, "配对请求必须使用 X-TSZ-Dubbing-Groups: v3") => {
+            Some((
+                "配對請求必須使用 X-TSZ-Dubbing-Groups: v3",
+                "Pairing requests require X-TSZ-Dubbing-Groups: v3.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "转换配对须保留所有历史推荐身份，请明确补齐配对") => {
+            Some((
+                "轉換配對須保留所有歷史推薦識別資料，請明確補齊配對",
+                "Conversion must preserve all historical recommendation identities. Complete the pairs.",
+            ))
+        }
+        (ErrorCode::NotFound, "内容不存在或已归档") => Some((
+            "找不到內容或內容已封存",
+            "The content does not exist or has been archived.",
+        )),
+        (
+            ErrorCode::InvalidSpeechPreview,
+            "指定音素尚未验证适用于该原生地区，请明确选择自然朗读或使用匹配地区的音色",
+        ) => Some((
+            "指定音素尚未驗證適用於該原生地區，請明確選擇自然朗讀或使用符合地區的音色",
+            "The specified phoneme has not been verified for this native locale. Choose natural reading or a voice with a matching locale.",
+        )),
+        (ErrorCode::InvalidRequestBody, "英文语音或富文本设置无效") => Some((
+            "英文語音或富文字設定無效",
+            "The English audio or rich text settings are invalid.",
+        )),
+        (ErrorCode::InvalidRequestBody, "请选择例句等级") => {
+            Some(("請選擇例句等級", "Select a sentence level."))
+        }
+        (ErrorCode::InvalidRequestBody, "请通过句内标注关联具体词条") => Some((
+            "請透過句內標註關聯具體詞條",
+            "Link a specific entry using an annotation in the sentence.",
+        )),
+        (ErrorCode::InvalidRequestBody, "至少填写一条译文") => {
+            Some(("至少填寫一條譯文", "Enter at least one translation."))
+        }
+        (ErrorCode::InvalidRequestBody, "译文不能为空或重复") => Some((
+            "譯文不能為空或重複",
+            "Translations cannot be empty or duplicated.",
+        )),
+        (ErrorCode::InvalidRequestBody, "译文标注无效") => {
+            Some(("譯文標註無效", "The translation annotation is invalid."))
+        }
+        (ErrorCode::InvalidRequestBody, "译文主项不一致") => {
+            Some(("譯文主項不一致", "The primary translation does not match."))
+        }
+        (ErrorCode::InvalidRequestBody, "英文例句不能为空或过长") => Some((
+            "英文例句不能為空或過長",
+            "The English sentence cannot be empty or too long.",
+        )),
+        (ErrorCode::InvalidRequestBody, "英文格式无效") => {
+            Some(("英文格式無效", "The English formatting is invalid."))
+        }
+        (ErrorCode::InvalidRequestBody, "英文标注无效") => {
+            Some(("英文標註無效", "The English annotation is invalid."))
+        }
+        (ErrorCode::InvalidRequestBody, "例句或标注数量无效") => Some((
+            "例句或標註數量無效",
+            "The number of sentences or annotations is invalid.",
+        )),
+        (ErrorCode::InvalidRequestBody, "标注 ID 或片段无效") => Some((
+            "標註 ID 或片段無效",
+            "The annotation ID or segment is invalid.",
+        )),
+        (ErrorCode::InvalidRequestBody, "标注方言不存在") => {
+            Some(("標註方言不存在", "The annotation dialect does not exist."))
+        }
+        (ErrorCode::InvalidRequestBody, "标注位置与例句不一致，请重新选择") => {
+            Some((
+                "標註位置與例句不一致，請重新選擇",
+                "The annotation position does not match the sentence. Select it again.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "句内标注不能重叠") => {
+            Some(("句內標註不能重疊", "Sentence annotations cannot overlap."))
+        }
+        (ErrorCode::InvalidRequestBody, "待关联词条信息无效") => Some((
+            "待關聯詞條資訊無效",
+            "The pending entry information is invalid.",
+        )),
+        (ErrorCode::InvalidRequestBody, "关联词条不存在或已归档") => Some((
+            "關聯詞條不存在或已封存",
+            "The linked entry does not exist or has been archived.",
+        )),
+        (ErrorCode::InvalidRequestBody, "待关联词面无效") => {
+            Some(("待關聯詞面無效", "The pending text to link is invalid."))
+        }
+        (ErrorCode::InvalidRequestBody, "垃圾桶只支持草稿视图") => Some((
+            "垃圾桶只支援草稿檢視",
+            "The trash supports only the draft view.",
+        )),
+        (ErrorCode::InvalidRequestBody, "目标词条不存在、已归档或没有可匹配词形") => {
+            Some((
+                "目標詞條不存在、已封存或沒有可比對詞形",
+                "The target entry does not exist, is archived or has no matching form.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "目标词形无效") => {
+            Some(("目標詞形無效", "The target form is invalid."))
+        }
+        (ErrorCode::InvalidRequestBody, "来源词条与词义必须同时提供") => Some((
+            "來源詞條與詞義必須同時提供",
+            "Provide both the source entry and sense.",
+        )),
+        (ErrorCode::InvalidRequestBody, "当前词条与词义必须同时提供") => Some((
+            "目前詞條與詞義必須同時提供",
+            "Provide both the current entry and sense.",
+        )),
+        (ErrorCode::InvalidRequestBody, "例句 ID 不可更改") => {
+            Some(("例句 ID 不可變更", "The sentence ID cannot be changed."))
+        }
+        (ErrorCode::InvalidRequestBody, "请选择完整单词或短语") => {
+            Some(("請選擇完整單字或片語", "Select a complete word or phrase."))
+        }
+        (ErrorCode::InvalidRequestBody, "请选择完整单词，不能截取单词的一部分") => {
+            Some((
+                "請選擇完整單字，不能截取單字的一部分",
+                "Select the complete word, not part of it.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "关联短语不能跨越句子边界") => Some((
+            "關聯片語不能跨越句子邊界",
+            "A linked phrase cannot cross sentence boundaries.",
+        )),
+        (ErrorCode::InvalidRequestBody, "所选文字不能构成单词或短语") => Some((
+            "所選文字不能構成單字或片語",
+            "The selected text does not form a word or phrase.",
+        )),
+        (ErrorCode::InvalidRequestBody, "所选词面无效") => {
+            Some(("所選詞面無效", "The selected text is invalid."))
+        }
+        (ErrorCode::InvalidRequestBody, "请先将句中的单词或短语关联到当前词义") => {
+            Some((
+                "請先將句中的單字或片語關聯到目前詞義",
+                "First link the word or phrase in the sentence to the current sense.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "旧关联尚未选择具体词义，请补全或清除") => {
+            Some((
+                "舊關聯尚未選擇具體詞義，請補全或清除",
+                "The old link has no specific sense. Complete or remove it.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "关联词义或词形已失效，请按词条、词形、词义重新选择") => {
+            Some((
+                "關聯詞義或詞形已失效，請依詞條、詞形、詞義重新選擇",
+                "The linked sense or form is no longer valid. Select the entry, form and sense again.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "词条查询参数无效") => Some((
+            "詞條查詢參數無效",
+            "The entry query parameters are invalid.",
+        )),
+        (ErrorCode::InvalidRequestBody, "每段正文最多引用 8 条不重复的音频") => {
+            Some((
+                "每段正文最多引用 8 條不重複的音訊",
+                "Each text segment can reference at most 8 distinct audio items.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "音频不存在、不可访问或已被其他内容使用") => {
+            Some((
+                "音訊不存在、無法存取或已被其他內容使用",
+                "The audio does not exist, is inaccessible or is used by other content.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "音频不存在、不可访问或正在回收") => Some((
+            "音訊不存在、無法存取或正在回收",
+            "The audio does not exist, is inaccessible or is being reclaimed.",
+        )),
+        (ErrorCode::InvalidRequestBody, "发布前必须补全旧词义关联") => Some((
+            "發布前必須補全舊詞義關聯",
+            "Complete the old sense links before publishing.",
+        )),
+        (ErrorCode::InvalidRequestBody, "关联目标尚未发布或已归档，请显式选择依赖一起发布") => {
+            Some((
+                "關聯目標尚未發布或已封存，請明確選擇依賴一起發布",
+                "The linked target is unpublished or archived. Explicitly select the dependency to publish with it.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "已发布目标词义、词形或词面不匹配") => {
+            Some((
+                "已發布目標詞義、詞形或詞面不符",
+                "The published target sense, form or text does not match.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "词面无效") => {
+            Some(("詞面無效", "The text is invalid."))
+        }
+        (ErrorCode::InvalidRequestBody, "关联必须精确到词义") => {
+            Some(("關聯必須精確到詞義", "The link must specify a sense."))
+        }
+        (ErrorCode::InvalidRequestBody, "例句尚未发布") => {
+            Some(("例句尚未發布", "The sentence has not been published."))
+        }
+        (ErrorCode::InvalidRequestBody, "下架原因须为 1–2000 个字符") => Some((
+            "下架原因須為 1–2000 個字元",
+            "The unpublishing reason must be 1–2000 characters.",
+        )),
+        (ErrorCode::InvalidRequestBody, "仅支持 V3 词条") => {
+            Some(("僅支援 V3 詞條", "Only V3 entries are supported."))
+        }
+        (ErrorCode::InvalidRequestBody, "词义不属于宿主词条") => Some((
+            "詞義不屬於宿主詞條",
+            "The sense does not belong to the host entry.",
+        )),
+        (ErrorCode::InvalidRequestBody, "例句未关联该词义") => Some((
+            "例句未關聯該詞義",
+            "The sentence is not linked to this sense.",
+        )),
+        (ErrorCode::InvalidRequestBody, "认证状态无效") => {
+            Some(("認證狀態無效", "The certification status is invalid."))
+        }
+        (ErrorCode::InvalidRequestBody, "姓名为1至50字，认证说明为1至2000字") => {
+            Some((
+                "姓名為 1 至 50 字，認證說明為 1 至 2000 字",
+                "The name must be 1–50 characters and the certification description 1–2000 characters.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "请填写有效的手机号或邮箱") => Some((
+            "請填寫有效的手機號碼或電郵地址",
+            "Enter a valid phone number or email address.",
+        )),
+        (ErrorCode::InvalidRequestBody, "学历证书和语言成绩各需1至10张图片") => {
+            Some((
+                "學歷證書和語言成績各需 1 至 10 張圖片",
+                "Provide 1–10 images each for education certificates and language results.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "同一材料不能重复提交") => Some((
+            "同一資料不能重複提交",
+            "The same document cannot be submitted twice.",
+        )),
+        (ErrorCode::InvalidRequestBody, "材料无效、已过期或不属于当前账号") => {
+            Some((
+                "資料無效、已過期或不屬於目前帳號",
+                "The document is invalid, expired or does not belong to this account.",
+            ))
+        }
+        (ErrorCode::InvalidRequestBody, "驳回必须填写原因") => {
+            Some(("駁回必須填寫原因", "Enter a reason for rejection."))
+        }
+        (ErrorCode::InvalidRequestBody, "原因不得超过2000字") => Some((
+            "原因不得超過 2000 字",
+            "The reason cannot exceed 2000 characters.",
+        )),
+        (ErrorCode::InvalidRequestBody, "撤销原因需填写1至2000字") => Some((
+            "撤銷原因需填寫 1 至 2000 字",
+            "The withdrawal reason must be 1–2000 characters.",
+        )),
+        (ErrorCode::InvalidRequestBody, "材料类型无效") => {
+            Some(("資料類型無效", "The document type is invalid."))
+        }
+        (ErrorCode::InvalidRequestBody, "只支持JPEG、PNG和WebP图片") => Some((
+            "只支援 JPEG、PNG 和 WebP 圖片",
+            "Only JPEG, PNG and WebP images are supported.",
+        )),
+        (ErrorCode::InvalidRequestBody, "图片需在10MB以内且不能为空") => Some((
+            "圖片需在 10MB 以內且不能為空",
+            "The image must be nonempty and no larger than 10MB.",
+        )),
+        (ErrorCode::InvalidRequestBody, "图片格式与内容不一致") => Some((
+            "圖片格式與內容不一致",
+            "The image format does not match its content.",
+        )),
+        (ErrorCode::InvalidRequestBody, "图片损坏或像素过大") => Some((
+            "圖片損壞或像素過大",
+            "The image is corrupt or has too many pixels.",
+        )),
+        (ErrorCode::InvalidRequestBody, "待提交材料过多，请删除不需要的图片后重试") => {
+            Some((
+                "待提交資料過多，請刪除不需要的圖片後重試",
+                "Too many documents are pending. Remove unneeded images and try again.",
+            ))
+        }
+        _ => return None,
+    }?;
+    match locale {
+        Locale::ZhHans => None,
+        Locale::ZhHant => Some(hant),
+        Locale::EnGb | Locale::EnUs => Some(english),
+    }
 }
 
 fn detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'static str> {
-    details_for(code)
-        .iter()
-        .find(|m| m.0 == source)
-        .map(|m| match locale {
-            Locale::ZhHans => m.1,
-            Locale::ZhHant => m.2,
-            Locale::EnGb | Locale::EnUs => m.3,
-        })
+    english_detail(code, source, locale)
+        .or_else(|| extra_detail(code, source, locale))
         .or_else(|| {
-            source
-                .eq_ignore_ascii_case(code.descriptor().title)
-                .then(|| title(code, locale))
+            details_for(code)
+                .iter()
+                .find(|m| m.0 == source)
+                .map(|m| match locale {
+                    Locale::ZhHans => m.1,
+                    Locale::ZhHant => m.2,
+                    Locale::EnGb | Locale::EnUs => m.3,
+                })
+                .or_else(|| {
+                    source
+                        .eq_ignore_ascii_case(code.descriptor().title)
+                        .then(|| title(code, locale))
+                })
         })
 }
 
@@ -335,6 +2335,18 @@ fn details_for(
             "Invalid JSON.",
         )],
         ErrorCode::InvalidRequestBody => &[
+            (
+                "模型或 API Key 配置无效，请检查后重试",
+                "模型或 API Key 配置无效，请检查后重试",
+                "模型或 API Key 設定無效，請檢查後重試",
+                "The model or API key configuration is invalid. Check it and try again.",
+            ),
+            (
+                "ChatGPT 账号操作未完成，请检查账号状态或取消正在进行的登录后重试",
+                "ChatGPT 账号操作未完成，请检查账号状态或取消正在进行的登录后重试",
+                "ChatGPT 帳號操作未完成，請檢查帳號狀態或取消進行中的登入後重試",
+                "The ChatGPT account operation did not complete. Check the account status or cancel the ongoing sign-in and try again.",
+            ),
             (
                 "当前没有可重新确认的词义，请先恢复来源或补足可靠干扰项",
                 "当前没有可重新确认的词义，请先恢复来源或补足可靠干扰项",
@@ -646,6 +2658,12 @@ fn details_for(
             ),
         ],
         ErrorCode::InvalidPathParameter => &[
+            (
+                "无效的登录请求",
+                "无效的登录请求",
+                "無效的登入請求",
+                "Invalid sign-in request.",
+            ),
             (
                 "locale 须为 en-GB 或 en-US",
                 "locale 须为 en-GB 或 en-US",
@@ -1145,6 +3163,30 @@ fn details_for(
         )],
         ErrorCode::ServiceUnavailable => &[
             (
+                "OpenCode 连接暂时不可用，请稍后重试",
+                "OpenCode 连接暂时不可用，请稍后重试",
+                "OpenCode 連線暫時無法使用，請稍後重試",
+                "The OpenCode connection is temporarily unavailable. Try again later.",
+            ),
+            (
+                "模型服务暂时不可用，请稍后重试",
+                "模型服务暂时不可用，请稍后重试",
+                "模型服務暫時無法使用，請稍後重試",
+                "The model service is temporarily unavailable. Try again later.",
+            ),
+            (
+                "ChatGPT 账号服务暂时不可用，请刷新重试",
+                "ChatGPT 账号服务暂时不可用，请刷新重试",
+                "ChatGPT 帳號服務暫時無法使用，請重新整理後重試",
+                "The ChatGPT account service is temporarily unavailable. Reload and try again.",
+            ),
+            (
+                "AI 账本暂时不可用，请稍后重试",
+                "AI 账本暂时不可用，请稍后重试",
+                "AI 帳本暫時無法使用，請稍後重試",
+                "The AI ledger is temporarily unavailable. Try again later.",
+            ),
+            (
                 "request timed out; outcome may be unknown",
                 "请求超时，操作结果尚未确认，请先查看结果",
                 "請求逾時，操作結果尚未確認，請先查看結果",
@@ -1422,6 +3464,12 @@ fn details_for(
             ),
         ],
         ErrorCode::NotFound => &[
+            (
+                "身份证件不存在",
+                "身份证件不存在",
+                "找不到身分證件",
+                "Identity document not found.",
+            ),
             (
                 "语音暂不可用",
                 "语音暂不可用",
@@ -1998,6 +4046,23 @@ mod tests {
 
     #[test]
     fn insufficient_questions_keeps_counts_and_preview_guidance() {
+        let revision = DetailTemplate::PositiveRevision {
+            field: "base_revision",
+        };
+        assert_eq!(
+            revision.render(Locale::ZhHant),
+            "base_revision 必須至少為 1"
+        );
+        assert_eq!(
+            revision.render(Locale::EnUs),
+            "base_revision must be at least 1"
+        );
+        let voice = DetailTemplate::InvalidVoiceField { field: "locale" };
+        assert_eq!(voice.render(Locale::ZhHant), "音色欄位 locale 無效");
+        assert_eq!(
+            voice.render(Locale::EnUs),
+            "voice field 'locale' is invalid"
+        );
         let source = "仅有 3 道可出题内容，需要 20 道；请查看预览排除原因";
         assert_eq!(
             detail(
@@ -2022,6 +4087,121 @@ mod tests {
                 "Only 3 questions are available; 20 are required. Check the preview for exclusion reasons."
             );
         }
+    }
+
+    #[test]
+    fn field_issue_translation_preserves_location_and_unregistered_text() {
+        use crate::lexicon::dto::{
+            PersistedWordStep, V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode,
+        };
+        let node_id = uuid::Uuid::new_v4();
+        let mut issue = V3DraftValidationIssue {
+            schema_version: 3,
+            step: PersistedWordStep::Meanings,
+            node_id,
+            field: "sense_groups".into(),
+            code: V3ValidationIssueCode::SenseGroupRequired,
+            message: "至少需要一个语义区间".into(),
+            node_location: V3DraftNodeLocation {
+                content_id: None,
+                content_slot_id: None,
+                node_role: "entry".into(),
+                ancestor_node_ids: vec![],
+                pos_id: None,
+                form_group_id: None,
+                membership_id: None,
+                form_id: None,
+                variant_id: None,
+                pronunciation_id: None,
+                form_type: None,
+                dialect: None,
+            },
+        };
+        localize_issue(&mut issue, Locale::EnUs);
+        assert_eq!(issue.message, "At least one sense group is required.");
+        assert_eq!(issue.node_id, node_id);
+        assert_eq!(issue.field, "sense_groups");
+        issue.code = V3ValidationIssueCode::PosRequired;
+        issue.message = "a complete entry requires at least one part of speech".into();
+        localize_issue(&mut issue, Locale::ZhHant);
+        assert_eq!(issue.message, "完整詞條至少需要一個詞性");
+        issue.code = V3ValidationIssueCode::AudioAssetInvalid;
+        let limit = crate::lexicon::service::v3::MAX_VARIANT_AUDIO_ASSETS;
+        issue.message =
+            format!("a text or pronunciation variant may reference at most {limit} audio assets");
+        localize_issue(&mut issue, Locale::ZhHans);
+        assert_eq!(
+            issue.message,
+            format!("文本或发音变体最多引用 {limit} 条音频")
+        );
+        issue.code = V3ValidationIssueCode::PhraseComponentTargetUnavailable;
+        issue.message = "phrase component target is missing, archived or not a V3 word".into();
+        let mut response_issue = issue.clone();
+        localize_issue(&mut response_issue, Locale::ZhHant);
+        assert_eq!(
+            response_issue.message,
+            "片語成分目標不存在、已封存或不是 V3 單字"
+        );
+        let mut problem = ProblemDetails {
+            type_uri: ErrorCode::ValidationFailed.type_uri(),
+            title: "Validation failed",
+            status: 422,
+            detail: "V3 draft validation failed".into(),
+            code: ErrorCode::ValidationFailed,
+            field: None,
+            field_issues: Some(vec![issue.clone()]),
+            meta: None,
+        };
+        localize(&mut problem, Locale::ZhHans);
+        let failed_issue = &problem.field_issues.unwrap()[0];
+        assert_eq!(
+            failed_issue.message,
+            "短语成分目标不存在、已归档或不是 V3 单词"
+        );
+        assert_eq!(failed_issue.node_id, response_issue.node_id);
+        issue.message = "供应商原文".into();
+        localize_issue(&mut issue, Locale::EnUs);
+        assert_eq!(issue.message, "供应商原文");
+    }
+
+    #[test]
+    fn extra_details_require_exact_code_and_source() {
+        for source in [
+            crate::lexicon::sentence_formatting::UPGRADE_MESSAGE,
+            crate::lexicon::voice_versions::UPGRADE_MESSAGE,
+        ] {
+            assert!(
+                detail(ErrorCode::InvalidRequestBody, source, Locale::EnUs)
+                    .unwrap()
+                    .contains("Preserve your local input")
+            );
+        }
+        assert_eq!(
+            detail(ErrorCode::NotFound, "申请不存在", Locale::EnUs),
+            Some("Application not found.")
+        );
+        assert_eq!(
+            detail(ErrorCode::NotFound, "user not found", Locale::ZhHans),
+            Some("用户不存在")
+        );
+        let source = "音频存储暂不可用，请使用相同请求重试";
+        assert_eq!(
+            detail(ErrorCode::SpeechStorageUnavailable, source, Locale::EnUs),
+            Some("Audio storage is temporarily unavailable. Retry the same request.")
+        );
+        assert_eq!(
+            detail(ErrorCode::SpeechStorageUnavailable, source, Locale::ZhHant),
+            Some("音訊儲存暫時無法使用，請使用相同請求重試")
+        );
+        assert_eq!(detail(ErrorCode::Forbidden, source, Locale::EnUs), None);
+        assert_eq!(
+            detail(
+                ErrorCode::SpeechStorageUnavailable,
+                "供应商原文",
+                Locale::EnUs
+            ),
+            None
+        );
     }
 
     #[test]

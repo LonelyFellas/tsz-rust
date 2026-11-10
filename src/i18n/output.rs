@@ -230,6 +230,70 @@ mod tests {
         assert!(current_locale().is_none());
     }
 
+    #[tokio::test]
+    async fn typed_field_diagnostic_keeps_legacy_and_node_identity() {
+        use crate::lexicon::dto::{
+            PersistedWordStep, V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode,
+        };
+        let id = uuid::Uuid::new_v4();
+        let make_error = || {
+            AppError::unprocessable(ErrorCode::ValidationFailed, "invalid shared form mapping")
+                .with_v3_field_issues(vec![V3DraftValidationIssue {
+                    schema_version: 3,
+                    step: PersistedWordStep::Forms,
+                    node_id: id,
+                    field: "content_id".into(),
+                    code: V3ValidationIssueCode::FormContentMappingInvalid,
+                    message: format!("invalid content {id}"),
+                    node_location: V3DraftNodeLocation {
+                        content_id: Some(id),
+                        content_slot_id: None,
+                        node_role: "forms.content".into(),
+                        ancestor_node_ids: vec![],
+                        pos_id: None,
+                        form_group_id: None,
+                        membership_id: None,
+                        form_id: None,
+                        variant_id: None,
+                        pronunciation_id: None,
+                        form_type: None,
+                        dialect: None,
+                    },
+                }])
+                .with_issue_template(Some(crate::i18n::errors::IssueTemplate::InvalidContent(id)))
+        };
+        async fn json(error: AppError) -> serde_json::Value {
+            let bytes = error
+                .into_response()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+        let legacy = json(make_error()).await;
+        assert_eq!(
+            legacy["field_issues"][0]["message"],
+            format!("invalid content {id}")
+        );
+        let localized = REQUEST_LOCALE
+            .scope(Some(Locale::ZhHant), json(make_error()))
+            .await;
+        assert_eq!(
+            localized["field_issues"][0]["message"],
+            format!("內容 {id} 無效")
+        );
+        assert_eq!(
+            localized["field_issues"][0]["node_id"],
+            legacy["field_issues"][0]["node_id"]
+        );
+        assert_eq!(
+            localized["field_issues"][0]["node_location"],
+            legacy["field_issues"][0]["node_location"]
+        );
+    }
+
     #[test]
     fn opt_in_weights_surfaces_and_fallbacks() {
         let mut headers = HeaderMap::new();

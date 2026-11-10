@@ -171,7 +171,7 @@ fn validate_parameters(row: &PgRow, parameters: &VoiceParameters) -> Result<(), 
     .and_then(|options| {
         options.with_expression(&voice, parameters.style_degree, parameters.role.clone())
     })
-    .map_err(|error| AppError::bad_request(ErrorCode::InvalidRequestBody, error.to_string()))?;
+    .map_err(|error| crate::speech::model::model_error(ErrorCode::InvalidRequestBody, error))?;
     Ok(())
 }
 
