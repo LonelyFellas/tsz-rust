@@ -351,9 +351,17 @@ fn uploaded_audio(
             source_dialect,
             hd_flash: false,
             setting: None,
+            default_recording: asset.is_default,
         };
-        let index = asset
-            .is_default
+        // Preserve the first preferred recording from the active source before
+        // considering legacy pronunciation recordings or another text dialect.
+        let has_default = audio.iter().any(|candidate| {
+            candidate.default_recording
+                && candidate.target_id == target_id
+                && candidate.accent_group == item.accent_group
+                && candidate.source_dialect == source_dialect
+        });
+        let index = (asset.is_default && !has_default)
             .then(|| {
                 audio.iter().position(|candidate| {
                     candidate.target_id == target_id && candidate.accent_group == item.accent_group
@@ -388,6 +396,7 @@ fn generated_audio(
                 source_dialect,
                 hd_flash: setting.voice_id.starts_with("azure-hd-flash-"),
                 setting: Some(setting.clone()),
+                default_recording: false,
             });
         }
     }
@@ -488,6 +497,38 @@ async fn playable_audio_with_catalog(
 mod recording_default_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn active_spelling_recording_default_precedes_legacy_pronunciation_default() {
+        let target = Uuid::now_v7();
+        let spelling: crate::lexicon::audio_assets::dto::AudioAsset =
+            serde_json::from_value(json!({
+                "id":Uuid::now_v7(),"is_default":true,"locale":"en-GB","gender":"female",
+                "content_type":"audio/mpeg","size_bytes":3,"duration_ms":null,
+                "original_name":"spelling.mp3","created_at":"2026-11-10T00:00:00Z"
+            }))
+            .unwrap();
+        let legacy = crate::lexicon::audio_assets::dto::AudioAsset {
+            id: Uuid::now_v7(),
+            original_name: "legacy.mp3".into(),
+            ..spelling.clone()
+        };
+        let mut audio = vec![];
+        uploaded_audio(
+            &mut audio,
+            target,
+            Dialect::Common,
+            std::slice::from_ref(&spelling),
+        );
+        uploaded_audio(
+            &mut audio,
+            target,
+            Dialect::Common,
+            std::slice::from_ref(&legacy),
+        );
+        assert_eq!(audio[0].asset_id, spelling.id);
+        assert_eq!(audio[1].asset_id, legacy.id);
+    }
 
     #[test]
     fn dictionary_recording_default_precedes_only_its_own_target_and_accent() {
