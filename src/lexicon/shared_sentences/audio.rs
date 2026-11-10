@@ -97,9 +97,7 @@ pub(super) async fn validate_assets(
         return Err(invalid("音频不存在、不可访问或正在回收"));
     }
     for variant in variants_mut(text) {
-        for asset in &mut variant.audio_assets {
-            *asset = canonical[&asset.id].clone();
-        }
+        crate::lexicon::audio_assets::hydrate_recordings(&mut variant.audio_assets, &canonical)?;
     }
     Ok(())
 }

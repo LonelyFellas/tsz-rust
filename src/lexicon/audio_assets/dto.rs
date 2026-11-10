@@ -91,11 +91,14 @@ pub struct ConfirmAudioAssetRequest {
 }
 
 /// 一条已登记的音频资产。既是 confirm 的响应体，也内嵌在 `GrammarVariantV3.audio_assets` 里。
-/// 除 `id` 外的字段都是服务端权威元数据：保存词义时按 id 重新灌入，客户端回传的值不作数。
+/// `is_default` 是当前正文的播放选择；其余元数据保存时按 id 从服务端重新灌入。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AudioAsset {
     pub id: Uuid,
+    /// 同口音默认播放这条录音；省略时沿用合成音频优先。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_default: bool,
     pub locale: AudioAssetLocale,
     pub gender: AudioAssetGender,
     pub content_type: String,

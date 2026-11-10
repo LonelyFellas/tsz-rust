@@ -25,6 +25,9 @@ pub struct DictionaryAudio {
     #[serde(skip)]
     #[schema(ignore)]
     pub(crate) setting: Option<crate::lexicon::dto::VoiceSettingV3>,
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) default_recording: bool,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

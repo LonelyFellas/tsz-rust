@@ -309,6 +309,7 @@ impl AudioAssetService {
         self.deliver_confirmation(
             admin_id,
             AudioAsset {
+                is_default: false,
                 id,
                 locale,
                 gender,
