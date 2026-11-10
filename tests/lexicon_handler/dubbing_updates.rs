@@ -1,4 +1,78 @@
 use super::*;
+
+#[sqlx::test]
+async fn uploaded_recording_default_persists_after_save_and_independent_read(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = fixture_state(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let created = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let id = created["word"]["id"].as_str().unwrap();
+    let asset_path = "/pos/0/forms/0/regional_variants/uk/pronunciations/0/audio_assets/0";
+    let mut forms = created["word"]["forms"].clone();
+    let original = forms.pointer(asset_path).unwrap().clone();
+    forms.pointer_mut(asset_path).unwrap()["is_default"] = json!(true);
+    forms.pointer_mut(asset_path).unwrap()["original_name"] = json!("forged.mp3");
+    let save = |revision: Value, content: Value| json!({"schema_version":3,"base_revision":revision,"intent":"save","content":content});
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{id}/steps/forms"),
+        &bearer,
+        None,
+        Some(save(created["word"]["revision"].clone(), forms)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, read) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    let actual = read["word"]["forms"].pointer(asset_path).unwrap();
+    let mut expected = original;
+    expected["is_default"] = json!(true);
+    assert_eq!(actual, &expected);
+    let mut cleared = read["word"]["forms"].clone();
+    cleared
+        .pointer_mut(asset_path)
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("is_default");
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{id}/steps/forms"),
+        &bearer,
+        None,
+        Some(save(read["word"]["revision"].clone(), cleared)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, read) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        read["word"]["forms"]
+            .pointer(asset_path)
+            .unwrap()
+            .get("is_default")
+            .is_none()
+    );
+}
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,

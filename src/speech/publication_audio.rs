@@ -277,26 +277,39 @@ fn variant(
                     && out[*index].setting.is_none()
                     && out[*index].asset_id.is_some()
             }));
-            let selected = candidates.into_iter().find(|index| {
-                let item = &out[*index];
-                if let Some(setting) = &item.setting {
-                    setting
-                        .locale
-                        .is_some_and(|locale| locale.accent_group() == *accent)
-                } else {
-                    root.pointer(&item.source_path)
-                        .and_then(|v| v["audio_assets"].as_array())
+            let selected = candidates
+                .into_iter()
+                .filter(|index| {
+                    let item = &out[*index];
+                    if let Some(setting) = &item.setting {
+                        setting
+                            .locale
+                            .is_some_and(|locale| locale.accent_group() == *accent)
+                    } else {
+                        root.pointer(&item.source_path)
+                            .and_then(|v| v["audio_assets"].as_array())
+                            .is_some_and(|assets| {
+                                assets.iter().any(|asset| {
+                                    id(&asset["id"]) == item.asset_id
+                                        && asset["locale"]
+                                            .as_str()
+                                            .and_then(super::locale::EnglishLocale::parse)
+                                            .is_some_and(|locale| locale.accent_group() == *accent)
+                                })
+                            })
+                    }
+                })
+                .min_by_key(|index| {
+                    let item = &out[*index];
+                    !root
+                        .pointer(&item.source_path)
+                        .and_then(|owner| owner["audio_assets"].as_array())
                         .is_some_and(|assets| {
                             assets.iter().any(|asset| {
-                                id(&asset["id"]) == item.asset_id
-                                    && asset["locale"]
-                                        .as_str()
-                                        .and_then(super::locale::EnglishLocale::parse)
-                                        .is_some_and(|locale| locale.accent_group() == *accent)
+                                id(&asset["id"]) == item.asset_id && asset["is_default"] == true
                             })
                         })
-                }
-            });
+                });
             if let Some(index) = selected {
                 out[index].default_for.push(*accent);
             } else {
@@ -338,6 +351,23 @@ mod tests {
                 }
             }]}
         }}]}})
+    }
+    #[test]
+    fn selected_recording_overrides_generated_default_for_its_accent() {
+        let mut value = fixture("common");
+        let recording = Uuid::now_v7();
+        value["forms"]["contents"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"] =
+            json!([{"id":recording,"locale":"en-GB","is_default":true}]);
+        let items = collect(&value).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.default_for.contains(&AccentGroup::Uk))
+                .unwrap()
+                .asset_id,
+            Some(recording)
+        );
+        assert!(items.iter().any(|item| item.setting.is_some()));
     }
     #[test]
     fn independent_spelling_arrays_keep_every_audio_default_on_its_own_accent() {

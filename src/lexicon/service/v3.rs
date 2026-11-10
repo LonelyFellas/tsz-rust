@@ -4438,24 +4438,10 @@ pub(super) async fn normalize_pronunciation_audio_assets(
     }
     let canonical = load_audio_asset_metadata(tx, &requested).await?;
     for speech in spelling_speeches_mut(forms) {
-        for asset in &mut speech.audio_assets {
-            *asset = canonical
-                .get(&asset.id)
-                .cloned()
-                .ok_or_else(invariant_record)?;
-        }
+        crate::lexicon::audio_assets::hydrate_recordings(&mut speech.audio_assets, &canonical)?;
     }
     for row in pronunciation_rows_mut(forms) {
-        row.audio_assets = row
-            .audio_assets
-            .iter()
-            .map(|asset| {
-                canonical
-                    .get(&asset.id)
-                    .cloned()
-                    .ok_or_else(invariant_record)
-            })
-            .collect::<Result<_, _>>()?;
+        crate::lexicon::audio_assets::hydrate_recordings(&mut row.audio_assets, &canonical)?;
     }
     Ok(())
 }
@@ -4612,12 +4598,7 @@ pub(super) async fn hydrate_audio_asset_metadata(
         .flat_map(|pos| &mut pos.grammar_structures)
         .flat_map(|grammar| &mut grammar.variants)
     {
-        for asset in &mut variant.audio_assets {
-            *asset = canonical
-                .get(&asset.id)
-                .cloned()
-                .ok_or_else(invariant_record)?;
-        }
+        crate::lexicon::audio_assets::hydrate_recordings(&mut variant.audio_assets, &canonical)?;
     }
     for variant in content
         .pos
@@ -4625,12 +4606,7 @@ pub(super) async fn hydrate_audio_asset_metadata(
         .flat_map(target_english_texts)
         .flat_map(english_text_variants_mut)
     {
-        for asset in &mut variant.audio_assets {
-            *asset = canonical
-                .get(&asset.id)
-                .cloned()
-                .ok_or_else(invariant_record)?;
-        }
+        crate::lexicon::audio_assets::hydrate_recordings(&mut variant.audio_assets, &canonical)?;
     }
     Ok(())
 }
@@ -4667,6 +4643,7 @@ async fn load_audio_asset_metadata(
             id,
             AudioAsset {
                 id,
+                is_default: false,
                 locale: AudioAssetLocale::parse(&locale).ok_or_else(invariant_record)?,
                 gender: AudioAssetGender::parse(&gender).ok_or_else(invariant_record)?,
                 content_type: row.get("content_type"),
