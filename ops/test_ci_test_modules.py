@@ -96,6 +96,7 @@ EXPECTED_TARGETS = {
         "lexicon_audio_assets_handler",
         "lexicon_audio_assets_schema",
         "lexicon_handler",
+        "lexicon_next",
         "lexicon_schema",
         "lexicon_surface_projection",
         "lexicon_surface_snapshot",
