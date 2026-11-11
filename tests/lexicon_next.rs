@@ -995,6 +995,89 @@ async fn workspace_annotations_preserve_content_and_reject_races(pool: PgPool) {
             .iter()
             .all(|v| v["annotation_visible"] == true)
     );
+
+    for permission in ["words.archive", "words.restore"] {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)").bind(owner).bind(permission).execute(&pool).await.unwrap();
+    }
+    let archived = call(
+        &state,
+        Some(owner),
+        "POST",
+        "/workspace/commands",
+        list_command("archive", &[(&first, 1)]),
+    )
+    .await;
+    assert_eq!(archived.0, StatusCode::OK);
+    let (_, active) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(active["items"].as_array().unwrap().len(), 1);
+    assert_eq!(active["items"][0]["annotation_visible"], false);
+    let (_, trash) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries?status=archived",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(trash["items"][0]["annotation_visible"], false);
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "PATCH",
+            &path2,
+            json!({"annotation":null,"base_annotation_revision":2})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "POST",
+            "/workspace/commands",
+            list_command("restore", &[(&first, 2)])
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, restored) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries",
+        Value::Null,
+    )
+    .await;
+    assert!(
+        restored["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["annotation_visible"] == true)
+    );
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "PATCH",
+            &path2,
+            json!({"annotation":"1","base_annotation_revision":3})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
     // The down migration refuses to discard saved annotation/lifecycle state.
     assert!(
         sqlx::raw_sql(include_str!(
