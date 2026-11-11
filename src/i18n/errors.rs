@@ -1775,6 +1775,12 @@ fn extra_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'stati
                 "This voice requires updated dubbing capabilities. Reload the page.",
             ))
         }
+        (ErrorCode::InvalidSpeechPreview, "每种口音只能选择一条默认播放录音") => {
+            Some((
+                "每種口音只能選擇一條預設播放錄音",
+                "Choose only one default recording per accent.",
+            ))
+        }
         (ErrorCode::InvalidSpeechPreview, "生成音频须绑定配音版本，不能作为上传录音保存") => {
             Some((
                 "產生的音訊須綁定配音版本，不能作為上傳錄音儲存",
