@@ -513,3 +513,98 @@ async fn migration_down_up_leaves_old_schema_intact(pool: PgPool) {
     assert_eq!(before, after);
     assert_eq!(old_record(&pool, old_id).await, protected);
 }
+
+#[sqlx::test]
+async fn list_is_paginated_filtered_current_and_separate_from_legacy(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let old = protected_old_entry(&pool, actor).await;
+    let old_before = old_record(&pool, old).await;
+    let entry = create(&state, actor).await;
+    let id = entry["id"].as_str().unwrap();
+    let (status, _) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &format!("/entries/{id}"),
+        json!({"expected_revision":1,"draft":draft()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, phrase) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entries",
+        json!({"target_language":"en","kind":"phrase","headword":"centre stage"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, first) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/entries?page_size=1",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["pagination"]["total"], 2);
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    let (_, second) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/entries?page_size=1&page=2",
+        Value::Null,
+    )
+    .await;
+    assert_ne!(first["items"][0]["id"], second["items"][0]["id"]);
+    let (_, filtered) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/entries?headword=CENTRE&kind=word",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(filtered["pagination"]["total"], 1);
+    assert_eq!(filtered["items"][0]["id"], entry["id"]);
+    assert_eq!(filtered["items"][0]["revision"], 2);
+    assert_eq!(filtered["items"][0]["part_of_speech"], json!(["noun"]));
+    assert_eq!(filtered["items"][0]["gloss"], "某物的中心位置");
+    assert!(filtered["items"][0].get("draft").is_none());
+    let (_, literal) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/entries?headword=%25",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(literal["pagination"]["total"], 0);
+    let (_, beyond) = call(&state, Some(actor), "GET", "/entries?page=100", Value::Null).await;
+    assert_eq!(beyond["pagination"]["total"], 2);
+    assert_eq!(beyond["items"], json!([]));
+    for path in [
+        "/entries?page=0",
+        "/entries?page_size=101",
+        "/entries?kind=other",
+    ] {
+        let (status, _) = call(&state, Some(actor), "GET", path, Value::Null).await;
+        assert!(status.is_client_error());
+    }
+    assert_eq!(
+        call(&state, None, "GET", "/entries", Value::Null).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let no_access = admin(&pool, &[]).await;
+    assert_eq!(
+        call(&state, Some(no_access), "GET", "/entries", Value::Null)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(old_record(&pool, old).await, old_before);
+    assert_ne!(phrase["id"], entry["id"]);
+}
