@@ -294,6 +294,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn duplicate_default_recordings_return_localized_conflict_details() {
+        use crate::lexicon::audio_assets::{dto::AudioAsset, hydrate_recordings};
+        let first: AudioAsset = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::now_v7(), "locale": "en-GB", "gender": "female",
+            "content_type": "audio/mpeg", "size_bytes": 3, "duration_ms": null,
+            "original_name": "fixture.mp3", "created_at": "2026-11-10T00:00:00Z"
+        }))
+        .unwrap();
+        let second = AudioAsset {
+            id: uuid::Uuid::now_v7(),
+            ..first.clone()
+        };
+        let canonical = [(first.id, first.clone()), (second.id, second.clone())].into();
+        for (locale, detail) in [
+            (None, "每种口音只能选择一条默认播放录音"),
+            (
+                Some(Locale::EnUs),
+                "Choose only one default recording per accent.",
+            ),
+            (Some(Locale::ZhHant), "每種口音只能選擇一條預設播放錄音"),
+        ] {
+            let mut selected = [first.clone(), second.clone()];
+            selected
+                .iter_mut()
+                .for_each(|asset| asset.is_default = true);
+            let error = hydrate_recordings(&mut selected, &canonical).unwrap_err();
+            let response = REQUEST_LOCALE
+                .scope(locale, async { error.into_response() })
+                .await;
+            assert_eq!(response.status(), 400);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_LANGUAGE)
+                    .and_then(|value| value.to_str().ok()),
+                locale.map(Locale::as_str)
+            );
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let problem: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(problem["code"], "invalid_speech_preview");
+            assert_eq!(problem["detail"], detail);
+        }
+    }
+
     #[test]
     fn opt_in_weights_surfaces_and_fallbacks() {
         let mut headers = HeaderMap::new();
