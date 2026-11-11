@@ -283,6 +283,7 @@ use utoipa::{
         crate::catalog::handler::update_sub_part,
         crate::catalog::handler::delete_sub_part,
         crate::lexicon_next::capabilities,
+        crate::lexicon_next::list,
         crate::lexicon_next::create,
         crate::lexicon_next::read,
         crate::lexicon_next::save,

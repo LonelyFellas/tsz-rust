@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::get,
 };
 use model::*;
 use uuid::Uuid;
@@ -21,7 +21,7 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/capabilities", get(capabilities))
-        .route("/entries", post(create))
+        .route("/entries", get(list).post(create))
         .route("/entries/{id}", get(read).put(save))
         .route("/entries/{id}/view", get(view))
         .layer(DefaultBodyLimit::max(512 * 1024))
@@ -36,6 +36,18 @@ pub async fn capabilities(
         .await?
         .require("words.access")?;
     Ok(Json(language::capabilities()))
+}
+
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(NextListQuery), responses((status=200, body=NextEntryList), (status=401), (status=403), (status=422)))]
+pub async fn list(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiQuery(query): ApiQuery<NextListQuery>,
+) -> Result<Json<NextEntryList>, AppError> {
+    permissions::load(&state, &auth)
+        .await?
+        .require("words.access")?;
+    Ok(Json(repository::list(&state.pool, query).await?))
 }
 #[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=CreateNextEntry, responses((status=201, body=NextEntry), (status=401), (status=403), (status=422)))]
 pub async fn create(

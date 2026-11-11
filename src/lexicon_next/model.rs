@@ -123,6 +123,39 @@ pub struct NextViewQuery {
     pub medium_locale: String,
 }
 
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct NextListQuery {
+    pub headword: Option<String>,
+    pub kind: Option<NextEntryKind>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+#[serde(deny_unknown_fields)]
+pub struct NextEntrySummary {
+    pub id: Uuid,
+    pub target_language: String,
+    #[schema(value_type = NextEntryKind)]
+    pub kind: String,
+    pub headword: String,
+    pub owner_id: Uuid,
+    pub revision: i64,
+    pub updated_at: DateTime<Utc>,
+    pub part_of_speech: Vec<String>,
+    #[schema(required)]
+    pub gloss: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextEntryList {
+    pub items: Vec<NextEntrySummary>,
+    pub pagination: crate::api::PaginationMeta,
+}
+
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextSenseView {

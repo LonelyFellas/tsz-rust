@@ -31,6 +31,48 @@ impl EntryRow {
     }
 }
 const SELECT_ENTRY: &str = "SELECT e.id,e.target_language,e.kind,e.owner_id,e.revision,e.updated_at,r.document FROM lexicon_next.entries e JOIN lexicon_next.draft_revisions r ON r.entry_id=e.id AND r.revision=e.revision WHERE e.id=$1";
+
+pub async fn list(pool: &PgPool, query: NextListQuery) -> Result<NextEntryList, AppError> {
+    let page = query.page.unwrap_or(1);
+    let page_size = query.page_size.unwrap_or(20);
+    if page < 1 || !(1..=100).contains(&page_size) {
+        return Err(language::invalid());
+    }
+    let offset = i64::from(page - 1) * i64::from(page_size);
+    let headword = query.headword.unwrap_or_default().trim().to_owned();
+    if headword.chars().count() > 200 {
+        return Err(language::invalid());
+    }
+    let kind = query.kind.map(|kind| match kind {
+        NextEntryKind::Word => "word",
+        NextEntryKind::Phrase => "phrase",
+    });
+    // Count and page share one snapshot, including concurrent creates/saves.
+    let mut tx = pool.begin().await.map_err(AppError::internal)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+    let total = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.entries e WHERE position(lower($1) in lower(e.headword)) > 0 AND ($2::text IS NULL OR e.kind=$2)")
+        .bind(&headword).bind(kind).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+    let items = sqlx::query_as::<_, NextEntrySummary>(r#"
+        SELECT e.id,e.target_language,e.kind,e.headword,e.owner_id,e.revision,e.updated_at,
+            ARRAY(SELECT DISTINCT s.part_of_speech FROM lexicon_next.senses s
+                JOIN lexicon_next.nodes n ON n.id=s.id
+                WHERE n.entry_id=e.id AND s.part_of_speech IS NOT NULL ORDER BY s.part_of_speech) AS part_of_speech,
+            (SELECT d.text FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id
+                WHERE n.entry_id=e.id ORDER BY CASE d.locale WHEN 'zh-Hans' THEN 0 WHEN 'zh-Hant' THEN 1 ELSE 2 END,d.sort_order,d.id LIMIT 1) AS gloss
+        FROM lexicon_next.entries e
+        WHERE position(lower($1) in lower(e.headword)) > 0 AND ($2::text IS NULL OR e.kind=$2)
+        ORDER BY e.updated_at DESC,e.id DESC LIMIT $3 OFFSET $4
+    "#).bind(&headword).bind(kind).bind(i64::from(page_size)).bind(offset)
+        .fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    tx.commit().await.map_err(AppError::internal)?;
+    Ok(NextEntryList {
+        items,
+        pagination: crate::api::page_meta(page, page_size, total),
+    })
+}
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<NextEntry, AppError> {
     sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
         .bind(id)
