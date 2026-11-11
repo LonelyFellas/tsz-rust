@@ -32,6 +32,14 @@ impl EntryRow {
 }
 const SELECT_ENTRY: &str = "SELECT e.id,e.target_language,e.kind,e.owner_id,e.revision,e.updated_at,r.document FROM lexicon_next.entries e JOIN lexicon_next.draft_revisions r ON r.entry_id=e.id AND r.revision=e.revision WHERE e.id=$1";
 
+pub(super) async fn lock_list_writers(conn: &mut PgConnection) -> Result<(), AppError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('lexicon_next.list-writer',0))")
+        .execute(conn)
+        .await
+        .map_err(AppError::internal)?;
+    Ok(())
+}
+
 pub async fn list(pool: &PgPool, query: NextListQuery) -> Result<NextEntryList, AppError> {
     let page = query.page.unwrap_or(1);
     let page_size = query.page_size.unwrap_or(20);
@@ -53,7 +61,7 @@ pub async fn list(pool: &PgPool, query: NextListQuery) -> Result<NextEntryList, 
         .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let total = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.entries e WHERE position(lower($1) in lower(e.headword)) > 0 AND ($2::text IS NULL OR e.kind=$2)")
+    let total = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.entries e WHERE e.status<>'archived' AND position(lower($1) in lower(e.headword)) > 0 AND ($2::text IS NULL OR e.kind=$2)")
         .bind(&headword).bind(kind).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     let items = sqlx::query_as::<_, NextEntrySummary>(r#"
         SELECT e.id,e.target_language,e.kind,e.headword,e.owner_id,e.revision,e.updated_at,
@@ -63,7 +71,7 @@ pub async fn list(pool: &PgPool, query: NextListQuery) -> Result<NextEntryList, 
             (SELECT d.text FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id
                 WHERE n.entry_id=e.id ORDER BY CASE d.locale WHEN 'zh-Hans' THEN 0 WHEN 'zh-Hant' THEN 1 ELSE 2 END,d.sort_order,d.id LIMIT 1) AS gloss
         FROM lexicon_next.entries e
-        WHERE position(lower($1) in lower(e.headword)) > 0 AND ($2::text IS NULL OR e.kind=$2)
+        WHERE e.status<>'archived' AND position(lower($1) in lower(e.headword)) > 0 AND ($2::text IS NULL OR e.kind=$2)
         ORDER BY e.updated_at DESC,e.id DESC LIMIT $3 OFFSET $4
     "#).bind(&headword).bind(kind).bind(i64::from(page_size)).bind(offset)
         .fetch_all(&mut *tx).await.map_err(AppError::internal)?;
@@ -91,6 +99,7 @@ pub async fn create(
     language::text(&input.headword, 200)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     permissions::lock_session(&mut tx, auth, "words.create").await?;
+    lock_list_writers(&mut tx).await?;
     let id = Uuid::now_v7();
     let kind = match input.kind {
         NextEntryKind::Word => "word",
@@ -162,8 +171,9 @@ pub async fn save(
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     permissions::lock_session(&mut tx, auth, "words.edit").await?;
-    let (language, owner, revision): (String, Uuid, i64) = sqlx::query_as(
-        "SELECT target_language,owner_id,revision FROM lexicon_next.entries WHERE id=$1 FOR UPDATE",
+    lock_list_writers(&mut tx).await?;
+    let (language, owner, revision, status): (String, Uuid, i64, String) = sqlx::query_as(
+        "SELECT target_language,owner_id,revision,status FROM lexicon_next.entries WHERE id=$1 FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -173,6 +183,13 @@ pub async fn save(
     permissions::lock(&mut tx, auth.subject)
         .await?
         .require_owned_action("words.edit", owner)?;
+    if status == "archived" {
+        return Err(AppError::conflict(
+            ErrorCode::EntryArchived,
+            None,
+            "归档词条不能编辑，请先恢复",
+        ));
+    }
     if revision != input.expected_revision {
         return Err(AppError::conflict(
             ErrorCode::RevisionConflict,

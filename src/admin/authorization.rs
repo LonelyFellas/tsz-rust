@@ -72,6 +72,36 @@ pub enum RoutePolicy {
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "GET",
+        "/lexicon-next/workspace/entries",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon-next/workspace/entries/{id}",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon-next/workspace/stats",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon-next/workspace/creators",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "PATCH",
+        "/lexicon-next/workspace/entries/{id}/annotation",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "POST",
+        "/lexicon-next/workspace/commands",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
         "/lexicon-next/entries",
         RoutePolicy::All(&["words.access"]),
     ),

@@ -608,3 +608,561 @@ async fn list_is_paginated_filtered_current_and_separate_from_legacy(pool: PgPoo
     assert_eq!(old_record(&pool, old).await, old_before);
     assert_ne!(phrase["id"], entry["id"]);
 }
+
+#[sqlx::test]
+async fn workspace_filters_stats_and_language_drafts_stay_separate(pool: PgPool) {
+    let owner = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let protected = protected_old_entry(&pool, owner).await;
+    let before = old_record(&pool, protected).await;
+    let first = create(&state, owner).await;
+    let path = format!("/entries/{}", first["id"].as_str().unwrap());
+    let content = draft();
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":content})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let other = admin(&pool, EDIT).await;
+    call(
+        &state,
+        Some(other),
+        "POST",
+        "/entries",
+        json!({"target_language":"en","kind":"phrase","headword":"100% centre"}),
+    )
+    .await;
+    let (status, stats) = call(&state, Some(owner), "GET", "/workspace/stats", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{stats}");
+    assert_eq!(stats["total"], 2);
+    assert_eq!(stats["today"], 2);
+    assert_eq!(stats["month"], 2);
+    let (status,list)=call(&state,Some(owner),"GET",&format!("/workspace/entries?headword=center&gloss=%E4%B8%AD%E5%BF%83&pos=noun&kind=word&created_by={owner}&page_size=10"),Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["pagination"]["total"], 1);
+    assert_eq!(list["items"][0]["id"], first["id"]);
+    assert_eq!(list["items"][0]["forms"].as_array().unwrap().len(), 2);
+    assert_eq!(list["items"][0]["revision"], 2);
+    assert_eq!(list["items"][0]["status"], "draft");
+    for (query, total) in [
+        ("headword=100%25", 1),
+        ("level=A1", 0),
+        ("status=published", 0),
+        (
+            "created_from=2000-01-01T00:00:00Z&created_to=2001-01-01T00:00:00Z",
+            0,
+        ),
+    ] {
+        let (status, list) = call(
+            &state,
+            Some(owner),
+            "GET",
+            &format!("/workspace/entries?{query}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(list["pagination"]["total"], total);
+    }
+    for query in [
+        "page=0",
+        "page_size=101",
+        "status=anything",
+        "level=impossible",
+        "pos=madeup",
+        "created_from=2026-12-01T00:00:00Z&created_to=2026-01-01T00:00:00Z",
+    ] {
+        assert_eq!(
+            call(
+                &state,
+                Some(owner),
+                "GET",
+                &format!("/workspace/entries?{query}"),
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let (_, creators) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/creators",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(creators.as_array().unwrap().len(), 2);
+    let (_, reopened) = call(&state, Some(owner), "GET", &path, Value::Null).await;
+    assert_eq!(reopened["draft"], content);
+    assert!(reopened.get("status").is_none());
+    assert_eq!(old_record(&pool, protected).await, before);
+}
+
+fn list_command(action: &str, targets: &[(&Value, i64)]) -> Value {
+    json!({"request_id":Uuid::now_v7(),"action":action,"items":targets.iter().map(|(entry,lifecycle)|json!({"entry_id":entry["id"],"base_revision":entry["revision"],"base_lifecycle_revision":lifecycle})).collect::<Vec<_>>()})
+}
+#[sqlx::test]
+async fn workspace_lifecycle_permissions_atomicity_and_retries(pool: PgPool) {
+    let owner = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "words.archive",
+            "words.restore",
+        ],
+    )
+    .await;
+    let outsider = admin(&pool, &["words.access", "words.archive", "words.restore"]).await;
+    let state = AppState::for_test(pool.clone());
+    let first = create(&state, owner).await;
+    let second = create(&state, owner).await;
+    let (status, second) = call(
+        &state,
+        Some(owner),
+        "PUT",
+        &format!("/entries/{}", second["id"].as_str().unwrap()),
+        json!({"expected_revision":1,"draft":draft()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let first_id = first["id"].as_str().unwrap();
+    let archive = list_command("archive", &[(&first, 1), (&second, 1)]);
+    assert_eq!(
+        call(
+            &state,
+            Some(outsider),
+            "POST",
+            "/workspace/commands",
+            archive.clone()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let mut stale = archive.clone();
+    stale["items"][1]["base_revision"] = json!(999);
+    assert_eq!(
+        call(&state, Some(owner), "POST", "/workspace/commands", stale)
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let (_, normal) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(normal["pagination"]["total"], 2);
+    let (status, receipt) = call(
+        &state,
+        Some(owner),
+        "POST",
+        "/workspace/commands",
+        archive.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "POST",
+            "/workspace/commands",
+            archive.clone()
+        )
+        .await,
+        (status, receipt)
+    );
+    let (_, normal) = call(&state, Some(owner), "GET", "/entries", Value::Null).await;
+    assert_eq!(normal["pagination"]["total"], 0);
+    let (_, trash) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries?status=archived",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(trash["pagination"]["total"], 2);
+    assert_eq!(trash["items"][0]["lifecycle_revision"], 2);
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "PUT",
+            &format!("/entries/{first_id}"),
+            json!({"expected_revision":1,"draft":draft()})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let restore = list_command("restore", &[(&first, 2)]);
+    assert_eq!(
+        call(&state, Some(owner), "POST", "/workspace/commands", restore)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // A delayed archive request must not overwrite the intervening restore.
+    assert_eq!(
+        call(&state, Some(owner), "POST", "/workspace/commands", archive)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (_, read) = call(
+        &state,
+        Some(owner),
+        "GET",
+        &format!("/workspace/entries/{first_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(read["status"], "draft");
+    assert_eq!(read["lifecycle_revision"], 3);
+    let delete = list_command("delete", &[(&second, 2)]);
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "POST",
+            "/workspace/commands",
+            delete.clone()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    sqlx::query("UPDATE admins SET role='super_admin' WHERE id=$1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deleted = call(
+        &state,
+        Some(owner),
+        "POST",
+        "/workspace/commands",
+        delete.clone(),
+    )
+    .await;
+    assert_eq!(deleted.0, StatusCode::OK, "{}", deleted.1);
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "POST",
+            "/workspace/commands",
+            delete.clone()
+        )
+        .await,
+        deleted
+    );
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "GET",
+            &format!("/entries/{}", second["id"].as_str().unwrap()),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+
+    let removed: Uuid = serde_json::from_value(second["id"].clone()).unwrap();
+    for sql in [
+        "SELECT count(*) FROM lexicon_next.nodes WHERE entry_id=$1",
+        "SELECT count(*) FROM lexicon_next.draft_revisions WHERE entry_id=$1",
+    ] {
+        let remaining: i64 = sqlx::query_scalar(sql)
+            .bind(removed)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&state, Some(owner), "POST", "/workspace/commands", delete)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[sqlx::test]
+async fn workspace_annotations_preserve_content_and_reject_races(pool: PgPool) {
+    let owner = admin(&pool, EDIT).await;
+    let outsider = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let first = create(&state, owner).await;
+    let second = create(&state, owner).await;
+    let path = format!(
+        "/workspace/entries/{}/annotation",
+        first["id"].as_str().unwrap()
+    );
+    let input = json!({"annotation":"1","base_annotation_revision":1});
+    assert_eq!(
+        call(&state, Some(outsider), "PATCH", &path, input.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, saved) = call(&state, Some(owner), "PATCH", &path, input.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["annotation_revision"], 2);
+    assert_eq!(
+        call(&state, Some(owner), "PATCH", &path, input.clone())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let path2 = format!(
+        "/workspace/entries/{}/annotation",
+        second["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        call(&state, Some(owner), "PATCH", &path2, input).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "PATCH",
+            &path2,
+            json!({"annotation":null,"base_annotation_revision":1})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "PATCH",
+            &path2,
+            json!({"annotation":"2","base_annotation_revision":1})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, read) = call(
+        &state,
+        Some(owner),
+        "GET",
+        &format!("/entries/{}", first["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(read, first);
+    let (_, list) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries",
+        Value::Null,
+    )
+    .await;
+    assert!(
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["annotation_visible"] == true)
+    );
+
+    for permission in ["words.archive", "words.restore"] {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)").bind(owner).bind(permission).execute(&pool).await.unwrap();
+    }
+    let archived = call(
+        &state,
+        Some(owner),
+        "POST",
+        "/workspace/commands",
+        list_command("archive", &[(&first, 1)]),
+    )
+    .await;
+    assert_eq!(archived.0, StatusCode::OK);
+    let (_, active) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(active["items"].as_array().unwrap().len(), 1);
+    assert_eq!(active["items"][0]["annotation_visible"], false);
+    let (_, trash) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries?status=archived",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(trash["items"][0]["annotation_visible"], false);
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "PATCH",
+            &path2,
+            json!({"annotation":null,"base_annotation_revision":2})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "POST",
+            "/workspace/commands",
+            list_command("restore", &[(&first, 2)])
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, restored) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries",
+        Value::Null,
+    )
+    .await;
+    assert!(
+        restored["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["annotation_visible"] == true)
+    );
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "PATCH",
+            &path2,
+            json!({"annotation":"1","base_annotation_revision":3})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    // The down migration refuses to discard saved annotation/lifecycle state.
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261111120000_lexicon_next_list.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+}
+
+#[sqlx::test]
+async fn workspace_migration_round_trip_preserves_language_content(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let id: Uuid = serde_json::from_value(entry["id"].clone()).unwrap();
+    let original_created: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT min(created_at) FROM lexicon_next.draft_revisions WHERE entry_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261111120000_lexicon_next_list.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261111120000_lexicon_next_list.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let restored_created: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT created_at FROM lexicon_next.entries WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(original_created, restored_created);
+    let (_, reopened) = call(
+        &state,
+        Some(actor),
+        "GET",
+        &format!("/entries/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(entry, reopened);
+    let command = list_command("archive", &[(&entry, 1)]);
+    let (a, b) = tokio::join!(
+        call(
+            &state,
+            Some(actor),
+            "POST",
+            "/workspace/commands",
+            command.clone()
+        ),
+        call(&state, Some(actor), "POST", "/workspace/commands", command)
+    );
+    // Missing permission is checked before any cached or concurrent command can succeed.
+    assert_eq!(a.0, StatusCode::FORBIDDEN);
+    assert_eq!(b.0, StatusCode::FORBIDDEN);
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.archive',$1)").bind(actor).execute(&pool).await.unwrap();
+    let command = list_command("archive", &[(&entry, 1)]);
+    let (a, b) = tokio::join!(
+        call(
+            &state,
+            Some(actor),
+            "POST",
+            "/workspace/commands",
+            command.clone()
+        ),
+        call(&state, Some(actor), "POST", "/workspace/commands", command)
+    );
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(a, b);
+    let lifecycle: i64 =
+        sqlx::query_scalar("SELECT lifecycle_revision FROM lexicon_next.entries WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(lifecycle, 2);
+}
