@@ -16,6 +16,7 @@ pub mod invitations;
 mod learning_memory;
 pub mod learning_tasks;
 pub mod lexicon;
+pub mod lexicon_next;
 pub mod openapi;
 pub mod otp;
 pub mod platform;

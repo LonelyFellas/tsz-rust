@@ -1,0 +1,202 @@
+use std::collections::HashSet;
+use uuid::Uuid;
+
+use super::model::*;
+use crate::error::{AppError, ErrorCode};
+
+pub(super) const POS: &[&str] = &[
+    "noun",
+    "verb",
+    "adjective",
+    "adverb",
+    "pronoun",
+    "determiner",
+    "preposition",
+    "conjunction",
+    "interjection",
+    "numeral",
+    "particle",
+];
+pub fn capabilities() -> NextCapabilities {
+    NextCapabilities {
+        schema_version: 1,
+        language_rules_version: "lexicon-next-en-zh-1".into(),
+        languages: vec![NextLanguageCapability {
+            target_language: "en".into(),
+            target_locales: vec!["en-GB".into(), "en-US".into()],
+            medium_locales: vec!["zh-Hans".into(), "zh-Hant".into()],
+            common_target_locale: "en".into(),
+            part_of_speech_codes: POS.iter().map(|s| (*s).into()).collect(),
+        }],
+        manual_drafts: true,
+        generation: false,
+        publishing: false,
+    }
+}
+pub fn unavailable() -> AppError {
+    AppError::unprocessable(
+        ErrorCode::CapabilityUnavailable,
+        "language or locale capability is not available",
+    )
+}
+pub fn invalid() -> AppError {
+    AppError::unprocessable(ErrorCode::InvalidRequestBody, "invalid lexicon-next draft")
+}
+pub fn require_language(language: &str) -> Result<(), AppError> {
+    if language == "en" {
+        Ok(())
+    } else {
+        Err(unavailable())
+    }
+}
+pub fn text(value: &str, max: usize) -> Result<(), AppError> {
+    if value.trim().is_empty() || value.chars().count() > max || value.chars().any(char::is_control)
+    {
+        Err(invalid())
+    } else {
+        Ok(())
+    }
+}
+pub(super) fn identity(ids: &mut HashSet<Uuid>, id: Uuid) -> Result<(), AppError> {
+    if id.is_nil() || !ids.insert(id) {
+        Err(invalid())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
+    require_language(language)?;
+    if draft.schema_version != 1 {
+        return Err(AppError::unprocessable(
+            ErrorCode::UnsupportedSchemaVersion,
+            "schema_version must be 1",
+        ));
+    }
+    text(&draft.headword, 200)?;
+    // A bounded initial editing contract, not a content production quota.
+    let count = draft.forms.len()
+        + draft.senses.len()
+        + draft
+            .senses
+            .iter()
+            .map(|s| s.definitions.len() + s.equivalents.len())
+            .sum::<usize>();
+    if count > 500 {
+        return Err(invalid());
+    }
+    let mut ids = HashSet::new();
+    for form in &draft.forms {
+        identity(&mut ids, form.id)?;
+        if !matches!(form.locale.as_str(), "en" | "en-GB" | "en-US") {
+            return Err(unavailable());
+        }
+        text(&form.text, 200)?;
+    }
+    for sense in &draft.senses {
+        identity(&mut ids, sense.id)?;
+        if sense
+            .part_of_speech
+            .as_deref()
+            .is_some_and(|p| !POS.contains(&p))
+        {
+            return Err(invalid());
+        }
+        for definition in &sense.definitions {
+            identity(&mut ids, definition.id)?;
+            if !matches!(
+                definition.locale.as_str(),
+                "en" | "en-GB" | "en-US" | "zh-Hans" | "zh-Hant"
+            ) {
+                return Err(unavailable());
+            }
+            text(&definition.text, 5000)?;
+        }
+        for equivalent in &sense.equivalents {
+            identity(&mut ids, equivalent.id)?;
+            if !matches!(equivalent.locale.as_str(), "zh-Hans" | "zh-Hant") {
+                return Err(unavailable());
+            }
+            text(&equivalent.text, 200)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView, AppError> {
+    require_language(&entry.target_language)?;
+    if !matches!(selection.target_locale.as_str(), "en-GB" | "en-US")
+        || !matches!(selection.medium_locale.as_str(), "zh-Hans" | "zh-Hant")
+    {
+        return Err(unavailable());
+    }
+    let form_locale = if entry
+        .draft
+        .forms
+        .iter()
+        .any(|f| f.locale == selection.target_locale)
+    {
+        &selection.target_locale
+    } else {
+        &entry.target_language
+    };
+    let forms: Vec<_> = entry
+        .draft
+        .forms
+        .iter()
+        .filter(|f| &f.locale == form_locale)
+        .cloned()
+        .collect();
+    let senses = entry
+        .draft
+        .senses
+        .iter()
+        .map(|sense| {
+            let target = if sense
+                .definitions
+                .iter()
+                .any(|d| d.locale == selection.target_locale)
+            {
+                &selection.target_locale
+            } else {
+                &entry.target_language
+            };
+            let target_definitions: Vec<_> = sense
+                .definitions
+                .iter()
+                .filter(|d| &d.locale == target)
+                .cloned()
+                .collect();
+            let medium_definitions: Vec<_> = sense
+                .definitions
+                .iter()
+                .filter(|d| d.locale == selection.medium_locale)
+                .cloned()
+                .collect();
+            let equivalents: Vec<_> = sense
+                .equivalents
+                .iter()
+                .filter(|d| d.locale == selection.medium_locale)
+                .cloned()
+                .collect();
+            NextSenseView {
+                id: sense.id,
+                missing_target_definitions: target_definitions.is_empty(),
+                missing_medium_definitions: medium_definitions.is_empty(),
+                missing_equivalents: equivalents.is_empty(),
+                target_definitions,
+                medium_definitions,
+                equivalents,
+            }
+        })
+        .collect();
+    Ok(NextEntryView {
+        entry_id: entry.id,
+        revision: entry.revision,
+        target_locale: selection.target_locale,
+        medium_locale: selection.medium_locale,
+        missing_forms: forms.is_empty(),
+        forms,
+        senses,
+    })
+}
