@@ -350,3 +350,9 @@ Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写�
 迁移 `20261108010000_interface_preferences` 为 users/admins 添加可空列，已有偏好时 down 拒绝丢数据。
 注意 SQLx 严格启动校验：旧二进制会因未知迁移账本拒绝启动，不能通过保留新增列直接回退旧 main。
 发布前须准备理解此迁移的兼容回退版本；本批未放宽通用迁移校验，也未部署。
+
+## 新词库语言基础（本地配套，2026-11-11）
+
+`/api/v1/admin/lexicon-next` 仅提供 capabilities、创建、读取、整份草稿保存和语言视图；目标语 en（en-GB/en-US），媒介语 zh-Hans/zh-Hant。权限沿用 words.access/create/edit/edit_others，保存使用 expected_revision，目标语言不可原地修改。generation/publishing 均为 false；没有审核、发布、公开读取、AI 或音频端点。
+
+新增 `20261111090000_lexicon_next` up/down；down 会删除全部新库草稿和历史，旧库不变。前端通过能力目录关闭旧后端上的新入口，不回退 V3。唯一主记录位于前端 `docs/features/smart-lexicon-reconstruction/{requirements,design,evidence}.md`；本次只本地提交，不代表已部署或线上混合版本验收通过。

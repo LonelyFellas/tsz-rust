@@ -71,6 +71,31 @@ pub enum RoutePolicy {
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
+        "GET",
+        "/lexicon-next/capabilities",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon-next/entries",
+        RoutePolicy::All(&["words.access", "words.create"]),
+    ),
+    (
+        "GET",
+        "/lexicon-next/entries/{id}",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "PUT",
+        "/lexicon-next/entries/{id}",
+        RoutePolicy::All(&["words.access", "words.edit"]),
+    ),
+    (
+        "GET",
+        "/lexicon-next/entries/{id}/view",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
         "POST",
         "/lexicon/assistant/form-candidates",
         RoutePolicy::All(&["words.access", "words.edit"]),
@@ -929,6 +954,7 @@ mod tests {
                 "/settings/form-types",
             ),
             (include_str!("../lexicon/router.rs"), "/lexicon"),
+            (include_str!("../lexicon_next/mod.rs"), "/lexicon-next"),
             (include_str!("../question_bank/handler.rs"), ""),
             (include_str!("../speech/preview/router.rs"), "/speech"),
             (include_str!("../teacher_certification/mod.rs"), ""),

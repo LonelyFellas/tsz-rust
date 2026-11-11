@@ -25,6 +25,7 @@ pub enum ErrorCode {
     InvalidPartOfSpeech,
     InvalidHeadword,
     UnsupportedLanguage,
+    CapabilityUnavailable,
     UnsupportedSchemaVersion,
     InvalidPhone,
     InvalidEmail,
@@ -164,7 +165,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 143] = [
+    pub const ALL: [Self; 144] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -179,6 +180,7 @@ impl ErrorCode {
         Self::InvalidPartOfSpeech,
         Self::InvalidHeadword,
         Self::UnsupportedLanguage,
+        Self::CapabilityUnavailable,
         Self::UnsupportedSchemaVersion,
         Self::InvalidPhone,
         Self::InvalidEmail,
@@ -696,6 +698,11 @@ impl ErrorCode {
                 "annotation_conflict",
                 "Entry annotation conflict",
                 StatusCode::CONFLICT,
+            ),
+            Self::CapabilityUnavailable => (
+                "capability_unavailable",
+                "Capability unavailable",
+                StatusCode::UNPROCESSABLE_ENTITY,
             ),
             Self::RevisionConflict => (
                 "revision_conflict",

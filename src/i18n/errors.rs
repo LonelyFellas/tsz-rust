@@ -19,6 +19,7 @@ pub fn title(code: ErrorCode, locale: Locale) -> &'static str {
         FormTypeRequired => ("必须保留基本词形", "必須保留基本詞形"),
         InvalidPartOfSpeech => ("词性无效", "詞性無效"),
         InvalidHeadword => ("词头无效", "詞頭無效"),
+        CapabilityUnavailable => ("当前语言或组合尚未开放", "目前語言或組合尚未開放"),
         UnsupportedLanguage => ("不支持该语言", "不支援此語言"),
         UnsupportedSchemaVersion => ("不支持该数据版本", "不支援此資料版本"),
         InvalidPhone => ("手机号无效", "手機號碼無效"),

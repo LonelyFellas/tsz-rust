@@ -14,6 +14,7 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/settings/parts-of-speech", catalog::router::router())
         .nest("/settings/form-types", catalog::form_types::router())
         .nest("/lexicon", lexicon::router::router())
+        .nest("/lexicon-next", crate::lexicon_next::router())
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
