@@ -1300,3 +1300,218 @@ async fn workspace_migration_round_trip_preserves_language_content(pool: PgPool)
             .unwrap();
     assert_eq!(lifecycle, 2);
 }
+
+#[sqlx::test]
+async fn multiline_definitions_persist_and_single_line_fields_stay_strict(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut content = draft();
+    content["senses"][0]["definitions"][0]["text"] = json!("first line\nsecond line");
+    content["senses"][0]["definitions"][3]["text"] = json!("首行\r\n次行");
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let reopened = AppState::for_test(pool);
+    let (status, fetched) = call(&reopened, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["draft"], content);
+    let (status, view) = call(
+        &reopened,
+        Some(actor),
+        "GET",
+        &format!("{path}/view?target_locale=en-GB&medium_locale=zh-Hant"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        view["senses"][0]["target_definitions"][0]["text"],
+        "first line\nsecond line"
+    );
+    assert_eq!(
+        view["senses"][0]["medium_definitions"][0]["text"],
+        "首行\r\n次行"
+    );
+    for (pointer, text) in [
+        ("/headword", "cen\ntre".to_owned()),
+        ("/forms/0/text", "cen\ntre".to_owned()),
+        ("/senses/0/equivalents/0/text", "中\r\n心".to_owned()),
+        ("/senses/0/definitions/0/text", "first\tsecond".to_owned()),
+        ("/senses/0/definitions/0/text", "first\0second".to_owned()),
+        (
+            "/senses/0/definitions/0/text",
+            "first\u{85}second".to_owned(),
+        ),
+        ("/senses/0/definitions/0/text", "\r\n".to_owned()),
+        (
+            "/senses/0/definitions/0/text",
+            format!("{}\n", "a".repeat(5000)),
+        ),
+    ] {
+        let mut invalid = content.clone();
+        *invalid.pointer_mut(pointer).unwrap() = json!(text);
+        let (status, error) = call(
+            &reopened,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":2,"draft":invalid}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{pointer}: {error}"
+        );
+    }
+    assert_eq!(
+        call(&reopened, Some(actor), "GET", &path, Value::Null)
+            .await
+            .1,
+        fetched
+    );
+}
+
+#[sqlx::test]
+async fn homonym_annotations_use_forms_or_initial_headword_fallback(pool: PgPool) {
+    let actor = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "words.archive",
+        ],
+    )
+    .await;
+    let state = AppState::for_test(pool);
+    let first = create(&state, actor).await;
+    let mut content = draft();
+    content["forms"] = json!([{ "id":Uuid::now_v7(), "locale":"en-US", "text":"center" }]);
+    let (status, first) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &format!("/entries/{}", first["id"].as_str().unwrap()),
+        json!({"expected_revision":1,"draft":content}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, second) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entries",
+        json!({"target_language":"en","kind":"word","headword":"center"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let initial_only = create(&state, actor).await;
+    let (_, list) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/workspace/entries",
+        Value::Null,
+    )
+    .await;
+    for (entry, visible) in [(&first, true), (&second, true), (&initial_only, false)] {
+        let row = list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == entry["id"])
+            .unwrap();
+        assert_eq!(row["annotation_visible"], visible, "{row}");
+        let (_, read) = call(
+            &state,
+            Some(actor),
+            "GET",
+            &format!("/workspace/entries/{}", entry["id"].as_str().unwrap()),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(read["annotation_visible"], visible);
+    }
+    for (entry, annotation, expected) in [
+        (&first, "1", StatusCode::OK),
+        (&second, "1", StatusCode::CONFLICT),
+        (&second, "2", StatusCode::OK),
+    ] {
+        let (status, result) = call(
+            &state,
+            Some(actor),
+            "PATCH",
+            &format!(
+                "/workspace/entries/{}/annotation",
+                entry["id"].as_str().unwrap()
+            ),
+            json!({"annotation":annotation,"base_annotation_revision":1}),
+        )
+        .await;
+        assert_eq!(status, expected, "{result}");
+    }
+    let path = format!("/entries/{}", second["id"].as_str().unwrap());
+    let mut second_draft = second["draft"].clone();
+    second_draft["forms"] = json!([{ "id":Uuid::now_v7(), "locale":"en-GB", "text":"center" }]);
+    for (revision, locale, visible) in [(1, "en-GB", false), (2, "en", true)] {
+        second_draft["forms"][0]["locale"] = json!(locale);
+        let (status, saved) = call(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":revision,"draft":second_draft}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let (_, list) = call(
+            &state,
+            Some(actor),
+            "GET",
+            "/workspace/entries",
+            Value::Null,
+        )
+        .await;
+        for row in list["items"].as_array().unwrap() {
+            assert_eq!(
+                row["annotation_visible"],
+                visible && row["id"] != initial_only["id"],
+                "{row}"
+            );
+        }
+    }
+    let (status, result) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/workspace/commands",
+        list_command("archive", &[(&first, 1)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (_, remaining) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/workspace/entries",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(remaining["pagination"]["total"], 2);
+    assert!(
+        remaining["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["annotation_visible"] == false)
+    );
+}
