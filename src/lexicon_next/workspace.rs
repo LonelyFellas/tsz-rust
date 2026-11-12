@@ -8,11 +8,16 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 const SAME_NAME: &str = r#"e.status<>'archived' AND other.status<>'archived' AND other.target_language=e.target_language AND other.kind=e.kind AND other.id<>e.id
- AND (lower(other.headword)=lower(e.headword) OR EXISTS (
- SELECT 1 FROM lexicon_next.forms f JOIN lexicon_next.nodes n ON n.id=f.id
- JOIN lexicon_next.forms oform ON lower(oform.text)=lower(f.text) AND (oform.locale=f.locale OR oform.locale='en' OR f.locale='en')
- JOIN lexicon_next.nodes onode ON onode.id=oform.id
- WHERE n.entry_id=e.id AND onode.entry_id=other.id))"#;
+ AND EXISTS (
+ WITH current_forms AS NOT MATERIALIZED (
+   SELECT n.entry_id,f.locale,f.text FROM lexicon_next.nodes n JOIN lexicon_next.forms f ON f.id=n.id
+ )
+ SELECT 1 FROM lexicon_next.entries target
+ LEFT JOIN current_forms f ON f.entry_id=target.id
+ LEFT JOIN current_forms oform ON oform.entry_id=other.id
+ WHERE target.id=e.id
+   AND lower(COALESCE(f.text,target.headword))=lower(COALESCE(oform.text,other.headword))
+   AND (f.locale IS NULL OR oform.locale IS NULL OR oform.locale=f.locale OR oform.locale='en' OR f.locale='en'))"#;
 
 fn select() -> String {
     format!(
