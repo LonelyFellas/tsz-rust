@@ -593,7 +593,7 @@ fn pronunciations(
         .map(|dict_phonetic| DictionaryPronunciationEvidenceV3 {
             dict_phonetic,
             actual_pron: None,
-            style: Some(PronunciationStyle::Normal),
+            style: Some(PronunciationStyle::Citation),
         })
         .collect()
 }
@@ -720,6 +720,24 @@ mod tests {
             sounds: json!([]),
             provider_name: "Kaikki English Wiktionary".to_owned(),
             provider_version: "enwiktionary-test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn task_175_dictionary_pronunciations_default_to_citation() {
+        let records = [record(
+            "noun",
+            json!([]),
+            json!([
+                {"ipa": "kæt"},
+                {"ipa": "kæt", "tags": ["UK"]},
+                {"ipa": "kæt", "tags": ["US"]}
+            ]),
+        )];
+        for dialect in [SourceDialect::Common, SourceDialect::Uk, SourceDialect::Us] {
+            let rows = pronunciations(&records, "noun", None, dialect, true);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].style, Some(PronunciationStyle::Citation));
         }
     }
 

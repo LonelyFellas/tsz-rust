@@ -133,7 +133,7 @@ fn blank_v3_pronunciation() -> WordPronunciationV3 {
         id: Uuid::now_v7(),
         dict_phonetic: String::new(),
         actual_pron: String::new(),
-        style: Some(PronunciationStyle::Normal),
+        style: Some(PronunciationStyle::Citation),
     }
 }
 
@@ -154,7 +154,7 @@ fn suggested_v3_pronunciations(
             id: Uuid::now_v7(),
             dict_phonetic: value.dict_phonetic.clone(),
             actual_pron: value.actual_pron.clone().unwrap_or_default(),
-            style: Some(value.style.unwrap_or(PronunciationStyle::Normal)),
+            style: Some(value.style.unwrap_or(PronunciationStyle::Citation)),
         })
         .collect()
 }
@@ -6336,6 +6336,44 @@ mod tests {
         CommonDialectV3, DialectRulesV3, WordCommonFormVariantV3, WordConcreteFormV3,
         WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3, WordPronunciationV3,
     };
+
+    #[test]
+    fn task_175_blank_pronunciations_default_to_citation() {
+        let form = blank_v3_base_form();
+        let WordRegionalVariantsV3::Common { common } = form.regional_variants else {
+            unreachable!();
+        };
+        assert_eq!(
+            common.pronunciations[0].style,
+            Some(PronunciationStyle::Citation)
+        );
+        assert_eq!(
+            suggested_v3_pronunciations(&[])[0].style,
+            Some(PronunciationStyle::Citation)
+        );
+    }
+
+    #[test]
+    fn task_175_suggestions_default_to_citation_and_preserve_explicit_styles() {
+        for style in [
+            None,
+            Some(PronunciationStyle::Normal),
+            Some(PronunciationStyle::Strong),
+            Some(PronunciationStyle::Weak),
+        ] {
+            let rows = suggested_v3_pronunciations(&[DictionaryPronunciationEvidenceV3 {
+                dict_phonetic: "kæt".to_owned(),
+                actual_pron: Some("kæt".to_owned()),
+                style,
+            }]);
+            assert_eq!(
+                rows[0].style,
+                Some(style.unwrap_or(PronunciationStyle::Citation))
+            );
+            assert_eq!(rows[0].dict_phonetic, "kæt");
+            assert_eq!(rows[0].actual_pron, "kæt");
+        }
+    }
 
     #[test]
     fn synthesis_dual_candidates_survive_canonicalization() {
