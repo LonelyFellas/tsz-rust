@@ -172,6 +172,13 @@ pub(crate) fn own_audio(native: &published::PublishedContentV3) -> Vec<Dictionar
                     uploaded_audio(&mut audio, variant_id, source_dialect, &speech.audio_assets);
                 }
                 for pronunciation in pronunciations {
+                    let recordings: Vec<_> = pronunciation
+                        .audio_assets
+                        .iter()
+                        .filter(|asset| asset.is_default)
+                        .cloned()
+                        .collect();
+                    uploaded_audio(&mut audio, pronunciation.id, source_dialect, &recordings);
                     if pronunciation.synthesis.is_none() {
                         generated_audio(
                             &mut audio,
@@ -219,12 +226,19 @@ pub(crate) fn own_audio(native: &published::PublishedContentV3) -> Vec<Dictionar
                             }
                         }
                     }
-                    uploaded_audio(
-                        &mut audio,
-                        pronunciation.id,
-                        source_dialect,
-                        &pronunciation.audio_assets,
-                    );
+                    let recordings: Vec<_> = pronunciation
+                        .audio_assets
+                        .iter()
+                        .filter(|asset| {
+                            !asset.is_default
+                                && pronunciation
+                                    .synthesis
+                                    .as_ref()
+                                    .is_none_or(|synthesis| synthesis.use_spelling.is_none())
+                        })
+                        .cloned()
+                        .collect();
+                    uploaded_audio(&mut audio, pronunciation.id, source_dialect, &recordings);
                     if pronunciation.synthesis.is_some() {
                         generated_audio(
                             &mut audio,
@@ -497,6 +511,45 @@ async fn playable_audio_with_catalog(
 mod recording_default_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn owned_audio_honors_pronunciation_selection_before_spelling_and_round_trip_clear() {
+        let target = Uuid::now_v7();
+        let spelling_id = Uuid::now_v7();
+        let recording_id = Uuid::now_v7();
+        let asset = |id| {
+            json!({
+                "id":id,"is_default":true,"locale":"en-GB","gender":"female",
+                "content_type":"audio/mpeg","size_bytes":3,"duration_ms":null,
+                "original_name":"fixture.mp3","created_at":"2026-11-12T00:00:00Z"
+            })
+        };
+        let mut forms = json!({"pos":[{"pos_id":Uuid::now_v7(),"pos":"noun","form_groups":[],"forms":[{
+            "id":Uuid::now_v7(),"form_type":"base","regional_variants":{"mode":"common","common":{
+                "id":Uuid::now_v7(),"dialect":"common","spelling":"word","origin":"manual",
+                "spelling_speech":{"content":{"version":2,"text":"word","annotations":[]},"voice_profile":{"voices":[]},"audio_assets":[asset(spelling_id)]},
+                "pronunciations":[{"id":target,"dict_phonetic":"test","actual_pron":"test","style":"normal",
+                    "synthesis":{"alphabet":"ipa","use_spelling":true,"ipa":"","ups":""},"audio_assets":[asset(recording_id)]}]
+            }}
+        }]}]});
+        let selected = |forms: &serde_json::Value| {
+            let forms: crate::lexicon::dto::DraftFormsStepContentV3 =
+                serde_json::from_value(forms.clone()).unwrap();
+            // The DTO round trip deliberately omits false is_default values.
+            let forms = serde_json::from_value(serde_json::to_value(forms).unwrap()).unwrap();
+            own_audio(&published::PublishedContentV3 {
+                forms,
+                meanings: Default::default(),
+            })
+            .into_iter()
+            .find(|item| item.target_id == target)
+            .map(|item| item.asset_id)
+        };
+        assert_eq!(selected(&forms), Some(recording_id));
+        forms["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"]
+            [0]["is_default"] = json!(false);
+        assert_eq!(selected(&forms), Some(spelling_id));
+    }
 
     #[test]
     fn active_spelling_recording_default_precedes_legacy_pronunciation_default() {
