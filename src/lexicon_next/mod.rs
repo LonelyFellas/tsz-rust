@@ -1,5 +1,6 @@
 //! Independent language-aware drafts; no legacy identities.
 pub mod detection;
+pub mod entry_matches;
 pub mod language;
 pub mod list_model;
 pub mod model;
@@ -38,10 +39,23 @@ pub fn router() -> Router<AppState> {
         )
         .route("/capabilities", get(capabilities))
         .route("/detections", axum::routing::post(detect))
+        .route("/entry-matches", axum::routing::post(match_entries))
         .route("/entries", get(list).post(create))
         .route("/entries/{id}", get(read).put(save))
         .route("/entries/{id}/view", get(view))
         .layer(DefaultBodyLimit::max(512 * 1024))
+}
+
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entry-matches", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=entry_matches::NextEntryMatchInput, responses((status=200, body=entry_matches::NextEntryMatches), (status=401), (status=403), (status=422)))]
+pub async fn match_entries(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiJson(input): ApiJson<entry_matches::NextEntryMatchInput>,
+) -> Result<Json<entry_matches::NextEntryMatches>, AppError> {
+    permissions::load(&state, &auth)
+        .await?
+        .require("words.create")?;
+    Ok(Json(entry_matches::find(&state.pool, input).await?))
 }
 
 #[utoipa::path(post, path="/api/v1/admin/lexicon-next/detections", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=detection::NextDetectionInput, responses((status=200, body=detection::NextDetection), (status=401), (status=403), (status=422), (status=503)))]

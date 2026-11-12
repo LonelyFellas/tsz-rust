@@ -19,7 +19,7 @@ const SAME_NAME: &str = r#"e.status<>'archived' AND other.status<>'archived' AND
    AND lower(COALESCE(f.text,target.headword))=lower(COALESCE(oform.text,other.headword))
    AND (f.locale IS NULL OR oform.locale IS NULL OR oform.locale=f.locale OR oform.locale='en' OR f.locale='en'))"#;
 
-fn select() -> String {
+pub(super) fn select() -> String {
     format!(
         r#"SELECT e.id,e.target_language,e.kind,e.headword,e.owner_id,e.revision,e.lifecycle_revision,e.status,
     e.created_at,e.updated_at,creator.display_name AS created_by_name,editor.display_name AS updated_by_name,

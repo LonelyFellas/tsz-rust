@@ -360,3 +360,7 @@ Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写�
 ## 新词库创建检测参考（本地完成，2026-11-11）
 
 主记录见前端 `docs/features/smart-lexicon-reconstruction/evidence.md` 第 10 节。新增 `POST /api/v1/admin/lexicon-next/detections`，请求 `target_language`、`surface`，响应 `surface`、`kind` 与平级 `matches`；要求 `words.access` 和 `words.create`。每条来源记录独立返回，不选择主词、不预填或写入草稿。仅查询 active 词典内容及直接关联拼写；关联目标使用 PostgreSQL 16/18 均具备的 ICU root 规则预筛，再由统一 Rust 归一化判定。词典不可用返回 503，无匹配返回空数组。创建接口和既有响应不变，无迁移；OpenAPI 已原生导出并由前端同步，配套发布应先 API 后 Admin。本批完成隔离路由、数据库与浏览器联调；配套交付与部署状态续记于 PR #397 及其验收回执。
+
+## 新词库已有词条检测（2026-11-12）
+
+前端主记录：`docs/features/smart-lexicon-reconstruction/evidence.md` 第 11 节。新增 `POST /api/v1/admin/lexicon-next/entry-matches`，输入 `target_language/surface` 及可选 `page/page_size`，返回回显、已有管理列表摘要和分页。要求 `words.access/create`；当前词形匹配，无词形草稿回退词头，包含垃圾桶，跨类型多词词形可命中，同条去重。默认 20、上限 100、1 基；count/rows 同一个只读快照，页码超过当前结果时回落到有效末页。旧 `/detections` 响应与创建/保存格式保持不变，无迁移；新增端点先发布 API，再发布 Admin。
