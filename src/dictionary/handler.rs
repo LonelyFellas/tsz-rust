@@ -30,6 +30,9 @@ fn reading_response<T: serde::Serialize>(
     value: T,
 ) -> Result<(HeaderMap, Json<serde_json::Value>), AppError> {
     let mut value = serde_json::to_value(value).map_err(AppError::internal)?;
+    if !crate::lexicon::voice_versions::multi_recommendations_supported(headers) {
+        crate::lexicon::voice_versions::project_multi_recommendations(&mut value);
+    }
     if !crate::lexicon::voice_versions::pool_supported(headers) {
         crate::lexicon::voice_versions::project_pool(&mut value);
     }

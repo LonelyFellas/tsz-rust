@@ -29,6 +29,12 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 该命令会更新前端生成文件；同步后必须检查差异并执行项目规定的契约验证，不能把同步成功等同于联调完成。
 
+## 推荐音色多选（禅道 #193）
+
+客户端携带 `X-TSZ-Voice-Versions: v5` 读取和保存多选推荐来源；`voice_ids`、`contribution_ids` 与音色池同为最多 2000 项，仍校验去重和贡献版本归属。`recommendation_order` 记录已选推荐项 ID，来源对象保留首组身份及全部局部贡献。旧 v4 及以下读取隐藏超出旧上限的来源对象，保留音色配置；旧客户端不能覆盖已有多选来源，须刷新后保存。
+
+无数据库迁移，先发布后端，再发布配套前端。新前端的 v5 请求不能先接旧 API；已有多选数据写入后，回退前端只能使用兼容视图，不能编辑该配置，后端回退也须保留多选协议支持。任务与验证主记录由前端任务 #193 的 PR 维护，后端 PR 引用同一记录。
+
 ## 独立创建例句
 
 禅道 #154 的契约、兼容顺序及真实联调记录统一维护在前端仓库 `docs/features/independent-sentence-creation/README.md`。

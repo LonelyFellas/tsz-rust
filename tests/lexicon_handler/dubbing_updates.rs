@@ -296,7 +296,7 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
 }
 
 #[sqlx::test]
-async fn provider_pool_persists_without_recommendation_and_rejects_old_writer_or_duplicate_official_id(
+async fn provider_pool_persists_multiple_recommendations_and_rejects_old_writer_or_duplicate_official_id(
     pool: PgPool,
 ) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
@@ -381,6 +381,57 @@ async fn provider_pool_persists_without_recommendation_and_rejects_old_writer_or
         reread["word"]["forms"].pointer(&profile_path).unwrap(),
         &expected
     );
+    let mut expected = expected;
+    let aliases = [
+        "en-gb-sonianeural",
+        "en-gb-ryanneural",
+        "en-gb-libbyneural",
+        "en-gb-maisieneural",
+    ];
+    let versions: Vec<_> = (0..aliases.len()).map(|_| Uuid::now_v7()).collect();
+    expected["voices"] = json!(
+        aliases
+            .iter()
+            .zip(&versions)
+            .map(|(alias, version)| setting(alias, *version, true))
+            .collect::<Vec<_>>()
+    );
+    expected["dubbing"]["recommendation_order"] = json!(versions);
+    expected["dubbing"]["recommendation"] = json!({"group_id":Uuid::now_v7(),"pair_id":Uuid::now_v7(),"voice_ids":aliases,"contribution_ids":versions});
+    let mut multi_forms = reread["word"]["forms"].clone();
+    *multi_forms.pointer_mut(&profile_path).unwrap() = expected.clone();
+    let (status, multi_saved) = request(
+        &state,
+        &bearer,
+        id,
+        "v5",
+        Some(save(reread["word"]["revision"].clone(), multi_forms)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{multi_saved}");
+    let reread = request(&state, &bearer, id, "v5", None).await.1;
+    assert_eq!(
+        reread["word"]["forms"].pointer(&profile_path).unwrap(),
+        &expected
+    );
+    let old_pool = request(&state, &bearer, id, "v4", None).await.1;
+    assert!(
+        old_pool["word"]["forms"]
+            .pointer(&format!("{profile_path}/dubbing/recommendation"))
+            .is_none()
+    );
+    let (status, _) = request(
+        &state,
+        &bearer,
+        id,
+        "v4",
+        Some(save(
+            old_pool["word"]["revision"].clone(),
+            old_pool["word"]["forms"].clone(),
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let old = request(&state, &bearer, id, "v3", None).await.1;
     assert!(
         old["word"]["forms"]
@@ -399,7 +450,7 @@ async fn provider_pool_persists_without_recommendation_and_rejects_old_writer_or
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let stable = request(&state, &bearer, id, "v4", None).await.1;
+    let stable = request(&state, &bearer, id, "v5", None).await.1;
     assert_eq!(stable["word"]["revision"], reread["word"]["revision"]);
     assert_eq!(
         stable["word"]["forms"].pointer(&profile_path).unwrap(),
@@ -417,12 +468,12 @@ async fn provider_pool_persists_without_recommendation_and_rejects_old_writer_or
         &state,
         &bearer,
         id,
-        "v4",
+        "v5",
         Some(save(stable["word"]["revision"].clone(), collision)),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let final_read = request(&state, &bearer, id, "v4", None).await.1;
+    let final_read = request(&state, &bearer, id, "v5", None).await.1;
     assert_eq!(final_read["word"]["revision"], stable["word"]["revision"]);
     assert_eq!(
         final_read["word"]["forms"].pointer(&profile_path).unwrap(),
