@@ -50,7 +50,14 @@ pub fn require_language(language: &str) -> Result<(), AppError> {
     }
 }
 pub fn text(value: &str, max: usize) -> Result<(), AppError> {
-    if value.trim().is_empty() || value.chars().count() > max || value.chars().any(char::is_control)
+    validate_text(value, max, false)
+}
+fn validate_text(value: &str, max: usize, multiline: bool) -> Result<(), AppError> {
+    if value.trim().is_empty()
+        || value.chars().count() > max
+        || value
+            .chars()
+            .any(|c| c.is_control() && !(multiline && matches!(c, '\r' | '\n')))
     {
         Err(invalid())
     } else {
@@ -110,7 +117,7 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
             ) {
                 return Err(unavailable());
             }
-            text(&definition.text, 5000)?;
+            validate_text(&definition.text, 5000, true)?;
         }
         for equivalent in &sense.equivalents {
             identity(&mut ids, equivalent.id)?;
