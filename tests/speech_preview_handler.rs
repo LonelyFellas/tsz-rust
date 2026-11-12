@@ -664,7 +664,7 @@ async fn explicit_test_header_cannot_silently_generate_into_normal_storage(pool:
 }
 
 // Real loopback HTTP against the source-built router and the sqlx-isolated database.
-async fn paired_call(
+async fn independent_call(
     base_url: &str,
     method: Method,
     path: &str,
@@ -673,7 +673,7 @@ async fn paired_call(
 ) -> (StatusCode, Value) {
     let mut request = reqwest::Client::new()
         .request(method.clone(), format!("{base_url}{path}"))
-        .header("X-TSZ-Dubbing-Groups", "v3");
+        .header("X-TSZ-Dubbing-Groups", "v4");
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
@@ -697,7 +697,7 @@ async fn paired_call(
 }
 
 #[sqlx::test]
-async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(pool: PgPool) {
+async fn independent_routes_negotiate_strict_sides_and_preserve_legacy_reads(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -715,33 +715,25 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
         .unwrap();
     let path = "/api/v1/admin/speech/groups";
     assert_eq!(
-        paired_call(&base_url, Method::GET, path, None, None)
+        independent_call(&base_url, Method::GET, path, None, None)
             .await
             .0,
         StatusCode::UNAUTHORIZED
     );
-    let side = |alias| json!({"id":Uuid::now_v7(),"voice_alias":alias,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
-    let mut input = json!({"base_revision":0,"group":{"id":Uuid::now_v7(),"name":"paired HTTP","areas":["word"],"is_global":false,"pairs":[{"id":Uuid::now_v7(),"name":"complete","selected":true,"uk":side("en-gb-sonianeural"),"us":side("en-us-jennyneural")}]}});
-    // A new client must not silently send paired writes to an older representation.
+    let side = |alias| json!({"id":Uuid::now_v7(),"name":"selected","selected":true,"voice_alias":alias,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
+    let mut input = json!({"base_revision":0,"group":{"id":Uuid::now_v7(),"name":"independent HTTP","areas":["word"],"is_global":false,"uk":[side("en-gb-sonianeural")],"us":[side("en-us-jennyneural")]}});
+    let paired = json!({"base_revision":0,"group":{"id":Uuid::now_v7(),"name":"removed pairs","areas":["word"],"pairs":[]}});
+    // v4 rejects the removed paired representation.
     assert_eq!(
-        call(
-            &state,
-            Method::POST,
-            path,
-            Some(&token),
-            Some(input.clone())
-        )
-        .await
-        .0,
-        StatusCode::BAD_REQUEST
+        call(&state, Method::POST, path, Some(&token), Some(paired))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
     );
     let mut incomplete = input.clone();
-    incomplete["group"]["pairs"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("us");
+    incomplete["group"].as_object_mut().unwrap().remove("us");
     assert_eq!(
-        paired_call(
+        independent_call(
             &base_url,
             Method::POST,
             path,
@@ -753,14 +745,14 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
         StatusCode::UNPROCESSABLE_ENTITY
     );
     let mut extra = input.clone();
-    extra["group"]["pairs"][0]["uk"]["extra"] = json!(true);
+    extra["group"]["uk"][0]["extra"] = json!(true);
     assert_eq!(
-        paired_call(&base_url, Method::POST, path, Some(&token), Some(extra))
+        independent_call(&base_url, Method::POST, path, Some(&token), Some(extra))
             .await
             .0,
         StatusCode::UNPROCESSABLE_ENTITY
     );
-    let created = paired_call(
+    let created = independent_call(
         &base_url,
         Method::POST,
         path,
@@ -770,11 +762,8 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
     .await;
     assert_eq!(created.0, StatusCode::OK);
     assert_eq!(created.1["order_revision"], 1);
-    assert_eq!(
-        created.1["groups"][0]["recommendations"]["pairs"],
-        input["group"]["pairs"]
-    );
-    let read = paired_call(&base_url, Method::GET, path, Some(&token), None).await;
+    assert_eq!(created.1["groups"][0]["uk"], input["group"]["uk"]);
+    let read = independent_call(&base_url, Method::GET, path, Some(&token), None).await;
     assert_eq!(
         read.1, created.1,
         "independent GET must read the saved representation"
@@ -783,47 +772,27 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
     assert_eq!(old.0, StatusCode::OK);
     assert_eq!(
         old.1["groups"][0]["uk"][0]["id"],
-        input["group"]["pairs"][0]["uk"]["id"]
+        input["group"]["uk"][0]["id"]
     );
     assert!(old.1.get("order_revision").is_none());
     let id = input["group"]["id"].as_str().unwrap();
     let edit_path = format!("{path}/{id}");
-    let old_group = tsz_rust::speech::library::VoiceLibraryRepository::new(pool.clone())
-        .groups(actor)
-        .await
-        .unwrap()
-        .groups
-        .into_iter()
-        .rfind(|group| !group.is_global)
-        .unwrap();
-    assert_eq!(
-        call(
-            &state,
-            Method::PUT,
-            &edit_path,
-            Some(&token),
-            Some(json!({"group":old_group,"base_revision":1}))
-        )
-        .await
-        .0,
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        call(
-            &state,
-            Method::DELETE,
-            &edit_path,
-            Some(&token),
-            Some(json!({"base_revision":1}))
-        )
-        .await
-        .0,
-        StatusCode::CONFLICT
-    );
+    for method in [Method::PUT, Method::DELETE] {
+        let response = reqwest::Client::new()
+            .request(method, format!("{base_url}{edit_path}"))
+            .bearer_auth(&token)
+            .header("X-TSZ-Dubbing-Groups", "v3")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(&json!({"group":input["group"],"base_revision":1})).unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
     input["base_revision"] = json!(1);
-    input["group"]["pairs"][0]["uk"]["parameters"]["rate_percent"] = json!(-10);
+    input["group"]["uk"][0]["parameters"]["rate_percent"] = json!(-10);
     assert_eq!(
-        paired_call(
+        independent_call(
             &base_url,
             Method::PUT,
             &format!("{path}/{}", Uuid::now_v7()),
@@ -834,7 +803,7 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
         .0,
         StatusCode::BAD_REQUEST
     );
-    let edited = paired_call(
+    let edited = independent_call(
         &base_url,
         Method::PUT,
         &edit_path,
@@ -843,9 +812,10 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
     )
     .await;
     assert_eq!(edited.0, StatusCode::OK);
+    assert_eq!(edited.1["groups"][0]["us"], created.1["groups"][0]["us"]);
     assert_eq!(edited.1["order_revision"], 1);
     assert_eq!(
-        paired_call(
+        independent_call(
             &base_url,
             Method::PUT,
             &edit_path,
@@ -856,7 +826,7 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
         .0,
         StatusCode::CONFLICT
     );
-    let removed = paired_call(
+    let removed = independent_call(
         &base_url,
         Method::DELETE,
         &edit_path,
@@ -867,7 +837,7 @@ async fn paired_routes_negotiate_strict_complete_sets_and_preserve_legacy_reads(
     assert_eq!(removed.0, StatusCode::OK);
     assert_eq!(removed.1["order_revision"], 2);
     assert_eq!(
-        paired_call(&base_url, Method::GET, path, Some(&token), None)
+        independent_call(&base_url, Method::GET, path, Some(&token), None)
             .await
             .1,
         removed.1
@@ -899,23 +869,23 @@ async fn priority_order_http_round_trip_and_qualification_keep_native_locale_and
         .unwrap();
     let path = "/api/v1/admin/speech/groups";
     let order_path = format!("{path}/order");
-    let side = |alias| json!({"id":Uuid::now_v7(),"voice_alias":alias,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
+    let side = |alias| json!({"id":Uuid::now_v7(),"name":"native","selected":true,"voice_alias":alias,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
     let a = Uuid::now_v7();
     let b = Uuid::now_v7();
-    let paired = json!({"base_revision":0,"group":{"id":a,"name":"native priority","is_global":false,"areas":["word"],"pairs":[{"id":Uuid::now_v7(),"name":"native","selected":true,"uk":side("en-sg-lunaneural"),"us":side("en-us-jennyneural")}]}});
+    let native = json!({"base_revision":0,"group":{"id":a,"name":"native priority","is_global":false,"areas":["word"],"uk":[side("en-sg-lunaneural")],"us":[side("en-us-jennyneural")]}});
     assert_eq!(
-        paired_call(
+        independent_call(
             &base,
             Method::POST,
             path,
             Some(&token),
-            Some(paired.clone())
+            Some(native.clone())
         )
         .await
         .0,
         StatusCode::OK
     );
-    // An unconverted legacy group may share an area without conversion or loss of side IDs.
+    // Another group may share the area and leave its US side empty.
     let rec = |alias| json!({"id":Uuid::now_v7(),"voice_alias":alias,"name":"legacy","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
     let legacy = json!({"base_revision":0,"group":{"id":b,"name":"legacy second","is_global":false,"areas":["word"],"uk":[rec("en-gb-sonianeural")],"us":[]}});
     assert_eq!(
@@ -930,18 +900,15 @@ async fn priority_order_http_round_trip_and_qualification_keep_native_locale_and
         .0,
         StatusCode::OK
     );
-    let read = paired_call(&base, Method::GET, path, Some(&token), None)
+    let read = independent_call(&base, Method::GET, path, Some(&token), None)
         .await
         .1;
-    assert_eq!(read["groups"][0]["recommendations"]["format"], "paired");
-    assert_eq!(read["groups"][1]["recommendations"]["format"], "legacy");
-    assert_eq!(
-        read["groups"][1]["recommendations"]["uk"],
-        legacy["group"]["uk"]
-    );
+    assert_eq!(read["groups"][0]["uk"], native["group"]["uk"]);
+    assert_eq!(read["groups"][1]["us"], json!([]));
+    assert_eq!(read["groups"][1]["uk"], legacy["group"]["uk"]);
     let global = read["groups"][2]["id"].clone();
     let mut request = json!({"profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}},"accent":"gb","source":{"kind":"text","content":{"version":2,"text":"cat","annotations":[]}}});
-    let natural = paired_call(
+    let natural = independent_call(
         &base,
         Method::POST,
         "/api/v1/admin/speech/resolve",
@@ -954,7 +921,7 @@ async fn priority_order_http_round_trip_and_qualification_keep_native_locale_and
     assert_eq!(natural.1["voices"][0]["locale"], "en-SG");
     request["source"]["content"]["annotations"] =
         json!([{"type":"phoneme","start":0,"end":3,"alphabet":"ipa","phoneme":"kæt"}]);
-    let phoneme = paired_call(
+    let phoneme = independent_call(
         &base,
         Method::POST,
         "/api/v1/admin/speech/resolve",
@@ -969,7 +936,7 @@ async fn priority_order_http_round_trip_and_qualification_keep_native_locale_and
     );
     let order = json!({"group_ids":[b,a,global],"base_revision":read["order_revision"]});
     assert_eq!(
-        paired_call(&base, Method::PUT, &order_path, None, Some(order.clone()))
+        independent_call(&base, Method::PUT, &order_path, None, Some(order.clone()))
             .await
             .0,
         StatusCode::UNAUTHORIZED
@@ -977,12 +944,12 @@ async fn priority_order_http_round_trip_and_qualification_keep_native_locale_and
     let mut draft = order.clone();
     draft["groups"] = json!([legacy["group"]]);
     assert_eq!(
-        paired_call(&base, Method::PUT, &order_path, Some(&token), Some(draft))
+        independent_call(&base, Method::PUT, &order_path, Some(&token), Some(draft))
             .await
             .0,
         StatusCode::UNPROCESSABLE_ENTITY
     );
-    let sorted = paired_call(
+    let sorted = independent_call(
         &base,
         Method::PUT,
         &order_path,
@@ -994,19 +961,19 @@ async fn priority_order_http_round_trip_and_qualification_keep_native_locale_and
     assert_eq!(sorted.1["groups"][0], read["groups"][1]);
     assert_eq!(sorted.1["groups"][1], read["groups"][0]);
     assert_eq!(
-        paired_call(&base, Method::GET, path, Some(&token), None)
+        independent_call(&base, Method::GET, path, Some(&token), None)
             .await
             .1,
         sorted.1
     );
     assert_eq!(
-        paired_call(&base, Method::PUT, &order_path, Some(&token), Some(order))
+        independent_call(&base, Method::PUT, &order_path, Some(&token), Some(order))
             .await
             .0,
         StatusCode::CONFLICT
     );
     request["source"]["content"]["annotations"] = json!([]);
-    let resolved = paired_call(
+    let resolved = independent_call(
         &base,
         Method::POST,
         "/api/v1/admin/speech/resolve",
@@ -1015,10 +982,11 @@ async fn priority_order_http_round_trip_and_qualification_keep_native_locale_and
     )
     .await;
     assert_eq!(resolved.1["voices"][0]["voice_id"], "en-gb-sonianeural");
-    // No selected eligible item and an empty global means unavailable, not a random voice.
+    // Explicit local-empty selection must not fall back to the eligible catalog.
     sqlx::query("UPDATE speech.voices SET accent='none' WHERE alias IN ('en-gb-sonianeural','en-sg-lunaneural')").execute(&pool).await.unwrap();
+    request["profile"]["dubbing"]["uk"]["mode"] = json!("local");
     assert_eq!(
-        paired_call(
+        independent_call(
             &base,
             Method::POST,
             "/api/v1/admin/speech/resolve",

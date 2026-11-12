@@ -849,12 +849,37 @@ pub(crate) async fn validate_bindings_with_forms(
         .iter()
         .filter(|requirement| requirement.profile.is_some())
         .flat_map(|requirement| {
-            requirement
+            let mut accents = requirement.default_for.clone();
+            if let Some(accent) = requirement
                 .setting
                 .as_ref()
                 .and_then(VoiceSettingV3::accent_group)
+            {
+                accents.push(accent);
+            } else if accents.is_empty() {
+                // Older enabled settings may omit locale; their active owner still
+                // scopes capability validation, including disabled versions with assets.
+                accents.extend(
+                    super::dubbing::active_accents(
+                        &requirement.source_path,
+                        requirement.source_dialect.map(|dialect| match dialect {
+                            crate::lexicon::dto::Dialect::Uk => "uk",
+                            crate::lexicon::dto::Dialect::Us => "us",
+                            _ => "common",
+                        }),
+                    )
+                    .into_iter()
+                    .map(|accent| {
+                        if accent == "gb" {
+                            super::locale::AccentGroup::Uk
+                        } else {
+                            super::locale::AccentGroup::Us
+                        }
+                    }),
+                );
+            }
+            accents
                 .into_iter()
-                .chain(requirement.default_for.iter().copied())
                 .map(|accent| (requirement.source_path.as_str(), accent))
         })
         .collect();

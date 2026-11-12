@@ -152,7 +152,7 @@ pub(crate) fn stored_dubbing(mut value: Value) -> Value {
 pub(crate) fn preserve_legacy_dubbing(
     before: &Value,
     after: &mut Value,
-) -> Result<(), crate::error::AppError> {
+) -> Result<bool, crate::error::AppError> {
     use std::collections::HashMap;
     fn identity(value: &Value) -> Option<&str> {
         value
@@ -199,10 +199,11 @@ pub(crate) fn preserve_legacy_dubbing(
         after: &mut Value,
         nodes: &HashMap<String, &Value>,
         origins: &HashSet<String>,
-    ) -> Result<(), crate::error::AppError> {
+    ) -> Result<bool, crate::error::AppError> {
         let before = identity(after)
             .and_then(|id| nodes.get(id).copied())
             .unwrap_or(before);
+        let mut changed = false;
         match after {
             Value::Object(fields) => {
                 if fields.contains_key("voices") {
@@ -217,13 +218,16 @@ pub(crate) fn preserve_legacy_dubbing(
                             "旧推荐出处由服务端保留，不能修改或伪造",
                         ));
                     }
-                    if let Some(raw) = original {
+                    if let Some(raw) = original
+                        && fields.get("legacy_dubbing") != Some(raw)
+                    {
                         fields.insert("legacy_dubbing".into(), raw.clone());
+                        changed = true;
                     }
                 }
                 for (key, child) in fields {
                     if key != "legacy_dubbing" {
-                        visit(&before[key.as_str()], child, nodes, origins)?;
+                        changed |= visit(&before[key.as_str()], child, nodes, origins)?;
                     }
                 }
             }
@@ -237,12 +241,12 @@ pub(crate) fn preserve_legacy_dubbing(
                             items.get(index)
                         }
                     });
-                    visit(previous.unwrap_or(&Value::Null), child, nodes, origins)?;
+                    changed |= visit(previous.unwrap_or(&Value::Null), child, nodes, origins)?;
                 }
             }
             _ => {}
         }
-        Ok(())
+        Ok(changed)
     }
     let mut nodes = HashMap::new();
     let mut origins = HashSet::new();

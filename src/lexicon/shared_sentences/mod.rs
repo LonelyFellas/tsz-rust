@@ -979,11 +979,12 @@ pub async fn update(
         return Err(invalid(crate::lexicon::voice_versions::UPGRADE_MESSAGE));
     }
     let mut incoming = serde_json::to_value(&input.content).map_err(AppError::internal)?;
-    crate::lexicon::voice_versions::preserve_legacy_dubbing(
+    if crate::lexicon::voice_versions::preserve_legacy_dubbing(
         &serde_json::to_value(&current.content).map_err(AppError::internal)?,
         &mut incoming,
-    )?;
-    input.content = serde_json::from_value(incoming).map_err(AppError::internal)?;
+    )? {
+        input.content = serde_json::from_value(incoming).map_err(AppError::internal)?;
+    }
     crate::admin::permissions::content::require_changes(
         &authorization,
         "sentences",
