@@ -1319,9 +1319,16 @@ fn validate_variant(
                 let Some(candidate) = candidate else { continue };
                 if candidate.source
                     == Some(crate::lexicon::dto::PronunciationSpeechSourceV3::Upload)
-                    && !pronunciation.audio_assets.iter().any(|asset| {
-                        asset.locale.as_str() == if side == "uk" { "en-GB" } else { "en-US" }
-                    })
+                    && !{
+                        let locale = if side == "uk" { "en-GB" } else { "en-US" };
+                        let choice = pronunciation.audio_assets.iter().any(|asset| {
+                            asset.locale.as_str() == locale && asset.is_default.is_some()
+                        });
+                        pronunciation.audio_assets.iter().any(|asset| {
+                            asset.locale.as_str() == locale
+                                && (!choice || asset.is_default == Some(true))
+                        })
+                    }
                 {
                     issues.push(issue(
                         V3ValidationIssueCode::PhoneticRichTextInvalid,
@@ -1409,6 +1416,31 @@ fn validate_variant(
                 ]);
             }
             for (prefix, synthesis, complete, dialect) in candidates {
+                let recorded = |accent| {
+                    let explicit = pronunciation
+                        .synthesis
+                        .as_ref()
+                        .is_some_and(|s| match accent {
+                            crate::speech::locale::AccentGroup::Uk => {
+                                s.source_for(PhonemeLocaleV3::EnGb).is_some()
+                            }
+                            crate::speech::locale::AccentGroup::Us => {
+                                s.source_for(PhonemeLocaleV3::EnUs).is_some()
+                            }
+                            _ => false,
+                        });
+                    !explicit
+                        && pronunciation.audio_assets.iter().any(|asset| {
+                            asset.is_default == Some(true) && asset.locale.accent_group() == accent
+                        })
+                };
+                use crate::speech::locale::AccentGroup;
+                let complete = complete
+                    && !match dialect {
+                        Dialect::Uk => recorded(AccentGroup::Uk),
+                        Dialect::Us => recorded(AccentGroup::Us),
+                        Dialect::Common => recorded(AccentGroup::Uk) && recorded(AccentGroup::Us),
+                    };
                 let issue_offset = issues.len();
                 for (field, value, limit) in [
                     (
@@ -3224,6 +3256,62 @@ mod tests {
             validate_forms(&decode_valid(raw).content, StepSaveIntent::Complete)
                 .iter()
                 .any(|issue| issue.field == "synthesis.us.ipa")
+        );
+    }
+
+    #[test]
+    fn selected_recordings_replace_only_their_accents_synthesis_requirements() {
+        let mut raw = valid_request();
+        let path = "/content/pos/0/forms/0/regional_variants/common/pronunciations/0";
+        raw.pointer_mut(path).unwrap()["synthesis"] = json!({
+            "alphabet":"ups", "use_spelling":false, "ipa":"", "ups":"",
+            "uk":{"ipa":"", "ups":""}, "us":{"ipa":"", "ups":""}
+        });
+        let recording = |locale: &str| {
+            json!({
+                "id":Uuid::now_v7(), "is_default":true, "locale":locale,"gender":"female",
+                "content_type":"audio/mpeg","size_bytes":3,"duration_ms":null,
+                "original_name":"fixture.mp3","created_at":"2026-11-12T00:00:00Z"
+            })
+        };
+        raw.pointer_mut(path).unwrap()["audio_assets"] = json!([recording("en-GB")]);
+        let issues = validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete);
+        assert!(
+            !issues.iter().any(|i| i.field == "synthesis.uk.ups"),
+            "{issues:?}"
+        );
+        assert!(
+            issues.iter().any(|i| i.field == "synthesis.us.ups"),
+            "{issues:?}"
+        );
+        raw.pointer_mut(path).unwrap()["audio_assets"]
+            .as_array_mut()
+            .unwrap()
+            .push(recording("en-US"));
+        let issues = validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete);
+        assert!(issues.is_empty(), "{issues:?}");
+        raw.pointer_mut(path).unwrap()["synthesis"]["uk"]["source"] = json!("ups");
+        raw.pointer_mut(path).unwrap()["synthesis"]["us"]["source"] = json!("ups");
+        let issues = validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete);
+        assert!(
+            issues.iter().any(|i| i.field == "synthesis.uk.ups"),
+            "explicit source must not use cached recordings: {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|i| i.field == "synthesis.us.ups"),
+            "{issues:?}"
+        );
+        raw.pointer_mut(path).unwrap()["synthesis"]["uk"]["source"] = json!("none");
+        raw.pointer_mut(path).unwrap()["synthesis"]["us"]["source"] = json!("upload");
+        raw.pointer_mut(path).unwrap()["audio_assets"][1]["is_default"] = json!(false);
+        let issues = validate_forms(&decode_valid(raw).content, StepSaveIntent::Complete);
+        assert!(
+            issues.iter().any(|i| i.field == "synthesis.us.source"),
+            "explicitly cancelled recordings are not an active upload pool: {issues:?}"
+        );
+        assert!(
+            !issues.iter().any(|i| i.field == "synthesis.uk.ups"),
+            "paused side is not required"
         );
     }
 

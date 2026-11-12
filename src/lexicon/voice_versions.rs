@@ -167,7 +167,12 @@ pub(crate) fn preserve_legacy_dubbing(
     ) {
         match value {
             Value::Object(fields) => {
-                if let Some(id) = identity(value) {
+                // Media references have their own ID namespace and cannot replace an authoring owner.
+                if let Some(id) = identity(value)
+                    && ["voice_profile", "spelling_speech", "synthesis"]
+                        .iter()
+                        .any(|key| fields.contains_key(*key))
+                {
                     nodes.insert(id.into(), value);
                 }
                 if fields.contains_key("voices")
@@ -676,6 +681,7 @@ mod side_compatibility_tests {
     fn provenance_survives_reordering_and_omission_but_cannot_be_forged() {
         let profile = |name| json!({"voices":[],"dubbing":{"mode":"local","area":"word","recommendation":{"pair_id":name}}});
         let mut before = json!([{"id":"a","voice_profile":profile("a")},{"id":"b","voice_profile":profile("b")}]);
+        before[0]["audio_assets"] = json!([{"id":"a","locale":"en-GB"}]);
         project_stored_dubbing(&mut before);
         let mut after = json!([before[1].clone(), before[0].clone()]);
         for item in after.as_array_mut().unwrap() {
@@ -688,6 +694,11 @@ mod side_compatibility_tests {
         assert_eq!(
             after[0]["voice_profile"]["legacy_dubbing"],
             before[1]["voice_profile"]["legacy_dubbing"]
+        );
+        assert_eq!(
+            after[1]["voice_profile"]["legacy_dubbing"],
+            before[0]["voice_profile"]["legacy_dubbing"],
+            "asset IDs are not voice configuration owner IDs"
         );
         let mut moved = json!({"uk":before[0].clone(),"us":before[1].clone()});
         moved["uk"]["voice_profile"]

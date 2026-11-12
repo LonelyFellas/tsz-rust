@@ -378,3 +378,5 @@ Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写�
 - 旧存储全局 inherit/local 只在读取副本映射为两侧相同模式，声音、版本、参数及资产不变，不执行全库迁移。原始整份元数据保留为 `VoiceProfileV3.legacy_dubbing`，不伪造无法无损对应的推荐身份。合法保存时服务端按稳定属主保留未回传的原出处，禁止改写或伪造；同一聚合内的重排、区域拆分和配置复制可保留已有可信出处。新活动 dubbing 不恢复根 mode 或 pair_id。
 - 分组协议独立协商：`X-TSZ-Dubbing-Groups: v4` 返回直接 uk/us 列表和 order_revision，所有分组写入需 v4；旧 v3 读取只返回 `recommendations:{format:legacy,uk,us}`，不制造等长配对。旧写入在解码配对正文前返回升级冲突；v2 和未协商的旧只读表示继续保留。
 - 本任务新增 `20261112090000_dubbing_side_dependencies`；up 只给已有依赖加双侧默认值，后续保存精确登记继承侧。down 在存在单侧依赖时拒绝有损回退；新逐侧写入也不能假定旧二进制可读，发布必须依据实际基线的隔离演练及批准恢复策略。后端先提供兼容只读及旧写保护，再启用配套 v6 客户端的新写入；完整新旧组合仍以配套验证回执为准。
+
+TASK#190 与后续 #402 的耦合：录音 `is_default` 保留 absent／true／false 三态；显式取消不得变回旧 fallback。无显式 v6 source 的旧数据继续采用 #402 的录音优先与取消规则；v6 显式 IPA／UPS／spelling／none 不被其他源的缓存录音覆盖。upload 活动源若本侧已明确取消全部录音，保存／发布拒绝空池，不改选别的取消缓存；未设置选用状态的旧数据保留兼容初值。
