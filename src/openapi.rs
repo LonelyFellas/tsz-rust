@@ -1077,6 +1077,16 @@ mod tests {
                 .and_then(serde_json::Value::as_object)
             {
                 for (name, property) in properties {
+                    // Opaque legacy provenance is server-preserved and checked on save;
+                    // only this read-only field retains the original unknown keys.
+                    if name == "legacy_dubbing"
+                        && path.rsplit(" -> ").next() == Some("VoiceProfileV3")
+                    {
+                        assert_eq!(property["type"], "object");
+                        assert_eq!(property["readOnly"], true);
+                        assert_eq!(property["additionalProperties"], true);
+                        continue;
+                    }
                     walk(
                         property,
                         schemas,

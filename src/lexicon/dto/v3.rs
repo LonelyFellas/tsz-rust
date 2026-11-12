@@ -1125,12 +1125,25 @@ pub struct VoiceProfileV3 {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_legacy_dubbing"
     )]
-    #[schema(value_type = Object, nullable = false, read_only = true)]
+    #[schema(schema_with = legacy_dubbing_schema)]
     pub legacy_dubbing: Option<Box<serde_json::Value>>,
     #[schema(max_items = 2000)]
     pub voices: Vec<VoiceSettingV3>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dubbing: Option<Box<VoiceProfileDubbingV3>>,
+}
+
+fn legacy_dubbing_schema() -> Object {
+    ObjectBuilder::new()
+        .schema_type(Type::Object)
+        .description(Some(
+            "Original stored provenance, retained by the server during lazy v6 upgrades.",
+        ))
+        .read_only(true)
+        .additional_properties(Some(
+            utoipa::openapi::schema::AdditionalProperties::FreeForm(true),
+        ))
+        .build()
 }
 
 fn deserialize_legacy_dubbing<'de, D: Deserializer<'de>>(
