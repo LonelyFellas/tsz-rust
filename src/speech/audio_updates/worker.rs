@@ -437,12 +437,17 @@ async fn run(
             .filter(|old| {
                 (!old.enabled
                     || old.accent_group().is_some_and(|group| {
-                        profile.mode(if group == crate::speech::locale::AccentGroup::Uk {
-                            "gb"
-                        } else {
-                            "us"
-                        }) != Some(VoiceProfileModeV3::Inherit)
-                    }))
+                        let accent = match group {
+                            crate::speech::locale::AccentGroup::Uk => Some("gb"),
+                            crate::speech::locale::AccentGroup::Us => Some("us"),
+                            crate::speech::locale::AccentGroup::Other => None,
+                        };
+                        accent.is_none_or(|accent| {
+                            !active.contains(&accent)
+                                || profile.mode(accent) != Some(VoiceProfileModeV3::Inherit)
+                        })
+                    })
+                    || old.accent_group().is_none())
                     && !next
                         .voices
                         .iter()

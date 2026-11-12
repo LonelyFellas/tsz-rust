@@ -1959,3 +1959,54 @@ async fn side_dependency_migration_preserves_registrations_and_refuses_lossy_rol
     );
     sqlx::raw_sql(UP).execute(&pool).await.unwrap();
 }
+
+#[sqlx::test]
+async fn single_scope_rebuild_preserves_other_inherited_cache_even_when_effect_is_unchanged(
+    pool: PgPool,
+) {
+    let (actor, id, version, provider, storage) = setup(&pool).await;
+    let service =
+        GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(storage.clone()));
+    let uk = service
+        .generate(actor, 0, input(Uuid::now_v7(), version, "Hello"))
+        .await
+        .unwrap()
+        .asset;
+    let us_version = Uuid::from_u128(version.as_u128() + 1);
+    let mut us_input = input(Uuid::now_v7(), us_version, "Hello");
+    us_input.setting.voice_id = "jenny".into();
+    us_input.setting.locale =
+        Some(tsz_rust::speech::locale::EnglishLocale::parse("en-US").unwrap());
+    let us = service.generate(actor, 0, us_input).await.unwrap().asset;
+    let us_cache = json!({"voice_id":"jenny","locale":"en-US","version_id":us_version,"version_name":"US cached","enabled":true,"rate_percent":0,"audio_asset_id":us.id});
+    let profile = json!({"voices":[{"voice_id":"sonia","locale":"en-GB","version_id":version,"version_name":"GB cached","enabled":true,"rate_percent":0,"audio_asset_id":uk.id},us_cache],
+        "dubbing":{"area":"example","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}});
+    let owner = sentence(&pool, actor, profile.clone()).await;
+    link_retained_profile_assets(&pool, owner, &profile).await;
+    let mut values = group(id, version, 0);
+    values.us[0].parameters.rate_percent = -13;
+    save(&pool, actor, values, 0).await;
+    due(&pool).await;
+    let initial_calls = provider.calls.load(Ordering::SeqCst);
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage))
+        .await
+        .unwrap();
+    let after = current(&pool, owner).await;
+    assert_eq!(
+        after["voices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["locale"] == "en-US"),
+        Some(&us_cache)
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        initial_calls,
+        "unchanged active hash cannot spend TTS"
+    );
+    assert_eq!(
+        audio_updates::list(&pool, id).await.unwrap().updates[0].failed,
+        0
+    );
+}

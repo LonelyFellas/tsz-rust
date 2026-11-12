@@ -727,3 +727,128 @@ async fn complete_manual_source_uses_canonical_recording_accent_before_writes(po
     assert_eq!(status, StatusCode::OK, "{read}");
     assert_eq!(read["word"]["revision"], created["word"]["revision"]);
 }
+
+#[sqlx::test]
+async fn paused_inherited_phoneme_cache_does_not_block_other_side_save_after_defaults_change(
+    pool: PgPool,
+) {
+    use tsz_rust::speech::{
+        generated::{GenerateVoiceAudioRequest, GeneratedAudioService},
+        library::{VoiceLibraryRepository, dto::SaveDubbingGroupRequest},
+    };
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = fixture_state(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let created = create_v3_forms_fixture(&state, &pool, &bearer, false, false).await;
+    let id = created["word"]["id"].as_str().unwrap();
+    let read = request(&state, &bearer, id, "v6", None).await.1;
+    let mut forms = read["word"]["forms"].clone();
+    let us = &forms["contents"][0]["regional_variants"]["us"];
+    let spelling = us["spelling"].clone();
+    let group = Uuid::now_v7();
+    let us_version = Uuid::now_v7();
+    let group_input = json!({"base_revision":0,"group":{"id":group,"name":"source scope","areas":["word","azure"],"revision":0,"is_global":false,
+        "uk":[{"id":Uuid::now_v7(),"name":"GB","voice_alias":"en-gb-sonianeural","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}],
+        "us":[{"id":us_version,"name":"US","voice_alias":"en-us-jennyneural","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}]}});
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    repo.save_group(actor, 0, serde_json::from_value(group_input).unwrap(), true)
+        .await
+        .unwrap();
+    let profile = json!({"voices":[],"dubbing":{"area":"azure","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}});
+    let mut setting = json!({"voice_id":"en-us-jennyneural","locale":"en-US","version_id":us_version,"version_name":"US","enabled":true,"rate_percent":0,"pitch_semitones":0});
+    let storage = MemoryAdapter::object_store(
+        StorageSpace::parse("audio").unwrap(),
+        StoragePolicy::new(StoragePrivacy::Private, 1024, Duration::from_secs(60), None).unwrap(),
+    );
+    let service = GeneratedAudioService::new(
+        pool.clone(),
+        Some(Arc::new(Provider(AtomicUsize::new(0)))),
+        Some(storage),
+    );
+    let input:GenerateVoiceAudioRequest=serde_json::from_value(json!({"request_id":Uuid::now_v7(),"source":{"kind":"phoneme","content":{"version":2,"text":spelling,"annotations":[]},"alphabet":"ipa","phoneme":"ˈhɑrbər","phoneme_locale":"en-US"},"profile":profile,"setting":setting})).unwrap();
+    let asset = service.generate(actor, 0, input).await.unwrap().asset;
+    setting["audio_asset_id"] = json!(asset.id);
+    let mut profile = profile;
+    profile["voices"] = json!([setting]);
+    forms["contents"][0]["regional_variants"]["us"]["pronunciations"][0]["synthesis"] = json!({"alphabet":"ipa","ipa":"","ups":"","us":{"source":"ipa","ipa":"ˈhɑrbər","ups":"","ipa_speech":{"content":{"version":2,"text":spelling,"annotations":[]},"voice_profile":profile}}});
+    let save = |revision: Value, content: Value| json!({"schema_version":3,"base_revision":revision,"intent":"save","content":content});
+    let (status, saved) = request(
+        &state,
+        &bearer,
+        id,
+        "v6",
+        Some(save(read["word"]["revision"].clone(), forms)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let mut forms = saved["word"]["forms"].clone();
+    forms["contents"][0]["regional_variants"]["us"]["pronunciations"][0]["synthesis"]["us"]["source"] =
+        json!("none");
+    let (status, paused) = request(
+        &state,
+        &bearer,
+        id,
+        "v6",
+        Some(save(saved["word"]["revision"].clone(), forms)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{paused}");
+    let mut changed = repo
+        .groups(actor)
+        .await
+        .unwrap()
+        .groups
+        .into_iter()
+        .find(|g| g.id == group)
+        .unwrap();
+    let revision = changed.revision;
+    changed.us[0].parameters.rate_percent = -17;
+    repo.save_group(
+        actor,
+        0,
+        SaveDubbingGroupRequest {
+            group: changed,
+            base_revision: revision,
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    let mut forms = paused["word"]["forms"].clone();
+    forms["contents"][0]["regional_variants"]["uk"]["spelling_speech"] = json!({"content":{"version":2,"text":forms["contents"][0]["regional_variants"]["uk"]["spelling"],"annotations":[]},"voice_profile":{"voices":[{"voice_id":"en-gb-sonianeural","locale":"en-GB","version_id":Uuid::now_v7(),"version_name":"GB local","enabled":true,"rate_percent":-12}],"dubbing":{"area":"word","uk":{"mode":"local"},"us":{"mode":"inherit"}}}});
+    let (status, saved) = request(
+        &state,
+        &bearer,
+        id,
+        "v6",
+        Some(save(paused["word"]["revision"].clone(), forms)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let cache_path = "/contents/0/regional_variants/us/pronunciations/0/synthesis/us/ipa_speech/voice_profile/voices/0";
+    assert_eq!(
+        saved["word"]["forms"].pointer(cache_path).unwrap(),
+        &setting
+    );
+    let mut forged = saved["word"]["forms"].clone();
+    forged.pointer_mut(cache_path).unwrap()["rate_percent"] = json!(25);
+    let (status, _) = request(
+        &state,
+        &bearer,
+        id,
+        "v6",
+        Some(save(saved["word"]["revision"].clone(), forged)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "paused assets still require valid bindings"
+    );
+}

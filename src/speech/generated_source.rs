@@ -408,6 +408,7 @@ pub(crate) fn source_at(
 
 #[derive(Debug, Clone)]
 pub(crate) struct GeneratedReference {
+    pub path: String,
     pub asset: Uuid,
     pub source: GeneratedSpeechSource,
     pub setting: VoiceSettingV3,
@@ -431,17 +432,12 @@ fn collect_settings(
 ) -> Result<Vec<GeneratedReference>, crate::error::AppError> {
     fn walk(
         v: &Value,
-        node: Uuid,
+        path: &str,
         phoneme: Option<(&str, &str, &Value)>,
         native_locale: Option<&str>,
         assets_only: bool,
         out: &mut Vec<GeneratedReference>,
     ) -> Result<(), crate::error::AppError> {
-        let node = v
-            .get("id")
-            .and_then(Value::as_str)
-            .and_then(|s| Uuid::parse_str(s).ok())
-            .unwrap_or(node);
         if let Some(profile) = v.get("voice_profile").filter(|profile| !profile.is_null()) {
             let voices = profile["voices"].as_array().ok_or_else(invalid)?;
             for setting in voices {
@@ -464,6 +460,7 @@ fn collect_settings(
                     source_at(v, "")?
                 };
                 out.push(GeneratedReference {
+                    path: path.into(),
                     asset: asset
                         .map(|asset| serde_json::from_value(asset.clone()))
                         .transpose()
@@ -497,11 +494,13 @@ fn collect_settings(
                     } else {
                         None
                     };
+                    let child_path =
+                        format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
                     if let Some((alphabet, phone, words)) = context {
                         let empty = serde_json::json!([]);
                         walk(
                             child,
-                            node,
+                            &child_path,
                             Some((
                                 alphabet,
                                 phone,
@@ -527,13 +526,20 @@ fn collect_settings(
                                     })
                             }),
                         };
-                        walk(child, node, None, locale, assets_only, out)?;
+                        walk(child, &child_path, None, locale, assets_only, out)?;
                     }
                 }
             }
             Value::Array(items) => {
-                for child in items {
-                    walk(child, node, None, native_locale, assets_only, out)?;
+                for (index, child) in items.iter().enumerate() {
+                    walk(
+                        child,
+                        &format!("{path}/{index}"),
+                        None,
+                        native_locale,
+                        assets_only,
+                        out,
+                    )?;
                 }
             }
             _ => {}
@@ -541,6 +547,6 @@ fn collect_settings(
         Ok(())
     }
     let mut result = vec![];
-    walk(value, Uuid::nil(), None, None, assets_only, &mut result)?;
+    walk(value, "", None, None, assets_only, &mut result)?;
     Ok(result)
 }

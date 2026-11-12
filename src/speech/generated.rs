@@ -844,7 +844,27 @@ pub(crate) async fn validate_bindings_with_forms(
     // Validate active business sources only; inactive IPA/UPS caches and uploaded recordings
     // do not require voices. Resolution checks real catalog/markup capability without TTS.
     let mut checked = std::collections::HashSet::new();
-    for requirement in super::publication_audio::collect(value)? {
+    let requirements = super::publication_audio::collect(value)?;
+    let active_sources: std::collections::HashSet<_> = requirements
+        .iter()
+        .filter(|requirement| requirement.profile.is_some())
+        .flat_map(|requirement| {
+            requirement
+                .setting
+                .as_ref()
+                .and_then(VoiceSettingV3::accent_group)
+                .into_iter()
+                .chain(requirement.default_for.iter().copied())
+                .map(|accent| (requirement.source_path.as_str(), accent))
+        })
+        .collect();
+    let is_active = |reference: &super::generated_source::GeneratedReference| {
+        reference
+            .setting
+            .accent_group()
+            .is_some_and(|accent| active_sources.contains(&(reference.path.as_str(), accent)))
+    };
+    for requirement in &requirements {
         let (Some(profile), Some(source)) = (&requirement.profile, &requirement.source) else {
             continue;
         };
@@ -880,10 +900,11 @@ pub(crate) async fn validate_bindings_with_forms(
         }
     }
     for configuration in super::generated_source::configurations(value)? {
-        if !configuration
-            .setting
-            .voice_id
-            .starts_with("azure-hd-flash-")
+        if !is_active(&configuration)
+            || !configuration
+                .setting
+                .voice_id
+                .starts_with("azure-hd-flash-")
         {
             continue;
         }
@@ -984,6 +1005,7 @@ pub(crate) async fn validate_bindings_with_forms(
     }
     for reference in super::generated_source::references(value)? {
         if reference.setting.enabled
+            && is_active(&reference)
             && let Some(profile) = &reference.profile
         {
             super::dubbing::validate_setting(

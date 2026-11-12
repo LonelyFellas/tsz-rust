@@ -618,9 +618,43 @@ pub(crate) fn business_accents<'a>(
                 });
             }
             if let Some(owner) = root.pointer(path)
-                && let Some(source) = owner["synthesis"][side]["source"].as_str()
+                && owner["synthesis"][side]["source"].is_string()
             {
-                return !matches!(source, "none" | "upload");
+                // Explicit sources use the dedicated spelling/phoneme owners.
+                return false;
+            }
+            // Legacy recording selection is scoped to its own accent. Explicit
+            // phoneme/spelling sources above remain authoritative over caches.
+            let group = if *accent == "gb" {
+                super::locale::AccentGroup::Uk
+            } else {
+                super::locale::AccentGroup::Us
+            };
+            let mut ancestor = Some(path);
+            while let Some(pointer) = ancestor {
+                if let Some(assets) = root
+                    .pointer(pointer)
+                    .and_then(|owner| owner["audio_assets"].as_array())
+                {
+                    let matches = |asset: &&Value| {
+                        asset["locale"]
+                            .as_str()
+                            .and_then(super::locale::EnglishLocale::parse)
+                            .is_none_or(|locale| locale.accent_group() == group)
+                    };
+                    let choice = assets
+                        .iter()
+                        .filter(matches)
+                        .any(|asset| asset["is_default"].is_boolean());
+                    if assets
+                        .iter()
+                        .filter(matches)
+                        .any(|asset| !choice || asset["is_default"] == true)
+                    {
+                        return false;
+                    }
+                }
+                ancestor = pointer.rsplit_once('/').map(|(parent, _)| parent);
             }
             true
         })
@@ -633,14 +667,8 @@ pub fn dependencies(value: &Value) -> Vec<(Uuid, String, DubbingAreaV3, Vec<Stri
         value: &Value,
         node: Option<Uuid>,
         path: String,
-        recorded: bool,
         out: &mut Vec<(Uuid, String, DubbingAreaV3, Vec<String>)>,
     ) {
-        let recorded = recorded
-            || value
-                .get("audio_assets")
-                .and_then(Value::as_array)
-                .is_some_and(|assets| !assets.is_empty());
         let node = value
             .get("id")
             .and_then(Value::as_str)
@@ -651,7 +679,6 @@ pub fn dependencies(value: &Value) -> Vec<(Uuid, String, DubbingAreaV3, Vec<Stri
                 crate::lexicon::voice_versions::stored_dubbing(profile.clone()),
             )
             && profile.has_inheritance()
-            && !recorded
             && let Some(area) = profile.area()
         {
             let accents =
@@ -668,20 +695,20 @@ pub fn dependencies(value: &Value) -> Vec<(Uuid, String, DubbingAreaV3, Vec<Stri
             Value::Object(fields) => {
                 for (key, value) in fields {
                     if key != "voice_profile" {
-                        walk(root, value, node, format!("{path}/{key}"), recorded, out);
+                        walk(root, value, node, format!("{path}/{key}"), out);
                     }
                 }
             }
             Value::Array(items) => {
                 for (index, value) in items.iter().enumerate() {
-                    walk(root, value, node, format!("{path}/{index}"), recorded, out);
+                    walk(root, value, node, format!("{path}/{index}"), out);
                 }
             }
             _ => {}
         }
     }
     let mut out = vec![];
-    walk(value, value, None, String::new(), false, &mut out);
+    walk(value, value, None, String::new(), &mut out);
     out
 }
 
@@ -915,6 +942,23 @@ mod tests {
             )]
         );
     }
+    #[test]
+    fn explicit_active_phoneme_keeps_dependency_despite_ancestor_recording_caches() {
+        let id = Uuid::now_v7();
+        let speech = json!({"content":{"version":2,"text":"hello","annotations":[]},"voice_profile":{"voices":[],"dubbing":{"area":"azure","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}});
+        let value = json!({"id":id,"audio_assets":[{"id":Uuid::now_v7(),"locale":"en-US","is_default":true},{"id":Uuid::now_v7(),"locale":"en-GB","is_default":false}],
+            "synthesis":{"uk":{"source":"ipa","ipa":"həloʊ","ups":"","ipa_speech":speech},"us":{"source":"upload","ipa_speech":speech}}});
+        assert_eq!(
+            dependencies(&value),
+            vec![(
+                id,
+                "/synthesis/uk/ipa_speech".into(),
+                DubbingAreaV3::Azure,
+                vec!["gb".into()]
+            )]
+        );
+    }
+
     #[test]
     fn direct_phoneme_guard_preserves_history_and_normal_synthesis_configuration() {
         let mark = json!({"type":"phoneme","start":0,"end":3,"alphabet":"ipa","phoneme":"kæt"});
