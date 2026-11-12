@@ -97,8 +97,14 @@ pub struct ConfirmAudioAssetRequest {
 pub struct AudioAsset {
     pub id: Uuid,
     /// 同口音默认播放这条录音；省略时沿用合成音频优先。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_default: bool,
+    // Preserve explicit false without changing the fallback of older omitted choices.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_recording_choice"
+    )]
+    #[schema(nullable = false)]
+    pub is_default: Option<bool>,
     pub locale: AudioAssetLocale,
     pub gender: AudioAssetGender,
     pub content_type: String,
@@ -125,4 +131,11 @@ pub struct AudioAssetUrlResponse {
     pub url: String,
     pub expires_at: DateTime<Utc>,
     pub url_expires_in_seconds: u64,
+}
+
+fn deserialize_recording_choice<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool::deserialize(deserializer).map(Some)
 }

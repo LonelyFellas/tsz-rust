@@ -684,7 +684,7 @@ impl GeneratedAudioService {
             return Ok(None);
         }
         Ok(Some(AudioAsset {
-            is_default: false,
+            is_default: None,
             id: row.get("id"),
             locale: AudioAssetLocale::parse(&row.get::<String, _>("locale")).ok_or_else(invalid)?,
             gender: AudioAssetGender::parse(&row.get::<String, _>("gender")).ok_or_else(invalid)?,

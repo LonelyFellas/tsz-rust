@@ -254,6 +254,36 @@ fn variant(
                     })
                 })
         };
+        let item_accent = |item: &AudioRequirement| {
+            item.setting
+                .as_ref()
+                .and_then(|setting| setting.locale)
+                .or_else(|| {
+                    root.pointer(&item.source_path)
+                        .and_then(|owner| owner["audio_assets"].as_array())
+                        .and_then(|assets| {
+                            assets
+                                .iter()
+                                .find(|asset| id(&asset["id"]) == item.asset_id)
+                        })
+                        .and_then(|asset| asset["locale"].as_str())
+                        .and_then(super::locale::EnglishLocale::parse)
+                })
+                .map(|locale| locale.accent_group())
+        };
+        let recording_choice_for = |accent: AccentGroup| {
+            pronunciation["audio_assets"]
+                .as_array()
+                .is_some_and(|assets| {
+                    assets.iter().any(|asset| {
+                        asset["is_default"].is_boolean()
+                            && asset["locale"]
+                                .as_str()
+                                .and_then(super::locale::EnglishLocale::parse)
+                                .is_some_and(|locale| locale.accent_group() == accent)
+                    })
+                })
+        };
         let recording_for = |accent: AccentGroup| {
             pronunciation["audio_assets"]
                 .as_array()
@@ -282,7 +312,9 @@ fn variant(
             {
                 return false;
             }
-            !synthesis["use_spelling"].is_boolean() || selected_recording(item)
+            item.setting.is_some()
+                || item_accent(item).is_none_or(|accent| !recording_choice_for(accent))
+                || selected_recording(item)
         });
         out.extend(raw);
         let raw_end = out.len();
@@ -316,24 +348,7 @@ fn variant(
                 }
             }
         }
-        active.retain(|item| {
-            let locale = item
-                .setting
-                .as_ref()
-                .and_then(|setting| setting.locale)
-                .or_else(|| {
-                    root.pointer(&item.source_path)
-                        .and_then(|owner| owner["audio_assets"].as_array())
-                        .and_then(|assets| {
-                            assets
-                                .iter()
-                                .find(|asset| id(&asset["id"]) == item.asset_id)
-                        })
-                        .and_then(|asset| asset["locale"].as_str())
-                        .and_then(super::locale::EnglishLocale::parse)
-                });
-            !locale.is_some_and(|locale| recording_for(locale.accent_group()))
-        });
+        active.retain(|item| !item_accent(item).is_some_and(recording_for));
         out.extend(active);
         for (_, accent) in accents {
             let candidates = (active_start..out.len()).chain((start..raw_end).filter(|index| {
@@ -451,7 +466,8 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(selected(&value).asset_id, Some(recording));
-        value["forms"]["contents"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"][0].as_object_mut().unwrap().remove("is_default");
+        value["forms"]["contents"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"]
+            [0]["is_default"] = json!(false);
         assert_eq!(selected(&value).asset_id, Some(spelling));
         value["forms"]["contents"][0]["regional_variants"]["common"]["spelling_speech"]["audio_assets"] =
             json!([]);
@@ -459,6 +475,8 @@ mod tests {
             selected(&value).issue,
             Some(RequirementIssue::MissingConfiguration)
         ));
+        value["forms"]["contents"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"][0].as_object_mut().unwrap().remove("is_default");
+        assert_eq!(selected(&value).asset_id, Some(recording));
     }
 
     #[test]
@@ -660,6 +678,10 @@ mod tests {
             json!([{"id":Uuid::now_v7(),"locale":"en-GB"}]);
         let items = collect(&value).unwrap();
         assert_eq!(items.len(), 1);
+        assert!(items[0].asset_id.is_some());
+        value["forms"]["contents"][0]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"]
+            [0]["is_default"] = json!(false);
+        let items = collect(&value).unwrap();
         assert!(matches!(
             items[0].issue,
             Some(RequirementIssue::MissingConfiguration)

@@ -319,7 +319,7 @@ mod tests {
             let mut selected = [first.clone(), second.clone()];
             selected
                 .iter_mut()
-                .for_each(|asset| asset.is_default = true);
+                .for_each(|asset| asset.is_default = Some(true));
             let error = hydrate_recordings(&mut selected, &canonical).unwrap_err();
             let response = REQUEST_LOCALE
                 .scope(locale, async { error.into_response() })

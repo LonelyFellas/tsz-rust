@@ -39,6 +39,32 @@ async fn uploaded_recording_default_persists_after_save_and_independent_read(poo
     let mut expected = original;
     expected["is_default"] = json!(true);
     assert_eq!(actual, &expected);
+    let mut deselected = read["word"]["forms"].clone();
+    deselected.pointer_mut(asset_path).unwrap()["is_default"] = json!(false);
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{id}/steps/forms"),
+        &bearer,
+        None,
+        Some(save(read["word"]["revision"].clone(), deselected)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, read) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(
+        read["word"]["forms"].pointer(asset_path).unwrap()["is_default"],
+        false
+    );
     let mut cleared = read["word"]["forms"].clone();
     cleared
         .pointer_mut(asset_path)

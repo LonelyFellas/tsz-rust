@@ -4648,7 +4648,7 @@ async fn load_audio_asset_metadata(
             id,
             AudioAsset {
                 id,
-                is_default: false,
+                is_default: None,
                 locale: AudioAssetLocale::parse(&locale).ok_or_else(invariant_record)?,
                 gender: AudioAssetGender::parse(&gender).ok_or_else(invariant_record)?,
                 content_type: row.get("content_type"),

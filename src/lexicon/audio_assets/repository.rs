@@ -123,7 +123,7 @@ impl AudioAssetRepository {
         let locale: String = row.get("locale");
         let gender: String = row.get("gender");
         Ok(Some(AudioAsset {
-            is_default: false,
+            is_default: None,
             id: row.get("id"),
             locale: AudioAssetLocale::parse(&locale).ok_or_else(|| decode(locale))?,
             gender: AudioAssetGender::parse(&gender).ok_or_else(|| decode(gender))?,

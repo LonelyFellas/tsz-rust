@@ -176,7 +176,7 @@ pub(crate) fn own_audio(native: &published::PublishedContentV3) -> Vec<Dictionar
                     let selected_recordings: Vec<_> = pronunciation
                         .audio_assets
                         .iter()
-                        .filter(|asset| asset.is_default)
+                        .filter(|asset| asset.is_default == Some(true))
                         .cloned()
                         .collect();
                     uploaded_audio(
@@ -236,11 +236,12 @@ pub(crate) fn own_audio(native: &published::PublishedContentV3) -> Vec<Dictionar
                         .audio_assets
                         .iter()
                         .filter(|asset| {
-                            !asset.is_default
-                                && pronunciation
-                                    .synthesis
-                                    .as_ref()
-                                    .is_none_or(|synthesis| synthesis.use_spelling.is_none())
+                            asset.is_default != Some(true)
+                                && !pronunciation.audio_assets.iter().any(|choice| {
+                                    choice.is_default.is_some()
+                                        && choice.locale.accent_group()
+                                            == asset.locale.accent_group()
+                                })
                         })
                         .cloned()
                         .collect();
@@ -380,7 +381,7 @@ fn uploaded_audio(
             source_dialect,
             hd_flash: false,
             setting: None,
-            default_recording: asset.is_default,
+            default_recording: asset.is_default == Some(true),
         };
         // Preserve the first preferred recording from the active source before
         // considering legacy pronunciation recordings or another text dialect.
@@ -390,7 +391,7 @@ fn uploaded_audio(
                 && candidate.accent_group == item.accent_group
                 && candidate.source_dialect == source_dialect
         });
-        let index = (asset.is_default && !has_default)
+        let index = (asset.is_default == Some(true) && !has_default)
             .then(|| {
                 audio.iter().position(|candidate| {
                     candidate.target_id == target_id && candidate.accent_group == item.accent_group

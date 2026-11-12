@@ -1386,10 +1386,9 @@ fn validate_variant(
             }
             for (prefix, synthesis, complete, dialect) in candidates {
                 let recorded = |accent| {
-                    pronunciation
-                        .audio_assets
-                        .iter()
-                        .any(|asset| asset.is_default && asset.locale.accent_group() == accent)
+                    pronunciation.audio_assets.iter().any(|asset| {
+                        asset.is_default == Some(true) && asset.locale.accent_group() == accent
+                    })
                 };
                 use crate::speech::locale::AccentGroup;
                 let complete = complete
