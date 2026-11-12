@@ -3359,3 +3359,126 @@ async fn empty_sentence_trash_migration_roundtrip(pool: PgPool) {
     .await
     .unwrap();
 }
+
+#[sqlx::test]
+async fn legacy_sentence_read_is_nonmutating_and_v6_save_keeps_recordings_and_raw_origin(
+    pool: PgPool,
+) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let asset = audio_asset(&pool, actor).await;
+    let mut content = content(source);
+    content["sentence"]["en_text"]["common"]["audio_assets"] = json!([asset]);
+    let (status, created) = call(
+        &state,
+        actor,
+        Method::POST,
+        ROOT,
+        Some(
+            json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let mut stored = created["content"]["sentence"].clone();
+    let legacy = json!({"mode":"inherit","area":"example"});
+    stored["en_text"]["common"]["voice_profile"] = json!({"voices":[],"dubbing":legacy});
+    sqlx::query("UPDATE lexicon.shared_sentences SET content=$2 WHERE id=$1")
+        .bind(id)
+        .bind(&stored)
+        .execute(&pool)
+        .await
+        .unwrap();
+    async fn negotiated(
+        state: &AppState,
+        actor: Uuid,
+        id: Uuid,
+        version: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let token = state
+            .admin_token_manager
+            .generate(actor, AdminRole::Admin.as_str())
+            .unwrap();
+        let request = Request::builder()
+            .method(if body.is_some() {
+                Method::PUT
+            } else {
+                Method::GET
+            })
+            .uri(format!("{ROOT}/{id}?view=draft"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("X-TSZ-Voice-Versions", version)
+            .header("X-TSZ-Voice-Models", "v1")
+            .header("X-TSZ-Voice-Locales", "v1")
+            .header("X-TSZ-Sentence-Formatting", "v1")
+            .body(body.map_or_else(Body::empty, |v| Body::from(v.to_string())))
+            .unwrap();
+        let r = tsz_rust::router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = r.status();
+        (
+            status,
+            serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap(),
+        )
+    }
+    let (status, new) = negotiated(&state, actor, id, "v6", None).await;
+    assert_eq!(status, StatusCode::OK, "{new}");
+    let profile = &new["content"]["sentence"]["en_text"]["common"]["voice_profile"];
+    assert_eq!(profile["legacy_dubbing"], legacy);
+    assert_eq!(profile["dubbing"]["uk"]["mode"], "inherit");
+    assert_eq!(profile["dubbing"]["us"]["mode"], "inherit");
+    let raw: Value = sqlx::query_scalar("SELECT content FROM lexicon.shared_sentences WHERE id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(raw, stored);
+    let (status, old) = negotiated(&state, actor, id, "v5", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        old["content"]["sentence"]["en_text"]["common"]["voice_profile"]
+            .get("dubbing")
+            .is_none()
+    );
+    let (status, _) = negotiated(
+        &state,
+        actor,
+        id,
+        "v5",
+        Some(json!({"base_revision":old["revision"],"content":old["content"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut next = new["content"].clone();
+    next["sentence"]["en_text"]["common"]["voice_profile"]
+        .as_object_mut()
+        .unwrap()
+        .remove("legacy_dubbing");
+    let (status, saved) = negotiated(
+        &state,
+        actor,
+        id,
+        "v6",
+        Some(json!({"base_revision":new["revision"],"content":next})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["content"]["sentence"]["en_text"]["common"]["voice_profile"]["legacy_dubbing"],
+        legacy
+    );
+    assert_eq!(
+        saved["content"]["sentence"]["en_text"]["common"]["audio_assets"],
+        json!([asset])
+    );
+}

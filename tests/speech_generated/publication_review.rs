@@ -412,7 +412,7 @@ async fn inherited_first_choice_changes_invalidate_review_but_names_and_later_ch
     second_setting.version_id = Some(Uuid::now_v7());
     second_setting.rate_percent = 10;
     let profile: tsz_rust::lexicon::dto::VoiceProfileV3 = serde_json::from_value(json!({
-        "voices":[first_setting],"dubbing":{"mode":"inherit","area":"word"}
+        "voices":[first_setting],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}
     }))
     .unwrap();
     first.source_path = "/content/uk".into();
@@ -545,7 +545,7 @@ async fn inherited_grammar_profiles_use_the_owner_dialect_instead_of_array_paths
         item.source_dialect = Some(dialect);
         item.profile = Some(Arc::new(
             serde_json::from_value(
-                json!({"voices":[item.setting],"dubbing":{"mode":"inherit","area":"grammar"}}),
+                json!({"voices":[item.setting],"dubbing":{"area":"grammar","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}),
             )
             .unwrap(),
         ));

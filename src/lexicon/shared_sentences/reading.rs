@@ -32,7 +32,9 @@ pub(super) async fn summaries(
         }
         let meanings: Option<DraftMeaningsStepContentV3> = row
             .get::<Option<serde_json::Value>, _>("meanings")
-            .map(serde_json::from_value)
+            .map(|value| {
+                serde_json::from_value(crate::lexicon::voice_versions::stored_dubbing(value))
+            })
             .transpose()
             .map_err(AppError::internal)?;
         let gloss = meanings
@@ -69,7 +71,9 @@ pub(super) async fn published_on(
 ) -> Result<SharedSentence, AppError> {
     let row=sqlx::query("SELECT s.*,a.display_name AS created_by,p.snapshot FROM lexicon.shared_sentences s JOIN admins a ON a.id=s.created_by_admin_id JOIN lexicon.shared_sentence_publications p ON p.id=s.current_publication_id WHERE s.id=$1 AND s.deleted_at IS NULL AND s.withdrawn_at IS NULL")
         .bind(id).fetch_optional(&mut *conn).await.map_err(AppError::internal)?.ok_or_else(missing)?;
-    let content = serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?;
+    let mut snapshot: serde_json::Value = row.get("snapshot");
+    crate::lexicon::voice_versions::project_stored_dubbing(&mut snapshot);
+    let content = serde_json::from_value(snapshot).map_err(AppError::internal)?;
     let entries = summaries(conn, &content).await?;
     Ok(SharedSentence {
         id,
@@ -153,7 +157,10 @@ fn publication_from_row(row: sqlx::postgres::PgRow) -> Result<SentencePublicatio
         sentence_id: row.get("sentence_id"),
         publication_number: row.get("publication_number"),
         source_revision: row.get("source_revision"),
-        snapshot: serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?,
+        snapshot: serde_json::from_value(crate::lexicon::voice_versions::stored_dubbing(
+            row.get("snapshot"),
+        ))
+        .map_err(AppError::internal)?,
         created_by_admin_id: row.get("created_by_admin_id"),
         published_at: row.get("published_at"),
         published_by_admin_id: row.get("published_by_admin_id"),
@@ -167,7 +174,7 @@ pub struct SentenceHistoryQuery {
     pub before_number: Option<i64>,
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceHistoryQuery,("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源；v5 支持多选推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=Vec<SentencePublication>)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceHistoryQuery,("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源；v5 支持多选推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。 v5 为旧整份多选推荐模型；v6 使用逐侧继承/独立、推荐来源数组、发音来源及归属；旧客户端读取兼容视图并保护旧写。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=Vec<SentencePublication>)))]
 pub async fn history(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -194,7 +201,7 @@ pub async fn history(
     )
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源；v5 支持多选推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SentencePublication),(status=404,description="发布记录不存在")))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用；v3 支持分组继承；v4 支持显式官方 ID 局部池与推荐来源；v5 支持多选推荐来源。与 X-TSZ-Voice-Locales:v1 组合支持原生英语地区及补充音频；旧客户端读取兼容视图并拒绝有损保存。 v5 为旧整份多选推荐模型；v6 使用逐侧继承/独立、推荐来源数组、发音来源及归属；旧客户端读取兼容视图并保护旧写。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SentencePublication),(status=404,description="发布记录不存在")))]
 pub async fn historical(
     State(state): State<AppState>,
     auth: AdminAuth,

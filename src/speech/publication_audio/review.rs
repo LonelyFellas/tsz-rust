@@ -268,8 +268,8 @@ async fn inspect_impl(
         let (Some(profile), Some(source)) = (&item.profile, &item.source) else {
             continue;
         };
-        if profile.mode() != Some(crate::lexicon::dto::VoiceProfileModeV3::Inherit)
-            || checked_profiles.contains_key(&item.source_path)
+        if !profile.has_inheritance()
+            || checked_profiles.contains_key(&(item.source_path.clone(), item.source_dialect))
         {
             continue;
         }
@@ -288,10 +288,10 @@ async fn inspect_impl(
             Err(error) if error.status_code().is_client_error() => false,
             Err(error) => return Err(error),
         };
-        checked_profiles.insert(item.source_path.clone(), valid);
+        checked_profiles.insert((item.source_path.clone(), item.source_dialect), valid);
     }
     for item in &mut items {
-        if checked_profiles.get(&item.source_path) == Some(&false) {
+        if checked_profiles.get(&(item.source_path.clone(), item.source_dialect)) == Some(&false) {
             item.issue = Some(RequirementIssue::EffectMismatch);
         }
         if item.issue.is_some() {
@@ -597,6 +597,14 @@ async fn validate_inherited_profile(
             }),
     };
     for accent in [AccentGroup::Uk, AccentGroup::Us] {
+        if profile.mode(if accent == AccentGroup::Uk {
+            "gb"
+        } else {
+            "us"
+        }) != Some(crate::lexicon::dto::VoiceProfileModeV3::Inherit)
+        {
+            continue;
+        }
         if side.is_some_and(|side| match side {
             Dialect::Uk => accent != AccentGroup::Uk,
             Dialect::Us => accent != AccentGroup::Us,
@@ -607,12 +615,7 @@ async fn validate_inherited_profile(
         let stored = profile
             .voices
             .iter()
-            .filter(|voice| {
-                voice.enabled
-                    && voice
-                        .locale
-                        .is_some_and(|locale| locale.accent_group() == accent)
-            })
+            .filter(|voice| voice.enabled && voice.accent_group() == Some(accent))
             .collect::<Vec<_>>();
         let locale = if accent == AccentGroup::Uk {
             "en-GB"

@@ -446,7 +446,7 @@ async fn inherited_generation_rejects_stale_recommendations_before_provider_and_
         .unwrap();
     let mut request = input(Uuid::now_v7(), version, "123");
     request.profile = Some(
-        serde_json::from_value(json!({"voices":[],"dubbing":{"mode":"inherit","area":"word"}}))
+        serde_json::from_value(json!({"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}))
             .unwrap(),
     );
     service.generate(actor, 0, request).await.unwrap();
@@ -454,7 +454,7 @@ async fn inherited_generation_rejects_stale_recommendations_before_provider_and_
     sqlx::query("UPDATE speech.dubbing_groups SET groups=jsonb_set(groups,'{0,uk,0,parameters,rate_percent}','-27') WHERE singleton").execute(&pool).await.unwrap();
     let mut stale = input(Uuid::now_v7(), version, "123");
     stale.profile = Some(
-        serde_json::from_value(json!({"voices":[],"dubbing":{"mode":"inherit","area":"word"}}))
+        serde_json::from_value(json!({"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}))
             .unwrap(),
     );
     assert_eq!(
@@ -465,7 +465,7 @@ async fn inherited_generation_rejects_stale_recommendations_before_provider_and_
     let mut conn = pool.acquire().await.unwrap();
     let mut content: tsz_rust::lexicon::dto::RichTextV2 = serde_json::from_value(json!({"version":2,"text":"123","annotations":[{"type":"say_as","start":0,"end":3,"interpret_as":"digits"}]})).unwrap();
     let profile =
-        serde_json::from_value(json!({"voices":[],"dubbing":{"mode":"inherit","area":"word"}}))
+        serde_json::from_value(json!({"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}))
             .unwrap();
     let resolved = tsz_rust::speech::dubbing::resolve_in(&mut conn, &profile, "gb", &content, None)
         .await
@@ -488,9 +488,8 @@ async fn inheritance_dependencies_are_removed_transactionally_when_switching_to_
 ) {
     let owner = Uuid::now_v7();
     let target = Uuid::now_v7();
-    let inherited = json!({"id":target,"voice_profile":{"voices":[],"dubbing":{"mode":"inherit","area":"word"}}});
-    let local =
-        json!({"id":target,"voice_profile":{"voices":[],"dubbing":{"mode":"local","area":"word"}}});
+    let inherited = json!({"id":target,"voice_profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}});
+    let local = json!({"id":target,"voice_profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"local"},"us":{"mode":"local"}}}});
     let mut tx = pool.begin().await.unwrap();
     tsz_rust::speech::dubbing::replace_dependencies(&mut tx, "entry", owner, 1, &inherited)
         .await
@@ -527,7 +526,7 @@ async fn dubbing_migration_roundtrips_empty_schema_but_rejects_saved_local_seman
     let actor = actor(&pool).await;
     let entry = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,revision,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word',1,'{}',$2,$2)").bind(entry).bind(actor).execute(&pool).await.unwrap();
-    let forms = json!({"pos":[],"saved":{"voice_profile":{"voices":[],"dubbing":{"mode":"local","area":"word"}}}});
+    let forms = json!({"pos":[],"saved":{"voice_profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"local"},"us":{"mode":"local"}}}}});
     sqlx::query("INSERT INTO lexicon.entry_editor_projection(entry_id,forms,meanings,rebuilt_revision) VALUES($1,$2,'{\"pos\":[],\"sense_groups\":[]}',1)").bind(entry).bind(forms).execute(&pool).await.unwrap();
     assert!(
         sqlx::raw_sql(down)
@@ -593,7 +592,7 @@ async fn projected_generation_replays_after_voice_disable_without_new_synthesis(
                 request.profile = Some(
                     serde_json::from_value(json!({
                         "voices":[original.setting],
-                        "dubbing":{"mode":"local","area":"word","pool_version":"provider_id_v1"}
+                        "dubbing":{"area":"word","uk":{"mode":"local"},"us":{"mode":"local"}}
                     }))
                     .unwrap(),
                 );

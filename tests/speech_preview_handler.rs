@@ -50,6 +50,68 @@ async fn single_group_routes_protect_legacy_writes_and_project_unselected_candid
         .unwrap()
         .clone();
     assert_eq!(group["revision"], 1);
+    let read_v3 = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/speech/groups")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("X-TSZ-Dubbing-Groups", "v3")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read_v3.status(), StatusCode::OK);
+    let legacy_v3: Value =
+        serde_json::from_slice(&read_v3.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let legacy_group = legacy_v3["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["id"] == json!(id))
+        .unwrap();
+    assert_eq!(
+        legacy_group["recommendations"],
+        json!({"format":"legacy","uk":group["uk"],"us":group["us"]})
+    );
+    let rejected = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/api/v1/admin/speech/groups/{id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-TSZ-Dubbing-Groups", "v3")
+                .body(Body::from(
+                    json!({"group":group,"base_revision":1}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    let paired = tsz_rust::router(state.clone()).oneshot(Request::builder().method(Method::PUT)
+        .uri(format!("/api/v1/admin/speech/groups/{id}")).header(header::AUTHORIZATION,format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE,"application/json").header("X-TSZ-Dubbing-Groups","v3")
+        .body(Body::from(json!({"base_revision":1,"group":{"id":id,"name":"old paired write","areas":["word"],"is_global":false,"pairs":[]}}).to_string())).unwrap()).await.unwrap();
+    assert_eq!(
+        paired.status(),
+        StatusCode::CONFLICT,
+        "old paired body must be rejected before the new decoder"
+    );
+    let paired: Value =
+        serde_json::from_slice(&paired.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(paired["code"], "unsupported_schema_version");
+
+    assert_eq!(
+        tsz_rust::speech::library::VoiceLibraryRepository::new(pool.clone())
+            .groups(actor)
+            .await
+            .unwrap()
+            .revision,
+        1
+    );
+
     let old = call(
         &state,
         Method::GET,
@@ -135,7 +197,7 @@ async fn dubbing_resolve_uses_real_routes_without_generating_and_respects_permis
     sqlx::query("UPDATE speech.dubbing_groups SET groups=jsonb_set(groups,'{0,uk}',$1) WHERE singleton")
         .bind(json!([{"id":Uuid::now_v7(),"name":"global","voice_alias":"en-gb-sonianeural","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}]))
         .execute(&pool).await.unwrap();
-    let input = json!({"profile":{"voices":[],"dubbing":{"mode":"inherit","area":"word"}},"accent":"gb","source":{"kind":"text","content":{"version":2,"text":"123","annotations":[{"type":"say_as","start":0,"end":3,"interpret_as":"digits"}]}}});
+    let input = json!({"profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}},"accent":"gb","source":{"kind":"text","content":{"version":2,"text":"123","annotations":[{"type":"say_as","start":0,"end":3,"interpret_as":"digits"}]}}});
     let resolved = call(
         &state,
         Method::POST,
@@ -153,7 +215,7 @@ async fn dubbing_resolve_uses_real_routes_without_generating_and_respects_permis
             .unwrap(),
         0
     );
-    let phoneme = json!({"profile":{"voices":[],"dubbing":{"mode":"inherit","area":"azure"}},"accent":"gb","source":{"kind":"phoneme","phoneme_locale":"en-GB","alphabet":"ipa","phoneme":"kæt","content":{"version":2,"text":"cat","annotations":[{"type":"sub","start":0,"end":3,"alias":"kitten"}]}}});
+    let phoneme = json!({"profile":{"voices":[],"dubbing":{"area":"azure","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}},"accent":"gb","source":{"kind":"phoneme","phoneme_locale":"en-GB","alphabet":"ipa","phoneme":"kæt","content":{"version":2,"text":"cat","annotations":[{"type":"sub","start":0,"end":3,"alias":"kitten"}]}}});
     let replaced = call(
         &state,
         Method::POST,
@@ -356,7 +418,10 @@ async fn call(
     token: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value, String) {
-    let mut builder = Request::builder().method(method).uri(uri);
+    let mut builder = Request::builder().method(method.clone()).uri(uri);
+    if method != Method::GET && uri.starts_with("/api/v1/admin/speech/groups") {
+        builder = builder.header("X-TSZ-Dubbing-Groups", "v4");
+    }
     if let Some(token) = token {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -875,7 +940,7 @@ async fn priority_order_http_round_trip_and_qualification_keep_native_locale_and
         legacy["group"]["uk"]
     );
     let global = read["groups"][2]["id"].clone();
-    let mut request = json!({"profile":{"voices":[],"dubbing":{"mode":"inherit","area":"word"}},"accent":"gb","source":{"kind":"text","content":{"version":2,"text":"cat","annotations":[]}}});
+    let mut request = json!({"profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}},"accent":"gb","source":{"kind":"text","content":{"version":2,"text":"cat","annotations":[]}}});
     let natural = paired_call(
         &base,
         Method::POST,

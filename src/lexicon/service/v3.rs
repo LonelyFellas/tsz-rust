@@ -2421,6 +2421,9 @@ impl LexiconService {
                 current_revision: record.revision,
             });
         }
+        let mut raw = serde_json::to_value(&input.content).map_err(serialization_error)?;
+        crate::lexicon::voice_versions::preserve_legacy_dubbing(&record.forms, &mut raw)?;
+        input.content = serde_json::from_value(raw).map_err(serialization_error)?;
         let mut compatibility_forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms).map_err(serialization_error)?;
         normalize_form_regularity(&mut compatibility_forms, None);
@@ -2859,6 +2862,9 @@ impl LexiconService {
                 current_revision: record.revision,
             });
         }
+        let mut raw = serde_json::to_value(&content).map_err(serialization_error)?;
+        crate::lexicon::voice_versions::preserve_legacy_dubbing(&record.meanings, &mut raw)?;
+        content = serde_json::from_value(raw).map_err(serialization_error)?;
         let mut compatibility_meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings).map_err(serialization_error)?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut compatibility_meanings);

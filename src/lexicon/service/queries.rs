@@ -277,8 +277,10 @@ impl LexiconService {
                     ));
                 }
                 {
-                    let word: AdminWordV3 =
-                        serde_json::from_value(record.snapshot).map_err(serialization_error)?;
+                    let word: AdminWordV3 = serde_json::from_value(
+                        crate::lexicon::voice_versions::stored_dubbing(record.snapshot),
+                    )
+                    .map_err(serialization_error)?;
                     let (entry_id, kind, presentation, forms, meanings) = (
                         word.id,
                         word.kind,
@@ -457,8 +459,10 @@ impl LexiconService {
                             || record.presentation_strategy.is_none()
                         {
                             Some(
-                                serde_json::from_value::<DraftFormsStepContentV3>(record.forms)
-                                    .map_err(serialization_error)?,
+                                serde_json::from_value::<DraftFormsStepContentV3>(
+                                    crate::lexicon::voice_versions::stored_dubbing(record.forms),
+                                )
+                                .map_err(serialization_error)?,
                             )
                         } else {
                             None
@@ -587,7 +591,10 @@ fn publication_from_record(
             record.content_schema_version,
         ));
     }
-    let word: AdminWordV3 = serde_json::from_value(record.snapshot).map_err(serialization_error)?;
+    let word: AdminWordV3 = serde_json::from_value(crate::lexicon::voice_versions::stored_dubbing(
+        record.snapshot,
+    ))
+    .map_err(serialization_error)?;
     Ok(AdminWordPublicationV3 {
         rollback_of_publication_id: record.rollback_of_publication_id,
         schema_version: 3,
