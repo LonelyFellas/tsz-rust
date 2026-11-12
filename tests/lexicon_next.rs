@@ -91,6 +91,161 @@ fn draft() -> Value {
 const EDIT: &[&str] = &["words.access", "words.create", "words.edit"];
 
 #[sqlx::test]
+async fn creation_matches_current_forms_empty_drafts_and_archived_entries(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let reader = admin(&pool, &["words.access"]).await;
+    let state = AppState::for_test(pool.clone());
+    let query = json!({"target_language":"en","surface":"Center","page":1,"page_size":2});
+    assert_eq!(
+        call(&state, None, "POST", "/entry-matches", query.clone())
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(
+            &state,
+            Some(reader),
+            "POST",
+            "/entry-matches",
+            query.clone()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let mut entries = Vec::new();
+    for headword in [
+        "ＣＥＮＴＥＲ",
+        "former",
+        "center",
+        "centerpiece",
+        "Center",
+        "beautiful",
+    ] {
+        let (status, entry) = call(
+            &state,
+            Some(actor),
+            "POST",
+            "/entries",
+            json!({"target_language":"en","kind":"word","headword":headword}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{entry}");
+        entries.push(entry);
+    }
+    for (index, spellings) in [
+        (1, vec!["center", "CENTER"]),
+        (2, vec!["elsewhere"]),
+        (5, vec!["more beautiful"]),
+    ] {
+        let mut content = draft();
+        content["headword"] = entries[index]["draft"]["headword"].clone();
+        content["forms"]=json!(spellings.into_iter().enumerate().map(|(index,text)|json!({"id":Uuid::now_v7(),"locale":if index==0 {"en-US"} else {"en-GB"},"text":text})).collect::<Vec<_>>());
+        let (status, saved) = call(
+            &state,
+            Some(actor),
+            "PUT",
+            &format!("/entries/{}", entries[index]["id"].as_str().unwrap()),
+            json!({"expected_revision":1,"draft":content}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+    }
+    sqlx::query("UPDATE lexicon_next.entries SET status='archived',lifecycle_revision=lifecycle_revision+1 WHERE id=$1")
+        .bind(entries[4]["id"].as_str().unwrap().parse::<Uuid>().unwrap()).execute(&pool).await.unwrap();
+    let (status, first) = call(&state, Some(actor), "POST", "/entry-matches", query.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["surface"], "Center");
+    assert_eq!(first["pagination"]["total"], 3);
+    assert_eq!(first["pagination"]["total_pages"], 2);
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    assert!(
+        first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["status"] == "draft")
+    );
+    let mut second_query = query.clone();
+    second_query["page"] = json!(2);
+    let (status, second) = call(&state, Some(actor), "POST", "/entry-matches", second_query).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["pagination"]["page"], 2);
+    assert_eq!(second["items"][0]["status"], "archived");
+    let mut beyond_query = query.clone();
+    beyond_query["page"] = json!(99);
+    let (status, beyond) = call(&state, Some(actor), "POST", "/entry-matches", beyond_query).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(beyond["pagination"]["page"], 2);
+    assert_eq!(beyond["items"], second["items"]);
+    let ids = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["items"].as_array().unwrap())
+        .map(|row| row["id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from([
+            entries[0]["id"].as_str().unwrap(),
+            entries[1]["id"].as_str().unwrap(),
+            entries[4]["id"].as_str().unwrap()
+        ])
+    );
+    let current = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == entries[1]["id"])
+        .unwrap();
+    assert_eq!(current["forms"].as_array().unwrap().len(), 2);
+    assert_eq!(current["part_of_speech"], json!(["noun"]));
+    assert_eq!(current["gloss"], "某物的中心位置");
+    let (status, phrase) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entry-matches",
+        json!({"target_language":"en","surface":"MORE BEAUTIFUL"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{phrase}");
+    assert_eq!(phrase["items"][0]["id"], entries[5]["id"]);
+    assert_eq!(phrase["items"][0]["kind"], "word");
+    let (status, empty) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entry-matches",
+        json!({"target_language":"en","surface":"cent"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["pagination"]["total"], 0);
+    assert_eq!(empty["items"], json!([]));
+    for invalid in [
+        json!({"target_language":"en","surface":"center","page":0}),
+        json!({"target_language":"en","surface":"center","page_size":101}),
+        json!({"target_language":"fr","surface":"center"}),
+        json!({"target_language":"en","surface":"中文"}),
+    ] {
+        assert_eq!(
+            call(&state, Some(actor), "POST", "/entry-matches", invalid)
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.entries")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 6, "matching never writes an entry");
+}
+
+#[sqlx::test]
 async fn detection_returns_all_source_records_without_creating_or_prefilling(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let reader = admin(&pool, &["words.access"]).await;

@@ -72,6 +72,11 @@ pub enum RoutePolicy {
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "POST",
+        "/lexicon-next/entry-matches",
+        RoutePolicy::All(&["words.access", "words.create"]),
+    ),
+    (
+        "POST",
         "/lexicon-next/detections",
         RoutePolicy::All(&["words.access", "words.create"]),
     ),

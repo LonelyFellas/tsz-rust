@@ -292,6 +292,7 @@ use utoipa::{
         crate::lexicon_next::list,
         crate::lexicon_next::create,
         crate::lexicon_next::detect,
+        crate::lexicon_next::match_entries,
         crate::lexicon_next::read,
         crate::lexicon_next::save,
         crate::lexicon_next::view,
