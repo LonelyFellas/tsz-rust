@@ -1074,9 +1074,9 @@ pub enum VoicePoolVersionV3 {
 pub struct LocalVoiceRecommendationV3 {
     pub group_id: Uuid,
     pub pair_id: Uuid,
-    #[schema(max_items = 2)]
+    #[schema(max_items = 2000)]
     pub voice_ids: Vec<String>,
-    #[schema(max_items = 2)]
+    #[schema(max_items = 2000)]
     pub contribution_ids: Vec<Uuid>,
 }
 

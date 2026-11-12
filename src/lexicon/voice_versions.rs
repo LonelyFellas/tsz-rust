@@ -47,25 +47,69 @@ pub(crate) const UPGRADE_MESSAGE: &str =
     "此内容包含新版文本配音版本，请保留本地输入并刷新页面后再保存";
 
 pub(crate) fn supported(headers: &HeaderMap) -> bool {
-    headers
-        .get(HEADER)
-        .is_some_and(|value| value == "v1" || value == "v2" || value == "v3" || value == "v4")
+    headers.get(HEADER).is_some_and(|value| {
+        value == "v1" || value == "v2" || value == "v3" || value == "v4" || value == "v5"
+    })
 }
 
 pub(crate) fn generated_supported(headers: &HeaderMap) -> bool {
     headers
         .get(HEADER)
-        .is_some_and(|value| value == "v2" || value == "v3" || value == "v4")
+        .is_some_and(|value| value == "v2" || value == "v3" || value == "v4" || value == "v5")
 }
 
 pub(crate) fn dubbing_supported(headers: &HeaderMap) -> bool {
     headers
         .get(HEADER)
-        .is_some_and(|value| value == "v3" || value == "v4")
+        .is_some_and(|value| value == "v3" || value == "v4" || value == "v5")
 }
 
 pub(crate) fn pool_supported(headers: &HeaderMap) -> bool {
-    headers.get(HEADER).is_some_and(|value| value == "v4")
+    headers
+        .get(HEADER)
+        .is_some_and(|value| value == "v4" || value == "v5")
+}
+
+pub(crate) fn multi_recommendations_supported(headers: &HeaderMap) -> bool {
+    headers.get(HEADER).is_some_and(|value| value == "v5")
+}
+
+pub(crate) fn contains_multi_recommendations(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            fields
+                .get("recommendation")
+                .is_some_and(contains_multi_recommendations_source)
+                || fields.values().any(contains_multi_recommendations)
+        }
+        Value::Array(items) => items.iter().any(contains_multi_recommendations),
+        _ => false,
+    }
+}
+
+pub(crate) fn project_multi_recommendations(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            if fields
+                .get("recommendation")
+                .is_some_and(contains_multi_recommendations_source)
+            {
+                fields.remove("recommendation");
+            }
+            fields.values_mut().for_each(project_multi_recommendations);
+        }
+        Value::Array(items) => items.iter_mut().for_each(project_multi_recommendations),
+        _ => {}
+    }
+}
+
+fn contains_multi_recommendations_source(source: &Value) -> bool {
+    ["voice_ids", "contribution_ids"].iter().any(|key| {
+        source
+            .get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.len() > 2)
+    })
 }
 
 pub(crate) fn contains_pool(value: &Value) -> bool {
@@ -98,6 +142,7 @@ pub(crate) fn project_pool(value: &mut Value) {
 pub(crate) fn unsupported_dubbing(headers: &HeaderMap, value: &Value) -> bool {
     (!dubbing_supported(headers) && contains_dubbing(value))
         || (!pool_supported(headers) && contains_pool(value))
+        || (!multi_recommendations_supported(headers) && contains_multi_recommendations(value))
 }
 
 pub(crate) fn contains_dubbing(value: &Value) -> bool {
@@ -333,6 +378,7 @@ mod tests {
             (Some("v2"), true, true, false),
             (Some("v3"), true, true, false),
             (Some("v4"), true, true, false),
+            (Some("v5"), true, true, false),
         ] {
             let mut headers = HeaderMap::new();
             if let Some(version) = version {
@@ -369,6 +415,30 @@ mod tests {
         old.insert(HEADER, "v4".parse().unwrap());
         assert!(pool_supported(&old));
         assert!(!unsupported_dubbing(&old, &stored));
+    }
+
+    #[test]
+    fn multi_recommendations_require_v5_and_old_views_preserve_pool_voices() {
+        let stored = json!({"voice_profile":{"voices":[{"voice_id":"a","enabled":true}],"dubbing":{"mode":"local","area":"word","pool_version":"provider_id_v1","recommendation":{"group_id":"g","pair_id":"p","voice_ids":["a","b","c","d"],"contribution_ids":["a","b","c","d"]}}}});
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER, "v4".parse().unwrap());
+        assert!(unsupported_dubbing(&headers, &stored));
+        let mut response = stored.clone();
+        project_multi_recommendations(&mut response);
+        assert!(
+            response["voice_profile"]["dubbing"]
+                .get("recommendation")
+                .is_none()
+        );
+        assert_eq!(
+            response["voice_profile"]["voices"],
+            stored["voice_profile"]["voices"]
+        );
+        assert!(contains_multi_recommendations(&stored));
+        assert!(!contains_multi_recommendations(&response));
+        headers.insert(HEADER, "v5".parse().unwrap());
+        assert!(pool_supported(&headers));
+        assert!(!unsupported_dubbing(&headers, &stored));
     }
 
     #[test]

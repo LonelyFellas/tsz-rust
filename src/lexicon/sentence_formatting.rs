@@ -70,6 +70,9 @@ pub(crate) fn response<T: Serialize>(
     if !supported(headers) {
         project(&mut body);
     }
+    if !crate::lexicon::voice_versions::multi_recommendations_supported(headers) {
+        crate::lexicon::voice_versions::project_multi_recommendations(&mut body);
+    }
     if !crate::lexicon::voice_versions::pool_supported(headers) {
         crate::lexicon::voice_versions::project_pool(&mut body);
     }

@@ -205,6 +205,7 @@ pub struct LexiconService {
     voice_models_supported: bool,
     dubbing_supported: bool,
     voice_pool_supported: bool,
+    multi_recommendations_supported: bool,
     form_contents_supported: bool,
     multiple_spellings_supported: bool,
 }
@@ -239,7 +240,9 @@ impl LexiconService {
     }
 
     fn unsupported_voice_content(&self, value: &serde_json::Value) -> bool {
-        (!self.voice_pool_supported && crate::lexicon::voice_versions::contains_pool(value))
+        (!self.multi_recommendations_supported
+            && crate::lexicon::voice_versions::contains_multi_recommendations(value))
+            || (!self.voice_pool_supported && crate::lexicon::voice_versions::contains_pool(value))
             || (!self.dubbing_supported && crate::lexicon::voice_versions::contains_dubbing(value))
             || (!self.voice_models_supported
                 && crate::lexicon::voice_versions::contains_models(value))
@@ -249,6 +252,11 @@ impl LexiconService {
                 && crate::lexicon::voice_versions::contains_versions(value))
             || (!self.generated_audio_supported
                 && crate::lexicon::voice_versions::contains_audio(value))
+    }
+
+    pub(crate) fn with_multi_recommendations_support(mut self, supported: bool) -> Self {
+        self.multi_recommendations_supported = supported;
+        self
     }
 
     pub(crate) fn with_voice_pool_support(mut self, supported: bool) -> Self {
@@ -308,6 +316,7 @@ impl LexiconService {
             voice_models_supported: true,
             dubbing_supported: true,
             voice_pool_supported: true,
+            multi_recommendations_supported: true,
             form_contents_supported: true,
             multiple_spellings_supported: true,
         }

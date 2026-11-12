@@ -999,13 +999,13 @@ fn validate_voice_profile(
                 || source.group_id.is_nil()
                 || source.pair_id.is_nil()
                 || source.voice_ids.is_empty()
-                || source.voice_ids.len() > 2
+                || source.voice_ids.len() > MAX_VOICE_PROFILE_VOICES
                 || source
                     .voice_ids
                     .iter()
                     .any(|id| id.trim().is_empty() || id.len() > 128)
                 || source.voice_ids.iter().collect::<HashSet<_>>().len() != source.voice_ids.len()
-                || source.contribution_ids.len() > 2
+                || source.contribution_ids.len() > MAX_VOICE_PROFILE_VOICES
                 || source.contribution_ids.iter().collect::<HashSet<_>>().len()
                     != source.contribution_ids.len()
                 || source.contribution_ids.iter().any(|id| {
@@ -3733,6 +3733,31 @@ mod sense_group_voice_tests {
             decode_v3_meanings_request::<crate::lexicon::dto::SaveMeaningsStepInputV3>(legacy)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn multi_recommendation_sources_round_trip_with_multiple_pairs() {
+        let versions: Vec<_> = (0..4).map(|_| Uuid::now_v7()).collect();
+        let voices: Vec<_> = versions.iter().enumerate().map(|(index, id)| {
+            json!({"voice_id":format!("voice-{index}"),"version_id":id,"version_name":"推荐副本","locale":if index % 2 == 0 {"en-GB"} else {"en-US"},"enabled":true,"rate_percent":-10})
+        }).collect();
+        let raw = json!({"voices":voices,"dubbing":{"mode":"local","area":"word","pool_version":"provider_id_v1","recommendation_order":versions,"recommendation":{"group_id":Uuid::now_v7(),"pair_id":Uuid::now_v7(),"voice_ids":["voice-0","voice-1","voice-2","voice-3"],"contribution_ids":versions}}});
+        let parsed: VoiceProfileV3 = serde_json::from_value(raw.clone()).unwrap();
+        let mut issues = vec![];
+        validate_voice_profile(Some(&parsed), Uuid::now_v7(), &mut issues);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(serde_json::to_value(parsed).unwrap(), raw);
+        for field in ["voice_ids", "contribution_ids"] {
+            let mut invalid = raw.clone();
+            let values = invalid["dubbing"]["recommendation"][field]
+                .as_array_mut()
+                .unwrap();
+            values.push(values[0].clone());
+            let profile = serde_json::from_value(invalid).unwrap();
+            let mut issues = vec![];
+            validate_voice_profile(Some(&profile), Uuid::now_v7(), &mut issues);
+            assert!(!issues.is_empty(), "duplicate {field} must be rejected");
+        }
     }
 
     #[test]
