@@ -90,6 +90,119 @@ fn draft() -> Value {
 }
 const EDIT: &[&str] = &["words.access", "words.create", "words.edit"];
 
+#[sqlx::test]
+async fn detection_returns_all_source_records_without_creating_or_prefilling(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let reader = admin(&pool, &["words.access"]).await;
+    let state = AppState::for_test(pool.clone());
+    let input = json!({"target_language":"en","surface":"  Colour  "});
+    assert_eq!(
+        call(&state, None, "POST", "/detections", input.clone())
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&state, Some(reader), "POST", "/detections", input.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let unavailable = call(&state, Some(actor), "POST", "/detections", input.clone()).await;
+    assert_eq!(
+        unavailable.0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        unavailable.1
+    );
+    let dataset: i64 = sqlx::query_scalar("INSERT INTO dictionary.datasets(version,source_name,source_version,rules_version,terms_sha256,regions_sha256,status) VALUES('create-matches-fixture','Test dictionary','terms-v1','v1',repeat('a',64),repeat('b',64),'active') RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO dictionary.content_imports(dataset_id,input_sha256,source_locator,record_count,source_version) VALUES($1,repeat('c',64),'fixture-only',3,'content-v2')")
+        .bind(dataset).execute(&pool).await.unwrap();
+    for (key, term, pos, gloss) in [
+        ("colour-noun-a", "colour", "noun", "visible hue"),
+        ("colour-noun-b", "colour", "noun", "a flag"),
+        ("color-verb", "color", "verb", "give something a hue"),
+    ] {
+        sqlx::query("INSERT INTO dictionary.entry_contents(dataset_id,source_key,normalized_term,pos,senses,forms,sounds,source_locator) VALUES($1,$2,$3,$4,$5,$6,$7,'fixture-only')")
+            .bind(dataset).bind(key).bind(term).bind(pos)
+            .bind(json!([{"glosses":[gloss]}]))
+            .bind(json!([{"form":"colours","tags":["plural"]}]))
+            .bind(json!([{"ipa":"/ˈkʌlə/","tags":["UK"]},{"audio":"not returned"}]))
+            .execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO dictionary.region_surfaces(dataset_id,normalized_term,term,region_family,families,source_regions,evidence_types,pos,targets,is_headword) VALUES($1,'colour','colour','british_core',ARRAY['british_core'],ARRAY['UK'],ARRAY['spelling'],ARRAY['noun'],ARRAY['color'],true)")
+        .bind(dataset).execute(&pool).await.unwrap();
+    let (status, detected) = call(&state, Some(actor), "POST", "/detections", input).await;
+    assert_eq!(status, StatusCode::OK, "{detected}");
+    assert_eq!(detected["surface"], "Colour");
+    assert_eq!(detected["kind"], "word");
+    let matches = detected["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 3);
+    assert_eq!(
+        matches.iter().filter(|row| row["term"] == "colour").count(),
+        2
+    );
+    assert_eq!(matches[0]["source_version"], "content-v2");
+    assert_eq!(matches[0]["forms"][0]["text"], "colours");
+    assert_eq!(matches[0]["phonetics"].as_array().unwrap().len(), 1);
+    assert_ne!(matches[1]["id"], matches[2]["id"]);
+    assert!(matches.iter().all(|row| row.get("is_headword").is_none()));
+    let (status, reverse) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/detections",
+        json!({"target_language":"en","surface":"color"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reverse["matches"], detected["matches"]);
+    let (status, empty) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/detections",
+        json!({"target_language":"en","surface":"unlisted phrase"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["kind"], "phrase");
+    assert_eq!(empty["matches"], json!([]));
+    for surface in ["", "12345", "中文", "bad\ninput"] {
+        assert_eq!(
+            call(
+                &state,
+                Some(actor),
+                "POST",
+                "/detections",
+                json!({"target_language":"en","surface":surface})
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.entries")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "detection must be read-only");
+    let (status, created) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entries",
+        json!({"target_language":"en","kind":"word","headword":"Colour"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        created["draft"],
+        json!({"schema_version":1,"headword":"Colour","forms":[],"senses":[]})
+    );
+}
+
 async fn protected_old_entry(pool: &PgPool, owner: Uuid) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.entries(id,language,kind,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,'en','word',$2,$3,$3)")
