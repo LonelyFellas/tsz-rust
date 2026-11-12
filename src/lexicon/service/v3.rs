@@ -2463,6 +2463,11 @@ impl LexiconService {
             &mut input.content,
         )
         .await?;
+        // Complete-source exemptions must use the registered recording accent.
+        let issues = crate::lexicon::v3_contract::validate_forms(&input.content, input.intent);
+        if !issues.is_empty() {
+            return Err(v3_validation_failed(issues));
+        }
         let current_forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
         crate::lexicon::shared_forms::preserve_pronunciation_slots(

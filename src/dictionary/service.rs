@@ -172,13 +172,19 @@ pub(crate) fn own_audio(native: &published::PublishedContentV3) -> Vec<Dictionar
                     uploaded_audio(&mut audio, variant_id, source_dialect, &speech.audio_assets);
                 }
                 for pronunciation in pronunciations {
-                    let recordings: Vec<_> = pronunciation
+                    let pronunciation_start = audio.len();
+                    let selected_recordings: Vec<_> = pronunciation
                         .audio_assets
                         .iter()
                         .filter(|asset| asset.is_default)
                         .cloned()
                         .collect();
-                    uploaded_audio(&mut audio, pronunciation.id, source_dialect, &recordings);
+                    uploaded_audio(
+                        &mut audio,
+                        pronunciation.id,
+                        source_dialect,
+                        &selected_recordings,
+                    );
                     if pronunciation.synthesis.is_none() {
                         generated_audio(
                             &mut audio,
@@ -247,6 +253,15 @@ pub(crate) fn own_audio(native: &published::PublishedContentV3) -> Vec<Dictionar
                             pronunciation.voice_profile.as_ref(),
                         );
                     }
+                    // Learners sample the whole pool after the first occurrence.
+                    audio
+                        .extract_if(pronunciation_start.., |item| {
+                            selected_recordings.iter().any(|asset| {
+                                asset.locale.accent_group() == item.accent_group
+                                    && asset.id != item.asset_id
+                            })
+                        })
+                        .for_each(drop);
                 }
             }
         }
@@ -517,6 +532,9 @@ mod recording_default_tests {
         let target = Uuid::now_v7();
         let spelling_id = Uuid::now_v7();
         let recording_id = Uuid::now_v7();
+        let generated_uk = Uuid::now_v7();
+        let generated_us = Uuid::now_v7();
+        let setting = |locale, id| json!({"voice_id":"fixture","enabled":true,"locale":locale,"rate_percent":0,"audio_asset_id":id});
         let asset = |id| {
             json!({
                 "id":id,"is_default":true,"locale":"en-GB","gender":"female",
@@ -527,9 +545,9 @@ mod recording_default_tests {
         let mut forms = json!({"pos":[{"pos_id":Uuid::now_v7(),"pos":"noun","form_groups":[],"forms":[{
             "id":Uuid::now_v7(),"form_type":"base","regional_variants":{"mode":"common","common":{
                 "id":Uuid::now_v7(),"dialect":"common","spelling":"word","origin":"manual",
-                "spelling_speech":{"content":{"version":2,"text":"word","annotations":[]},"voice_profile":{"voices":[]},"audio_assets":[asset(spelling_id)]},
+                "spelling_speech":{"content":{"version":2,"text":"word","annotations":[]},"voice_profile":{"voices":[setting("en-GB",generated_uk),setting("en-US",generated_us)]},"audio_assets":[asset(spelling_id)]},
                 "pronunciations":[{"id":target,"dict_phonetic":"test","actual_pron":"test","style":"normal",
-                    "synthesis":{"alphabet":"ipa","use_spelling":true,"ipa":"","ups":""},"audio_assets":[asset(recording_id)]}]
+                    "synthesis":{"alphabet":"ipa","use_spelling":true,"ipa":"","ups":""},"voice_profile":{"voices":[setting("en-GB",Uuid::now_v7())]},"audio_assets":[asset(recording_id)]}]
             }}
         }]}]});
         let selected = |forms: &serde_json::Value| {
@@ -545,6 +563,27 @@ mod recording_default_tests {
             .find(|item| item.target_id == target)
             .map(|item| item.asset_id)
         };
+        let native = published::PublishedContentV3 {
+            forms: serde_json::from_value(forms.clone()).unwrap(),
+            meanings: Default::default(),
+        };
+        let pool = own_audio(&native);
+        assert_eq!(
+            pool.iter()
+                .filter(|item| item.target_id == target
+                    && item.accent_group == crate::speech::locale::AccentGroup::Uk)
+                .map(|item| item.asset_id)
+                .collect::<Vec<_>>(),
+            vec![recording_id]
+        );
+        assert_eq!(
+            pool.iter()
+                .filter(|item| item.target_id == target
+                    && item.accent_group == crate::speech::locale::AccentGroup::Us)
+                .map(|item| item.asset_id)
+                .collect::<Vec<_>>(),
+            vec![generated_us]
+        );
         assert_eq!(selected(&forms), Some(recording_id));
         forms["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"]
             [0]["is_default"] = json!(false);

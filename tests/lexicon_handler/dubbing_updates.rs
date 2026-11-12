@@ -480,3 +480,50 @@ async fn provider_pool_persists_multiple_recommendations_and_rejects_old_writer_
         &expected
     );
 }
+
+#[sqlx::test]
+async fn complete_manual_source_uses_canonical_recording_accent_before_writes(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = fixture_state(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let created = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let entry = created["word"]["id"].as_str().unwrap();
+    let mut forms = created["word"]["forms"].clone();
+    let row = &mut forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0];
+    let asset = Uuid::parse_str(row["audio_assets"][0]["id"].as_str().unwrap()).unwrap();
+    sqlx::query("UPDATE lexicon.audio_assets SET locale='en-US' WHERE id=$1")
+        .bind(asset)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The submitted metadata claims GB, but this actor's registered recording is US.
+    row["audio_assets"][0]["is_default"] = json!(true);
+    row["synthesis"] =
+        json!({"alphabet":"ipa","use_spelling":false,"ipa":"","ups":"","uk":{"ipa":"","ups":""}});
+    let (status, _, response) = call_problem(
+        &state, Method::PUT, &format!("{ROOT}/entries/{entry}/steps/forms"), &bearer, None,
+        json!({"schema_version":3,"base_revision":created["word"]["revision"],"intent":"complete","content":forms}),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert!(
+        response["field_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["field"] == "synthesis.uk.ipa"
+                && issue["code"] == "pronunciation_required")
+    );
+    let (status, read) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["word"]["revision"], created["word"]["revision"]);
+}
