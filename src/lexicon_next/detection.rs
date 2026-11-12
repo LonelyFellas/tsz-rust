@@ -138,15 +138,15 @@ pub async fn detect(pool: &PgPool, input: NextDetectionInput) -> Result<NextDete
             "内置词典暂时不可用，请稍后重试。",
         ));
     }
-    // Targets retain source spelling. PostgreSQL 18 Unicode folding finds a superset
-    // of reverse links; the frozen Rust normalizer below decides actual equality.
+    // Targets retain source spelling. ICU Unicode lowercase works on PostgreSQL
+    // 16 and 18; the frozen Rust normalizer below decides actual equality.
     let regions = sqlx::query_as::<_, Region>(r#"
         SELECT normalized_term,targets FROM dictionary.active_region_surfaces
         WHERE normalized_term=$1 OR EXISTS (
             SELECT 1 FROM unnest(targets) target WHERE
-            casefold(translate(btrim(regexp_replace(normalize(target,NFKC) COLLATE pg_unicode_fast,
-                '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE pg_unicode_fast)
-                = casefold($1 COLLATE pg_unicode_fast)
+            lower(translate(btrim(regexp_replace(normalize(target,NFKC) COLLATE "und-x-icu",
+                '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")
+                = lower($1 COLLATE "und-x-icu")
         )
     "#).bind(&surface.key).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     let mut candidates = BTreeSet::from([surface.key.clone()]);

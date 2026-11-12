@@ -359,4 +359,4 @@ Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写�
 
 ## 新词库创建检测参考（本地完成，2026-11-11）
 
-主记录见前端 `docs/features/smart-lexicon-reconstruction/evidence.md` 第 10 节。新增 `POST /api/v1/admin/lexicon-next/detections`，请求 `target_language`、`surface`，响应 `surface`、`kind` 与平级 `matches`；要求 `words.access` 和 `words.create`。每条来源记录独立返回，不选择主词、不预填或写入草稿。仅查询 active 词典内容及直接关联拼写；词典不可用返回 503，无匹配返回空数组。创建接口和既有响应不变，无迁移；OpenAPI 已原生导出并由前端同步，配套发布应先 API 后 Admin。本批完成隔离路由、数据库与浏览器联调，尚未提交或部署。
+主记录见前端 `docs/features/smart-lexicon-reconstruction/evidence.md` 第 10 节。新增 `POST /api/v1/admin/lexicon-next/detections`，请求 `target_language`、`surface`，响应 `surface`、`kind` 与平级 `matches`；要求 `words.access` 和 `words.create`。每条来源记录独立返回，不选择主词、不预填或写入草稿。仅查询 active 词典内容及直接关联拼写；关联目标使用 PostgreSQL 16/18 均具备的 ICU root 规则预筛，再由统一 Rust 归一化判定。词典不可用返回 503，无匹配返回空数组。创建接口和既有响应不变，无迁移；OpenAPI 已原生导出并由前端同步，配套发布应先 API 后 Admin。本批完成隔离路由、数据库与浏览器联调；配套交付与部署状态续记于 PR #397 及其验收回执。

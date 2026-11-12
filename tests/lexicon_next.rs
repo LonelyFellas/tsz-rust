@@ -131,7 +131,7 @@ async fn detection_returns_all_source_records_without_creating_or_prefilling(poo
             .bind(json!([{"ipa":"/ˈkʌlə/","tags":["UK"]},{"audio":"not returned"}]))
             .execute(&pool).await.unwrap();
     }
-    sqlx::query("INSERT INTO dictionary.region_surfaces(dataset_id,normalized_term,term,region_family,families,source_regions,evidence_types,pos,targets,is_headword) VALUES($1,'colour','colour','british_core',ARRAY['british_core'],ARRAY['UK'],ARRAY['spelling'],ARRAY['noun'],ARRAY[' ＣＯＬＯＲ '],true)")
+    sqlx::query("INSERT INTO dictionary.region_surfaces(dataset_id,normalized_term,term,region_family,families,source_regions,evidence_types,pos,targets,is_headword) VALUES($1,'colour','colour','british_core',ARRAY['british_core'],ARRAY['UK'],ARRAY['spelling'],ARRAY['noun'],ARRAY[' ＣＯＬＯＲ ','İ','O’CLOCK　TEST'],true)")
         .bind(dataset).execute(&pool).await.unwrap();
     let (status, detected) = call(&state, Some(actor), "POST", "/detections", input).await;
     assert_eq!(status, StatusCode::OK, "{detected}");
@@ -158,6 +158,27 @@ async fn detection_returns_all_source_records_without_creating_or_prefilling(poo
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reverse["matches"], detected["matches"]);
+    // Unicode lowercase and punctuation/space probes also run on CI's PostgreSQL 16.
+    for (surface, kind) in [("i\u{307}", "word"), ("o'clock test", "phrase")] {
+        let (status, linked) = call(
+            &state,
+            Some(actor),
+            "POST",
+            "/detections",
+            json!({"target_language":"en","surface":surface}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{linked}");
+        assert_eq!(linked["kind"], kind);
+        assert_eq!(linked["matches"].as_array().unwrap().len(), 2);
+        assert!(
+            linked["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["term"] == "colour")
+        );
+    }
     let (status, empty) = call(
         &state,
         Some(actor),
