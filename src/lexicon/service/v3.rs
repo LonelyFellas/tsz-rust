@@ -2463,6 +2463,11 @@ impl LexiconService {
             &mut input.content,
         )
         .await?;
+        // Complete-source exemptions must use the registered recording accent.
+        let issues = crate::lexicon::v3_contract::validate_forms(&input.content, input.intent);
+        if !issues.is_empty() {
+            return Err(v3_validation_failed(issues));
+        }
         let current_forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
         crate::lexicon::shared_forms::preserve_pronunciation_slots(
@@ -4643,7 +4648,7 @@ async fn load_audio_asset_metadata(
             id,
             AudioAsset {
                 id,
-                is_default: false,
+                is_default: None,
                 locale: AudioAssetLocale::parse(&locale).ok_or_else(invariant_record)?,
                 gender: AudioAssetGender::parse(&gender).ok_or_else(invariant_record)?,
                 content_type: row.get("content_type"),

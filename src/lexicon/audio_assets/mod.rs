@@ -21,7 +21,7 @@ pub(crate) fn hydrate_recordings(
             is_default: asset.is_default,
             ..metadata.clone()
         };
-        if asset.is_default && !defaults.insert(asset.locale.accent_group()) {
+        if asset.is_default == Some(true) && !defaults.insert(asset.locale.accent_group()) {
             return Err(AppError::bad_request(
                 ErrorCode::InvalidSpeechPreview,
                 "每种口音只能选择一条默认播放录音",
@@ -57,7 +57,7 @@ mod tests {
                 .is_none()
         );
         let mut selected = original.clone();
-        selected.is_default = true;
+        selected.is_default = Some(true);
         selected.locale = dto::AudioAssetLocale::Us;
         selected.original_name = "forged.mp3".into();
         let mut assets = vec![selected];
@@ -69,7 +69,7 @@ mod tests {
         assert_eq!(
             assets[0],
             dto::AudioAsset {
-                is_default: true,
+                is_default: Some(true),
                 ..original
             }
         );
@@ -79,6 +79,24 @@ mod tests {
             serde_json::from_value::<Vec<dto::AudioAsset>>(saved).unwrap(),
             assets
         );
+    }
+
+    #[test]
+    fn explicit_synthesis_choice_survives_metadata_and_round_trip_without_accepting_null() {
+        let original = asset("en-GB");
+        let mut selected = original.clone();
+        selected.is_default = Some(false);
+        let mut assets = vec![selected];
+        hydrate_recordings(&mut assets, &HashMap::from([(original.id, original)])).unwrap();
+        let saved = serde_json::to_value(&assets).unwrap();
+        assert_eq!(saved[0]["is_default"], false);
+        assert_eq!(
+            serde_json::from_value::<Vec<dto::AudioAsset>>(saved.clone()).unwrap(),
+            assets
+        );
+        let mut invalid = saved[0].clone();
+        invalid["is_default"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<dto::AudioAsset>(invalid).is_err());
     }
 
     #[test]
@@ -93,10 +111,10 @@ mod tests {
         let mut selected = vec![uk.clone(), us];
         selected
             .iter_mut()
-            .for_each(|asset| asset.is_default = true);
+            .for_each(|asset| asset.is_default = Some(true));
         hydrate_recordings(&mut selected, &canonical).unwrap();
         let mut duplicate = another;
-        duplicate.is_default = true;
+        duplicate.is_default = Some(true);
         duplicate.locale = dto::AudioAssetLocale::Us;
         assert!(hydrate_recordings(&mut [selected[0].clone(), duplicate], &canonical).is_err());
     }
