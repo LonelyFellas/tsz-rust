@@ -131,7 +131,7 @@ async fn detection_returns_all_source_records_without_creating_or_prefilling(poo
             .bind(json!([{"ipa":"/ˈkʌlə/","tags":["UK"]},{"audio":"not returned"}]))
             .execute(&pool).await.unwrap();
     }
-    sqlx::query("INSERT INTO dictionary.region_surfaces(dataset_id,normalized_term,term,region_family,families,source_regions,evidence_types,pos,targets,is_headword) VALUES($1,'colour','colour','british_core',ARRAY['british_core'],ARRAY['UK'],ARRAY['spelling'],ARRAY['noun'],ARRAY['color'],true)")
+    sqlx::query("INSERT INTO dictionary.region_surfaces(dataset_id,normalized_term,term,region_family,families,source_regions,evidence_types,pos,targets,is_headword) VALUES($1,'colour','colour','british_core',ARRAY['british_core'],ARRAY['UK'],ARRAY['spelling'],ARRAY['noun'],ARRAY[' ＣＯＬＯＲ '],true)")
         .bind(dataset).execute(&pool).await.unwrap();
     let (status, detected) = call(&state, Some(actor), "POST", "/detections", input).await;
     assert_eq!(status, StatusCode::OK, "{detected}");

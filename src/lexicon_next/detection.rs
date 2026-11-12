@@ -1,11 +1,12 @@
 use super::{language, model::NextEntryKind};
 use crate::{
     error::{AppError, ErrorCode},
-    lexicon::normalization::NormalizedHeadword,
+    lexicon::normalization::{NormalizedHeadword, normalize_headword},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
+use std::collections::BTreeSet;
 use utoipa::ToSchema;
 
 #[derive(Deserialize, ToSchema)]
@@ -62,6 +63,12 @@ struct Record {
     sounds: Value,
     source_name: String,
     source_version: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct Region {
+    normalized_term: String,
+    targets: Vec<String>,
 }
 fn strings(value: &Value) -> Vec<String> {
     value
@@ -131,14 +138,33 @@ pub async fn detect(pool: &PgPool, input: NextDetectionInput) -> Result<NextDete
             "内置词典暂时不可用，请稍后重试。",
         ));
     }
-    // Match the input and every directly linked spelling; never select a headword.
-    // The active views and normalized-term index avoid scanning raw JSON forms.
-    let records = sqlx::query_as::<_, Record>(r#"
-        WITH candidates AS (
-            SELECT $1::text AS term
-            UNION SELECT unnest(targets) FROM dictionary.active_region_surfaces WHERE normalized_term=$1
-            UNION SELECT normalized_term FROM dictionary.active_region_surfaces WHERE targets @> ARRAY[$1]::text[]
+    // Targets retain source spelling. PostgreSQL 18 Unicode folding finds a superset
+    // of reverse links; the frozen Rust normalizer below decides actual equality.
+    let regions = sqlx::query_as::<_, Region>(r#"
+        SELECT normalized_term,targets FROM dictionary.active_region_surfaces
+        WHERE normalized_term=$1 OR EXISTS (
+            SELECT 1 FROM unnest(targets) target WHERE
+            casefold(translate(btrim(regexp_replace(normalize(target,NFKC) COLLATE pg_unicode_fast,
+                '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE pg_unicode_fast)
+                = casefold($1 COLLATE pg_unicode_fast)
         )
+    "#).bind(&surface.key).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    let mut candidates = BTreeSet::from([surface.key.clone()]);
+    for region in regions {
+        let targets = region
+            .targets
+            .iter()
+            .filter_map(|target| normalize_headword(target).ok().map(|value| value.key))
+            .collect::<Vec<_>>();
+        if region.normalized_term == surface.key {
+            candidates.extend(targets);
+        } else if targets.contains(&surface.key) {
+            candidates.insert(region.normalized_term);
+        }
+    }
+    // Match every directly linked spelling without selecting a headword. Only
+    // lightweight regional metadata is folded; raw contents use the term index.
+    let records = sqlx::query_as::<_, Record>(r#"
         SELECT c.dataset_id::text || ':' || c.source_key AS id,
                coalesce(t.term,c.normalized_term) AS term, c.pos,c.senses,c.forms,c.sounds,
                d.source_name,i.source_version
@@ -146,9 +172,9 @@ pub async fn detect(pool: &PgPool, input: NextDetectionInput) -> Result<NextDete
         JOIN dictionary.datasets d ON d.id=c.dataset_id AND d.status='active'
         JOIN dictionary.content_imports i ON i.dataset_id=c.dataset_id
         LEFT JOIN dictionary.terms t ON t.dataset_id=c.dataset_id AND t.normalized_term=c.normalized_term
-        WHERE c.normalized_term IN (SELECT term FROM candidates)
+        WHERE c.normalized_term = ANY($1)
         ORDER BY c.normalized_term,c.pos,c.source_key
-    "#).bind(&surface.key).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    "#).bind(candidates.into_iter().collect::<Vec<_>>()).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(NextDetection {
         kind: if surface.display.contains(' ') {
