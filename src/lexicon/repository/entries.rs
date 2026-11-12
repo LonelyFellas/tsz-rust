@@ -158,6 +158,12 @@ impl LexiconRepository {
     }
 }
 
+fn project_stored_entry(mut record: EntryRecord) -> EntryRecord {
+    crate::lexicon::voice_versions::project_stored_dubbing(&mut record.forms);
+    crate::lexicon::voice_versions::project_stored_dubbing(&mut record.meanings);
+    record
+}
+
 // --- entry lookup ---
 
 impl LexiconRepository {
@@ -208,6 +214,7 @@ impl LexiconRepository {
         .bind(id)
         .fetch_optional(executor)
         .await
+        .map(|record| record.map(project_stored_entry))
         .map_err(LexiconRepositoryError::Database)
     }
 
@@ -262,6 +269,7 @@ impl LexiconRepository {
         .bind(id)
         .fetch_optional(&mut **tx)
         .await
+        .map(|record| record.map(project_stored_entry))
         .map_err(LexiconRepositoryError::Database)
     }
 

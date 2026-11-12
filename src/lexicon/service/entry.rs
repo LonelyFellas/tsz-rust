@@ -82,8 +82,10 @@ fn relation_type_for_publication_snapshot(
         .and_then(serde_json::Value::as_i64)
     {
         Some(3) => {
-            let source: AdminWordV3 =
-                serde_json::from_value(snapshot.clone()).map_err(serialization_error)?;
+            let source: AdminWordV3 = serde_json::from_value(
+                crate::lexicon::voice_versions::stored_dubbing(snapshot.clone()),
+            )
+            .map_err(serialization_error)?;
             Ok(source
                 .meanings
                 .pos

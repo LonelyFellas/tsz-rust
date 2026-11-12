@@ -48,30 +48,35 @@ pub(crate) const UPGRADE_MESSAGE: &str =
 
 pub(crate) fn supported(headers: &HeaderMap) -> bool {
     headers.get(HEADER).is_some_and(|value| {
-        value == "v1" || value == "v2" || value == "v3" || value == "v4" || value == "v5"
+        value == "v1"
+            || value == "v2"
+            || value == "v3"
+            || value == "v4"
+            || value == "v5"
+            || value == "v6"
     })
 }
 
 pub(crate) fn generated_supported(headers: &HeaderMap) -> bool {
-    headers
-        .get(HEADER)
-        .is_some_and(|value| value == "v2" || value == "v3" || value == "v4" || value == "v5")
+    headers.get(HEADER).is_some_and(|value| {
+        value == "v2" || value == "v3" || value == "v4" || value == "v5" || value == "v6"
+    })
 }
 
 pub(crate) fn dubbing_supported(headers: &HeaderMap) -> bool {
     headers
         .get(HEADER)
-        .is_some_and(|value| value == "v3" || value == "v4" || value == "v5")
+        .is_some_and(|value| value == "v3" || value == "v4" || value == "v5" || value == "v6")
 }
 
 pub(crate) fn pool_supported(headers: &HeaderMap) -> bool {
-    headers
-        .get(HEADER)
-        .is_some_and(|value| value == "v4" || value == "v5")
+    headers.get(HEADER).is_some_and(|value| value == "v6")
 }
 
 pub(crate) fn multi_recommendations_supported(headers: &HeaderMap) -> bool {
-    headers.get(HEADER).is_some_and(|value| value == "v5")
+    headers
+        .get(HEADER)
+        .is_some_and(|value| value == "v5" || value == "v6")
 }
 
 pub(crate) fn contains_multi_recommendations(value: &Value) -> bool {
@@ -112,12 +117,154 @@ fn contains_multi_recommendations_source(source: &Value) -> bool {
     })
 }
 
+/// Read projection only. Original provenance is retained; source identities are never invented.
+pub(crate) fn project_stored_dubbing(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            if fields.contains_key("voices")
+                && fields
+                    .get("dubbing")
+                    .is_some_and(|d| matches!(d["mode"].as_str(), Some("inherit" | "local")))
+            {
+                let original = fields["dubbing"].clone();
+                let projected = serde_json::json!({"area":original["area"],
+                    "uk":{"mode":original["mode"]},"us":{"mode":original["mode"]}});
+                fields.entry("legacy_dubbing").or_insert(original);
+                fields.insert("dubbing".into(), projected);
+            }
+            for (key, child) in fields {
+                if key != "legacy_dubbing" {
+                    project_stored_dubbing(child);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(project_stored_dubbing),
+        _ => {}
+    }
+}
+
+pub(crate) fn stored_dubbing(mut value: Value) -> Value {
+    project_stored_dubbing(&mut value);
+    value
+}
+
+/// Preserve trusted provenance across edits, reordering and copies within the same aggregate.
+pub(crate) fn preserve_legacy_dubbing(
+    before: &Value,
+    after: &mut Value,
+) -> Result<bool, crate::error::AppError> {
+    use std::collections::HashMap;
+    fn identity(value: &Value) -> Option<&str> {
+        value
+            .get("id")
+            .or_else(|| value.get("pos_id"))
+            .and_then(Value::as_str)
+    }
+    fn collect<'a>(
+        value: &'a Value,
+        nodes: &mut HashMap<String, &'a Value>,
+        origins: &mut HashSet<String>,
+    ) {
+        match value {
+            Value::Object(fields) => {
+                // Media references have their own ID namespace and cannot replace an authoring owner.
+                if let Some(id) = identity(value)
+                    && ["voice_profile", "spelling_speech", "synthesis"]
+                        .iter()
+                        .any(|key| fields.contains_key(*key))
+                {
+                    nodes.insert(id.into(), value);
+                }
+                if fields.contains_key("voices")
+                    && let Some(raw) = fields.get("legacy_dubbing")
+                {
+                    origins.insert(raw.to_string());
+                }
+                for (key, child) in fields {
+                    if key != "legacy_dubbing" {
+                        collect(child, nodes, origins);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    collect(child, nodes, origins);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn visit(
+        before: &Value,
+        after: &mut Value,
+        nodes: &HashMap<String, &Value>,
+        origins: &HashSet<String>,
+    ) -> Result<bool, crate::error::AppError> {
+        let before = identity(after)
+            .and_then(|id| nodes.get(id).copied())
+            .unwrap_or(before);
+        let mut changed = false;
+        match after {
+            Value::Object(fields) => {
+                if fields.contains_key("voices") {
+                    let original = before.get("legacy_dubbing");
+                    if fields.get("legacy_dubbing").is_some_and(|raw| {
+                        original
+                            .map_or_else(|| !origins.contains(&raw.to_string()), |old| old != raw)
+                    }) {
+                        return Err(crate::error::AppError::conflict(
+                            crate::error::ErrorCode::UnsupportedSchemaVersion,
+                            Some("voice_profile"),
+                            "旧推荐出处由服务端保留，不能修改或伪造",
+                        ));
+                    }
+                    if let Some(raw) = original
+                        && fields.get("legacy_dubbing") != Some(raw)
+                    {
+                        fields.insert("legacy_dubbing".into(), raw.clone());
+                        changed = true;
+                    }
+                }
+                for (key, child) in fields {
+                    if key != "legacy_dubbing" {
+                        changed |= visit(&before[key.as_str()], child, nodes, origins)?;
+                    }
+                }
+            }
+            Value::Array(items) => {
+                let old = before.as_array();
+                for (index, child) in items.iter_mut().enumerate() {
+                    let previous = old.and_then(|items| {
+                        if let Some(id) = identity(child) {
+                            items.iter().find(|old| identity(old) == Some(id))
+                        } else {
+                            items.get(index)
+                        }
+                    });
+                    changed |= visit(previous.unwrap_or(&Value::Null), child, nodes, origins)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(changed)
+    }
+    let mut nodes = HashMap::new();
+    let mut origins = HashSet::new();
+    collect(before, &mut nodes, &mut origins);
+    visit(before, after, &nodes, &origins)
+}
+
 pub(crate) fn contains_pool(value: &Value) -> bool {
     match value {
         Value::Object(fields) => {
-            fields
-                .get("dubbing")
-                .is_some_and(|value| value.get("pool_version").is_some())
+            fields.contains_key("legacy_dubbing")
+                || (fields.contains_key("voice_id") && fields.contains_key("accent"))
+                || (fields.contains_key("ipa")
+                    && fields.contains_key("ups")
+                    && fields.contains_key("source"))
+                || fields
+                    .get("dubbing")
+                    .is_some_and(|value| value.get("uk").is_some() || value.get("us").is_some())
                 || fields.values().any(contains_pool)
         }
         Value::Array(items) => items.iter().any(contains_pool),
@@ -128,9 +275,19 @@ pub(crate) fn contains_pool(value: &Value) -> bool {
 pub(crate) fn project_pool(value: &mut Value) {
     match value {
         Value::Object(fields) => {
-            if let Some(dubbing) = fields.get_mut("dubbing").and_then(Value::as_object_mut) {
-                dubbing.remove("pool_version");
-                dubbing.remove("recommendation");
+            fields.remove("legacy_dubbing");
+            if fields.contains_key("voice_id") {
+                fields.remove("accent");
+            }
+            if fields.contains_key("ipa") && fields.contains_key("ups") {
+                fields.remove("source");
+            }
+
+            if fields
+                .get("dubbing")
+                .is_some_and(|d| d.get("uk").is_some() || d.get("us").is_some())
+            {
+                fields.remove("dubbing");
             }
             fields.values_mut().for_each(project_pool);
         }
@@ -142,7 +299,6 @@ pub(crate) fn project_pool(value: &mut Value) {
 pub(crate) fn unsupported_dubbing(headers: &HeaderMap, value: &Value) -> bool {
     (!dubbing_supported(headers) && contains_dubbing(value))
         || (!pool_supported(headers) && contains_pool(value))
-        || (!multi_recommendations_supported(headers) && contains_multi_recommendations(value))
 }
 
 pub(crate) fn contains_dubbing(value: &Value) -> bool {
@@ -378,7 +534,6 @@ mod tests {
             (Some("v2"), true, true, false),
             (Some("v3"), true, true, false),
             (Some("v4"), true, true, false),
-            (Some("v5"), true, true, false),
         ] {
             let mut headers = HeaderMap::new();
             if let Some(version) = version {
@@ -398,7 +553,7 @@ mod tests {
 
     #[test]
     fn pool_negotiation_projects_only_response_and_protects_v3_writers() {
-        let stored = json!({"voice_profile":{"voices":[],"dubbing":{"mode":"local","area":"word","pool_version":"provider_id_v1","recommendation":{"group_id":"g","pair_id":"p","voice_ids":["sonia"],"contribution_ids":[]}}}});
+        let stored = json!({"voice_profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"local","recommendations":[{"group_id":"g","recommendation_id":"p","voice_id":"sonia"}]},"us":{"mode":"local"}}}});
         let mut old = HeaderMap::new();
         old.insert(HEADER, "v3".parse().unwrap());
         assert!(dubbing_supported(&old));
@@ -408,37 +563,10 @@ mod tests {
         project_pool(&mut response);
         assert!(!contains_pool(&response));
         assert!(contains_pool(&stored));
-        assert_eq!(
-            response["voice_profile"]["dubbing"],
-            json!({"mode":"local","area":"word"})
-        );
-        old.insert(HEADER, "v4".parse().unwrap());
+        assert_eq!(response["voice_profile"]["dubbing"], Value::Null);
+        old.insert(HEADER, "v6".parse().unwrap());
         assert!(pool_supported(&old));
         assert!(!unsupported_dubbing(&old, &stored));
-    }
-
-    #[test]
-    fn multi_recommendations_require_v5_and_old_views_preserve_pool_voices() {
-        let stored = json!({"voice_profile":{"voices":[{"voice_id":"a","enabled":true}],"dubbing":{"mode":"local","area":"word","pool_version":"provider_id_v1","recommendation":{"group_id":"g","pair_id":"p","voice_ids":["a","b","c","d"],"contribution_ids":["a","b","c","d"]}}}});
-        let mut headers = HeaderMap::new();
-        headers.insert(HEADER, "v4".parse().unwrap());
-        assert!(unsupported_dubbing(&headers, &stored));
-        let mut response = stored.clone();
-        project_multi_recommendations(&mut response);
-        assert!(
-            response["voice_profile"]["dubbing"]
-                .get("recommendation")
-                .is_none()
-        );
-        assert_eq!(
-            response["voice_profile"]["voices"],
-            stored["voice_profile"]["voices"]
-        );
-        assert!(contains_multi_recommendations(&stored));
-        assert!(!contains_multi_recommendations(&response));
-        headers.insert(HEADER, "v5".parse().unwrap());
-        assert!(pool_supported(&headers));
-        assert!(!unsupported_dubbing(&headers, &stored));
     }
 
     #[test]
@@ -457,7 +585,7 @@ mod tests {
 
     #[test]
     fn dubbing_projection_removes_new_semantics_and_preserves_stored_content() {
-        let stored = json!({"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"style_degree":1.2,"role":"Girl"}],"dubbing":{"mode":"local","area":"meaning"}},"reading_reference":{"uk":{}},"reading_links":[],"value":{"version":2,"text":"123","annotations":[{"type":"say_as","start":0,"end":3,"interpret_as":"digits"},{"type":"sub","start":0,"end":3,"alias":"one"},{"type":"italic","start":0,"end":3}]}});
+        let stored = json!({"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"style_degree":1.2,"role":"Girl"}],"dubbing":{"area":"meaning","uk":{"mode":"local"},"us":{"mode":"local"}}},"reading_reference":{"uk":{}},"reading_links":[],"value":{"version":2,"text":"123","annotations":[{"type":"say_as","start":0,"end":3,"interpret_as":"digits"},{"type":"sub","start":0,"end":3,"alias":"one"},{"type":"italic","start":0,"end":3}]}});
         assert!(contains_dubbing(&stored));
         let mut legacy = stored.clone();
         project_dubbing(&mut legacy);
@@ -505,5 +633,92 @@ mod tests {
         );
         assert!(contains_versions(&stored));
         assert!(!contains_versions(&response));
+    }
+}
+
+#[cfg(test)]
+mod side_compatibility_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn v5_remains_legacy_and_v6_is_required_for_sides_and_provenance() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER, "v5".parse().unwrap());
+        assert!(supported(&headers));
+        assert!(multi_recommendations_supported(&headers));
+        assert!(!pool_supported(&headers));
+        let stored = json!({"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":-27,"version_id":"stable","audio_asset_id":"owned"}],
+            "dubbing":{"mode":"local","area":"word","pool_version":"explicit_v1","recommendation":{"group_id":"g","pair_id":"original","voice_ids":["sonia"],"contribution_ids":["stable"]}}}});
+        let mut projected = stored.clone();
+        project_stored_dubbing(&mut projected);
+        assert_eq!(
+            projected["voice_profile"]["voices"],
+            stored["voice_profile"]["voices"]
+        );
+        assert_eq!(
+            projected["voice_profile"]["legacy_dubbing"],
+            stored["voice_profile"]["dubbing"]
+        );
+        assert_eq!(
+            projected["voice_profile"]["dubbing"],
+            json!({"area":"word","uk":{"mode":"local"},"us":{"mode":"local"}})
+        );
+        assert!(unsupported_dubbing(&headers, &projected));
+        let mut legacy_wire = projected.clone();
+        project_pool(&mut legacy_wire);
+        assert!(legacy_wire["voice_profile"].get("legacy_dubbing").is_none());
+        assert!(legacy_wire["voice_profile"].get("dubbing").is_none());
+        assert_eq!(
+            legacy_wire["voice_profile"]["voices"],
+            stored["voice_profile"]["voices"]
+        );
+        headers.insert(HEADER, "v6".parse().unwrap());
+        assert!(pool_supported(&headers));
+        assert!(!unsupported_dubbing(&headers, &projected));
+        let snapshot = projected.clone();
+        project_stored_dubbing(&mut projected);
+        assert_eq!(snapshot, projected, "read projection is idempotent");
+    }
+
+    #[test]
+    fn provenance_survives_reordering_and_omission_but_cannot_be_forged() {
+        let profile = |name| json!({"voices":[],"dubbing":{"mode":"local","area":"word","recommendation":{"pair_id":name}}});
+        let mut before = json!([{"id":"a","voice_profile":profile("a")},{"id":"b","voice_profile":profile("b")}]);
+        before[0]["audio_assets"] = json!([{"id":"a","locale":"en-GB"}]);
+        project_stored_dubbing(&mut before);
+        let mut after = json!([before[1].clone(), before[0].clone()]);
+        for item in after.as_array_mut().unwrap() {
+            item["voice_profile"]
+                .as_object_mut()
+                .unwrap()
+                .remove("legacy_dubbing");
+        }
+        preserve_legacy_dubbing(&before, &mut after).unwrap();
+        assert_eq!(
+            after[0]["voice_profile"]["legacy_dubbing"],
+            before[1]["voice_profile"]["legacy_dubbing"]
+        );
+        assert_eq!(
+            after[1]["voice_profile"]["legacy_dubbing"],
+            before[0]["voice_profile"]["legacy_dubbing"],
+            "asset IDs are not voice configuration owner IDs"
+        );
+        let mut moved = json!({"uk":before[0].clone(),"us":before[1].clone()});
+        moved["uk"]["voice_profile"]
+            .as_object_mut()
+            .unwrap()
+            .remove("legacy_dubbing");
+        preserve_legacy_dubbing(&before, &mut moved).unwrap();
+        assert_eq!(
+            moved["uk"]["voice_profile"]["legacy_dubbing"],
+            before[0]["voice_profile"]["legacy_dubbing"]
+        );
+        let mut copied = json!([before[0].clone()]);
+        copied[0]["id"] = json!("new-copy");
+        preserve_legacy_dubbing(&before, &mut copied).unwrap();
+        after[0]["voice_profile"]["legacy_dubbing"]["mode"] = json!("inherit");
+        assert!(preserve_legacy_dubbing(&before, &mut after).is_err());
+        assert!(preserve_legacy_dubbing(&Value::Null, &mut before).is_err());
     }
 }

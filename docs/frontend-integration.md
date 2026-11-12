@@ -370,3 +370,13 @@ Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写�
 ## 新词库已有词条检测（2026-11-12）
 
 前端主记录：`docs/features/smart-lexicon-reconstruction/evidence.md` 第 11 节。新增 `POST /api/v1/admin/lexicon-next/entry-matches`，输入 `target_language/surface` 及可选 `page/page_size`，返回回显、已有管理列表摘要和分页。要求 `words.access/create`；当前词形匹配，无词形草稿回退词头，包含垃圾桶，跨类型多词词形可命中，同条去重。默认 20、上限 100、1 基；count/rows 同一个只读快照，页码超过当前结果时回落到有效末页。旧 `/detections` 响应与创建/保存格式保持不变，无迁移；新增端点先发布 API，再发布 Admin。
+
+## TASK#190：逐侧配音协议 v6
+
+- `X-TSZ-Voice-Versions: v5` 仍指 #401 的旧整份多选推荐模型；逐侧 `dubbing.uk/us`、`recommendations` 数组、发音 `source` 与保存侧 `accent` 使用 `v6`。旧版本读取会移除其无法理解的逐侧元数据，新内容及保留的旧模型内容均保护旧客户端写入，不以 v5 表示支持逐侧格式。
+- 每侧 `{mode, recommendations?}`。来源数组最多 2000 项、不可为 null，来源身份 `(group_id, recommendation_id)` 在本侧唯一；不同来源可共享同一去重音色和 `contribution_id`，不得重复增加播放概率。显式来源数组仅用于 local，空／省略来源仍可独立配置；inherit 不携带固定推荐来源。目录按侧单选由客户端交互保证，服务器继续保留有序多声池及取消缓存的既有容量和校验。
+- 旧存储全局 inherit/local 只在读取副本映射为两侧相同模式，声音、版本、参数及资产不变，不执行全库迁移。原始整份元数据保留为 `VoiceProfileV3.legacy_dubbing`，不伪造无法无损对应的推荐身份。合法保存时服务端按稳定属主保留未回传的原出处，禁止改写或伪造；同一聚合内的重排、区域拆分和配置复制可保留已有可信出处。新活动 dubbing 不恢复根 mode 或 pair_id。
+- 分组协议独立协商：`X-TSZ-Dubbing-Groups: v4` 返回直接 uk/us 列表和 order_revision，所有分组写入需 v4；旧 v3 读取只返回 `recommendations:{format:legacy,uk,us}`，不制造等长配对。旧写入在解码配对正文前返回升级冲突；v2 和未协商的旧只读表示继续保留。
+- 本任务新增 `20261112090000_dubbing_side_dependencies`；up 只给已有依赖加双侧默认值，后续保存精确登记继承侧。down 在存在单侧依赖时拒绝有损回退；新逐侧写入也不能假定旧二进制可读，发布必须依据实际基线的隔离演练及批准恢复策略。后端先提供兼容只读及旧写保护，再启用配套 v6 客户端的新写入；完整新旧组合仍以配套验证回执为准。
+
+TASK#190 与后续 #402 的耦合：录音 `is_default` 保留 absent／true／false 三态；显式取消不得变回旧 fallback。无显式 v6 source 的旧数据继续采用 #402 的录音优先与取消规则；v6 显式 IPA／UPS／spelling／none 不被其他源的缓存录音覆盖。upload 活动源若本侧已明确取消全部录音，保存／发布拒绝空池，不改选别的取消缓存；未设置选用状态的旧数据保留兼容初值。

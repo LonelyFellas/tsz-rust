@@ -210,7 +210,13 @@ pub(crate) fn ensure_audio_only(
                         (
                             key.clone(),
                             if key == "voice_profile" {
-                                serde_json::json!({"dubbing":value.get("dubbing")})
+                                {
+                                    let protected = value.get("voices").and_then(serde_json::Value::as_array).map(|voices| voices.iter().filter(|voice| {
+                                        let side = voice.get("accent").and_then(serde_json::Value::as_str).map(|accent| match accent { "gb" => Some("uk"), "us" => Some("us"), _ => None }).unwrap_or_else(|| voice.get("locale").and_then(serde_json::Value::as_str).and_then(crate::speech::locale::EnglishLocale::parse).and_then(|locale| match locale.accent_group() { crate::speech::locale::AccentGroup::Uk => Some("uk"), crate::speech::locale::AccentGroup::Us => Some("us"), _ => None }));
+                                        side.is_none_or(|side| value["dubbing"][side]["mode"] != "inherit")
+                                    }).cloned().collect::<Vec<_>>()).unwrap_or_default();
+                                    serde_json::json!({"dubbing":value.get("dubbing"),"legacy_dubbing":value.get("legacy_dubbing"),"local_voices":protected})
+                                }
                             } else {
                                 stripped(value)
                             },
@@ -415,4 +421,22 @@ pub async fn retry(
 ) -> Result<axum::http::StatusCode, AppError> {
     change(&state.pool, &auth, id, true).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod side_protection_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn background_replacement_cannot_mutate_local_side_or_text() {
+        let original = json!({"text":"Hello","voice_profile":{"dubbing":{"area":"example","uk":{"mode":"local"},"us":{"mode":"inherit"}},"voices":[{"locale":"en-GB","voice_id":"sonia","rate_percent":-11},{"locale":"en-US","voice_id":"jenny","rate_percent":0}]}});
+        let mut inherited = original.clone();
+        inherited["voice_profile"]["voices"][1]["rate_percent"] = json!(-20);
+        assert!(ensure_audio_only(&original, &inherited).is_ok());
+        let mut local = inherited.clone();
+        local["voice_profile"]["voices"][0]["rate_percent"] = json!(-25);
+        assert!(ensure_audio_only(&original, &local).is_err());
+        inherited["text"] = json!("Changed");
+        assert!(ensure_audio_only(&original, &inherited).is_err());
+    }
 }

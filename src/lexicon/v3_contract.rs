@@ -993,56 +993,50 @@ fn validate_voice_profile(
     let mut version_ids = HashSet::new();
     let mut selected_locales = HashSet::new();
     let pool_invalid = profile.dubbing.as_ref().is_some_and(|dubbing| {
-        dubbing.recommendation.as_ref().is_some_and(|source| {
-            !profile.is_provider_pool()
-                || dubbing.mode != crate::lexicon::dto::VoiceProfileModeV3::Local
-                || source.group_id.is_nil()
-                || source.pair_id.is_nil()
-                || source.voice_ids.is_empty()
-                || source.voice_ids.len() > MAX_VOICE_PROFILE_VOICES
-                || source
-                    .voice_ids
-                    .iter()
-                    .any(|id| id.trim().is_empty() || id.len() > 128)
-                || source.voice_ids.iter().collect::<HashSet<_>>().len() != source.voice_ids.len()
-                || source.contribution_ids.len() > MAX_VOICE_PROFILE_VOICES
-                || source.contribution_ids.iter().collect::<HashSet<_>>().len()
-                    != source.contribution_ids.len()
-                || source.contribution_ids.iter().any(|id| {
-                    id.is_nil()
-                        || !profile
-                            .voices
-                            .iter()
-                            .any(|voice| voice.version_id == Some(*id))
+        [("gb", &dubbing.uk), ("us", &dubbing.us)]
+            .into_iter()
+            .any(|(accent, side)| {
+                let mut sources = HashSet::new();
+                side.recommendations.as_ref().is_some_and(|items| {
+                    items.len() > MAX_VOICE_PROFILE_VOICES
+                        || side.mode != crate::lexicon::dto::VoiceProfileModeV3::Local
+                        || items.iter().any(|source| {
+                            !sources.insert((source.group_id, source.recommendation_id))
+                                || source.group_id.is_nil()
+                                || source.recommendation_id.is_nil()
+                                || source.voice_id.trim().is_empty()
+                                || source.voice_id.len() > 128
+                                || source.contribution_id.is_some_and(|id| {
+                                    id.is_nil()
+                                        || !profile.voices.iter().any(|voice| {
+                                            voice.version_id == Some(id)
+                                                && voice.voice_id == source.voice_id
+                                                && voice.accent_group()
+                                                    == Some(if accent == "gb" {
+                                                        crate::speech::locale::AccentGroup::Uk
+                                                    } else {
+                                                        crate::speech::locale::AccentGroup::Us
+                                                    })
+                                        })
+                                })
+                        })
                 })
-        })
+            })
     });
     let mut pool_ids = HashSet::new();
     let voices_invalid = pool_invalid
         || profile.voices.len() > MAX_VOICE_PROFILE_VOICES
-        || (profile.mode() == Some(crate::lexicon::dto::VoiceProfileModeV3::Inherit)
-            && profile.area().is_none())
-        || (profile.mode().is_none()
-            && (profile.area().is_some() || !profile.recommendation_order().is_empty()))
-        || profile.recommendation_order().len() > 2000
-        || profile.recommendation_order().iter().any(|id| id.is_nil())
-        || profile
-            .recommendation_order()
-            .iter()
-            .collect::<HashSet<_>>()
-            .len()
-            != profile.recommendation_order().len()
         || profile.voices.iter().any(|voice| {
             let voice_id = &voice.voice_id;
             let version_invalid = match (&voice.version_id, &voice.version_name, voice.locale) {
-                (None, None, None) => profile.mode().is_some() || !seen.insert(voice_id.as_str()),
+                (None, None, None) => profile.dubbing.is_some() || !seen.insert(voice_id.as_str()),
                 (Some(id), Some(name), Some(locale)) => {
                     id.is_nil()
                         || !version_ids.insert(*id)
                         || name.trim().is_empty()
                         || name.chars().count() > 40
                         || name.contains('\0')
-                        || (profile.mode().is_none()
+                        || (profile.dubbing.is_none()
                             && voice.enabled
                             && !selected_locales.insert(locale.selection_key()))
                 }
@@ -1323,6 +1317,27 @@ fn validate_variant(
             use crate::lexicon::dto::PhonemeLocaleV3;
             for (side, candidate) in [("uk", &synthesis.uk), ("us", &synthesis.us)] {
                 let Some(candidate) = candidate else { continue };
+                if candidate.source
+                    == Some(crate::lexicon::dto::PronunciationSpeechSourceV3::Upload)
+                    && !{
+                        let locale = if side == "uk" { "en-GB" } else { "en-US" };
+                        let choice = pronunciation.audio_assets.iter().any(|asset| {
+                            asset.locale.as_str() == locale && asset.is_default.is_some()
+                        });
+                        pronunciation.audio_assets.iter().any(|asset| {
+                            asset.locale.as_str() == locale
+                                && (!choice || asset.is_default == Some(true))
+                        })
+                    }
+                {
+                    issues.push(issue(
+                        V3ValidationIssueCode::PhoneticRichTextInvalid,
+                        &format!("synthesis.{side}.source"),
+                        pronunciation.id,
+                        "uploaded source requires a recording for this accent",
+                        pronunciation_location.clone(),
+                    ));
+                }
                 for (alphabet, speech) in [
                     ("ipa", &candidate.ipa_speech),
                     ("ups", &candidate.ups_speech),
@@ -1373,22 +1388,51 @@ fn validate_variant(
                     (
                         "synthesis.uk",
                         &uk,
-                        complete && matches!(dialect, Dialect::Common | Dialect::Uk),
+                        complete
+                            && matches!(dialect, Dialect::Common | Dialect::Uk)
+                            && !matches!(
+                                synthesis.source_for(PhonemeLocaleV3::EnGb),
+                                Some(
+                                    crate::lexicon::dto::PronunciationSpeechSourceV3::None
+                                        | crate::lexicon::dto::PronunciationSpeechSourceV3::Upload
+                                )
+                            ),
                         Dialect::Uk,
                     ),
                     (
                         "synthesis.us",
                         &us,
-                        complete && matches!(dialect, Dialect::Common | Dialect::Us),
+                        complete
+                            && matches!(dialect, Dialect::Common | Dialect::Us)
+                            && !matches!(
+                                synthesis.source_for(PhonemeLocaleV3::EnUs),
+                                Some(
+                                    crate::lexicon::dto::PronunciationSpeechSourceV3::None
+                                        | crate::lexicon::dto::PronunciationSpeechSourceV3::Upload
+                                )
+                            ),
                         Dialect::Us,
                     ),
                 ]);
             }
             for (prefix, synthesis, complete, dialect) in candidates {
                 let recorded = |accent| {
-                    pronunciation.audio_assets.iter().any(|asset| {
-                        asset.is_default == Some(true) && asset.locale.accent_group() == accent
-                    })
+                    let explicit = pronunciation
+                        .synthesis
+                        .as_ref()
+                        .is_some_and(|s| match accent {
+                            crate::speech::locale::AccentGroup::Uk => {
+                                s.source_for(PhonemeLocaleV3::EnGb).is_some()
+                            }
+                            crate::speech::locale::AccentGroup::Us => {
+                                s.source_for(PhonemeLocaleV3::EnUs).is_some()
+                            }
+                            _ => false,
+                        });
+                    !explicit
+                        && pronunciation.audio_assets.iter().any(|asset| {
+                            asset.is_default == Some(true) && asset.locale.accent_group() == accent
+                        })
                 };
                 use crate::speech::locale::AccentGroup;
                 let complete = complete
@@ -1995,7 +2039,8 @@ mod tests {
         assert!(spelling_speech_equal(Some(&left), Some(&right)));
         let explicit = |speech: &crate::lexicon::dto::SpellingSpeechV3| {
             let mut value = serde_json::to_value(speech).unwrap();
-            value["voice_profile"]["dubbing"] = json!({"mode":"local","area":"word"});
+            value["voice_profile"]["dubbing"] =
+                json!({"area":"word","uk":{"mode":"local"},"us":{"mode":"local"}});
             serde_json::from_value(value).unwrap()
         };
         assert!(!spelling_speech_equal(
@@ -3243,8 +3288,31 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(recording("en-US"));
-        let issues = validate_forms(&decode_valid(raw).content, StepSaveIntent::Complete);
+        let issues = validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete);
         assert!(issues.is_empty(), "{issues:?}");
+        raw.pointer_mut(path).unwrap()["synthesis"]["uk"]["source"] = json!("ups");
+        raw.pointer_mut(path).unwrap()["synthesis"]["us"]["source"] = json!("ups");
+        let issues = validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete);
+        assert!(
+            issues.iter().any(|i| i.field == "synthesis.uk.ups"),
+            "explicit source must not use cached recordings: {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|i| i.field == "synthesis.us.ups"),
+            "{issues:?}"
+        );
+        raw.pointer_mut(path).unwrap()["synthesis"]["uk"]["source"] = json!("none");
+        raw.pointer_mut(path).unwrap()["synthesis"]["us"]["source"] = json!("upload");
+        raw.pointer_mut(path).unwrap()["audio_assets"][1]["is_default"] = json!(false);
+        let issues = validate_forms(&decode_valid(raw).content, StepSaveIntent::Complete);
+        assert!(
+            issues.iter().any(|i| i.field == "synthesis.us.source"),
+            "explicitly cancelled recordings are not an active upload pool: {issues:?}"
+        );
+        assert!(
+            !issues.iter().any(|i| i.field == "synthesis.uk.ups"),
+            "paused side is not required"
+        );
     }
 
     #[test]
@@ -3758,7 +3826,7 @@ mod sense_group_voice_tests {
     fn meanings_accept_stable_recommendation_sources_without_allowing_legacy_or_unknown_fields() {
         let version = Uuid::now_v7();
         let profile = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":-27,"version_id":version,"version_name":"局部副本","locale":"en-GB"}],
-            "dubbing":{"mode":"local","area":"grammar","pool_version":"provider_id_v1","recommendation":{"group_id":Uuid::now_v7(),"pair_id":Uuid::now_v7(),"voice_ids":["sonia"],"contribution_ids":[version]}}});
+            "dubbing":{"area":"grammar","uk":{"mode":"local","recommendations":[{"group_id":Uuid::now_v7(),"recommendation_id":Uuid::now_v7(),"voice_id":"sonia","contribution_id":version}]},"us":{"mode":"local"}}});
         let input = json!({"schema_version":3,"base_revision":1,"intent":"save","content":{"sense_groups":[],"pos":[{"pos_id":Uuid::now_v7(),"grammar_structures":[{"id":Uuid::now_v7(),"variants":[{"id":Uuid::now_v7(),"dialect":"common","content":{"version":2,"text":"Hello","annotations":[]},"form_links":[],"voice_profile":profile}]}],"senses":[]}]}});
         let parsed = decode_v3_meanings_request::<crate::lexicon::dto::SaveMeaningsStepInputV3>(
             input.clone(),
@@ -3767,7 +3835,7 @@ mod sense_group_voice_tests {
         assert!(validate_meanings(&parsed.content, StepSaveIntent::Save).is_empty());
         let mut unknown = input.clone();
         unknown["content"]["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"]["dubbing"]
-            ["recommendation"]["form_id"] = json!(Uuid::now_v7());
+            ["uk"]["recommendations"][0]["form_id"] = json!(Uuid::now_v7());
         assert!(
             decode_v3_meanings_request::<crate::lexicon::dto::SaveMeaningsStepInputV3>(unknown)
                 .is_err()
@@ -3781,57 +3849,60 @@ mod sense_group_voice_tests {
     }
 
     #[test]
-    fn multi_recommendation_sources_round_trip_with_multiple_pairs() {
-        let versions: Vec<_> = (0..4).map(|_| Uuid::now_v7()).collect();
-        let voices: Vec<_> = versions.iter().enumerate().map(|(index, id)| {
-            json!({"voice_id":format!("voice-{index}"),"version_id":id,"version_name":"推荐副本","locale":if index % 2 == 0 {"en-GB"} else {"en-US"},"enabled":true,"rate_percent":-10})
-        }).collect();
-        let raw = json!({"voices":voices,"dubbing":{"mode":"local","area":"word","pool_version":"provider_id_v1","recommendation_order":versions,"recommendation":{"group_id":Uuid::now_v7(),"pair_id":Uuid::now_v7(),"voice_ids":["voice-0","voice-1","voice-2","voice-3"],"contribution_ids":versions}}});
-        let parsed: VoiceProfileV3 = serde_json::from_value(raw.clone()).unwrap();
-        let mut issues = vec![];
-        validate_voice_profile(Some(&parsed), Uuid::now_v7(), &mut issues);
-        assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(serde_json::to_value(parsed).unwrap(), raw);
-        for field in ["voice_ids", "contribution_ids"] {
-            let mut invalid = raw.clone();
-            let values = invalid["dubbing"]["recommendation"][field]
-                .as_array_mut()
-                .unwrap();
-            values.push(values[0].clone());
-            let profile = serde_json::from_value(invalid).unwrap();
-            let mut issues = vec![];
-            validate_voice_profile(Some(&profile), Uuid::now_v7(), &mut issues);
-            assert!(!issues.is_empty(), "duplicate {field} must be rejected");
-        }
-    }
-
-    #[test]
     fn explicit_provider_pool_validates_sources_unique_aliases_and_keeps_legacy_versions() {
         let first = Uuid::now_v7();
         let second = Uuid::now_v7();
         let version = |id| json!({"voice_id":"sonia","version_id":id,"version_name":"配置","locale":"en-GB","enabled":true,"rate_percent":-27});
-        let raw = json!({"voices":[version(first),version(second)],"dubbing":{"mode":"local","area":"word"}});
+        let raw = json!({"voices":[version(first),version(second)],"dubbing":{"area":"word","uk":{"mode":"local"},"us":{"mode":"local"}}});
         let validate = |value: Value| {
             let profile: VoiceProfileV3 = serde_json::from_value(value).unwrap();
             let mut issues = vec![];
             validate_voice_profile(Some(&profile), first, &mut issues);
             issues
         };
-        assert!(validate(raw.clone()).is_empty());
+        assert!(!validate(raw.clone()).is_empty());
         let mut pool = raw;
-        pool["dubbing"]["pool_version"] = json!("provider_id_v1");
         assert!(!validate(pool.clone()).is_empty());
         pool["voices"] = json!([version(first)]);
-        pool["dubbing"]["recommendation"] = json!({"group_id":Uuid::now_v7(),"pair_id":Uuid::now_v7(),"voice_ids":["sonia"],"contribution_ids":[first]});
+        pool["dubbing"]["uk"]["recommendations"] = json!([{"group_id":Uuid::now_v7(),"recommendation_id":Uuid::now_v7(),"voice_id":"sonia","contribution_id":first}]);
         assert!(validate(pool.clone()).is_empty());
-        pool["dubbing"]["recommendation"]["contribution_ids"] = json!([second]);
+        pool["dubbing"]["uk"]["recommendations"][0]["contribution_id"] = json!(second);
         assert!(!validate(pool.clone()).is_empty());
-        pool["dubbing"]
+        pool["dubbing"]["uk"]
             .as_object_mut()
             .unwrap()
-            .remove("recommendation");
+            .remove("recommendations");
         pool["voices"] = json!([]);
         assert!(validate(pool).is_empty());
+    }
+
+    #[test]
+    fn multiple_side_sources_share_one_contribution_and_have_bounded_unique_identity() {
+        let version = Uuid::now_v7();
+        let group = Uuid::now_v7();
+        let source = || json!({"group_id":group,"recommendation_id":Uuid::now_v7(),"voice_id":"sonia","contribution_id":version});
+        let mut raw = json!({"voices":[{"voice_id":"sonia","locale":"en-GB","version_id":version,"version_name":"cached","enabled":true,"rate_percent":-27}],
+            "dubbing":{"area":"word","uk":{"mode":"local","recommendations":[source(),source()]},"us":{"mode":"inherit"}}});
+        let valid = |raw: Value| {
+            let parsed: VoiceProfileV3 = serde_json::from_value(raw).unwrap();
+            let mut issues = vec![];
+            validate_voice_profile(Some(&parsed), version, &mut issues);
+            issues.is_empty()
+        };
+        assert!(valid(raw.clone()));
+        raw["dubbing"]["uk"]["recommendations"][1] =
+            raw["dubbing"]["uk"]["recommendations"][0].clone();
+        assert!(!valid(raw.clone()));
+        raw["dubbing"]["uk"]["recommendations"] =
+            json!((0..2000).map(|_| source()).collect::<Vec<_>>());
+        assert!(valid(raw.clone()));
+        raw["dubbing"]["uk"]["recommendations"]
+            .as_array_mut()
+            .unwrap()
+            .push(source());
+        assert!(!valid(raw.clone()));
+        raw["dubbing"]["uk"]["recommendations"] = Value::Null;
+        assert!(serde_json::from_value::<VoiceProfileV3>(raw).is_err());
     }
 
     #[test]

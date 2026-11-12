@@ -225,14 +225,27 @@ pub(crate) fn first_annotation(
         .first()
         .and_then(|first| first.synthesis.as_ref())
         .ok_or("关联词形的第一个发音未配置，请先完善该发音")?;
-    if synthesis.use_spelling == Some(true) {
-        return Ok(None);
-    }
     use crate::lexicon::dto::PhonemeLocaleV3;
     let dual = synthesis.uk.is_some() || synthesis.us.is_some();
     // 通用正文的双口音音素由试听的目标 locale 决定，不能冻结成某一侧。
     if dual && dialect == Dialect::Common {
         return Ok(None);
+    }
+    let selected_locale = match dialect {
+        Dialect::Uk => Some(PhonemeLocaleV3::EnGb),
+        Dialect::Us => Some(PhonemeLocaleV3::EnUs),
+        Dialect::Common => None,
+    };
+    if selected_locale.is_some_and(|locale| {
+        matches!(
+            synthesis.source_for(locale),
+            Some(
+                crate::lexicon::dto::PronunciationSpeechSourceV3::None
+                    | crate::lexicon::dto::PronunciationSpeechSourceV3::Upload
+            )
+        )
+    }) {
+        return Err("关联词形的该侧读法未启用合成来源，请重新选择读法");
     }
     let selected = match dialect {
         Dialect::Uk => synthesis.for_locale(PhonemeLocaleV3::EnGb, legacy_dialect),
@@ -240,6 +253,9 @@ pub(crate) fn first_annotation(
         Dialect::Common => synthesis.clone(),
     };
     let synthesis = &selected;
+    if synthesis.use_spelling == Some(true) {
+        return Ok(None);
+    }
     let recorded_locale = match synthesis.alphabet {
         RichTextPhonemeAlphabet::Ipa => synthesis.ipa_locale,
         RichTextPhonemeAlphabet::Ups => synthesis.ups_locale,

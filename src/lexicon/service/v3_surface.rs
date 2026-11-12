@@ -625,8 +625,10 @@ impl LexiconService {
         for record in records {
             match record.content_schema_version {
                 3 => {
-                    let forms: DraftFormsStepContentV3 =
-                        serde_json::from_value(record.forms).map_err(serialization_error)?;
+                    let forms: DraftFormsStepContentV3 = serde_json::from_value(
+                        crate::lexicon::voice_versions::stored_dubbing(record.forms),
+                    )
+                    .map_err(serialization_error)?;
                     suggested_pos.extend(forms.pos.into_iter().map(|pos| pos.pos));
                 }
                 version => {
@@ -1823,10 +1825,14 @@ impl LexiconService {
                 }
                 let (mut pos_labels, mut gloss_previews) = match record.content_schema_version {
                     3 => {
-                        let forms: DraftFormsStepContentV3 =
-                            serde_json::from_value(record.forms).map_err(serialization_error)?;
-                        let meanings: DraftMeaningsStepContentV3 =
-                            serde_json::from_value(record.meanings).map_err(serialization_error)?;
+                        let forms: DraftFormsStepContentV3 = serde_json::from_value(
+                            crate::lexicon::voice_versions::stored_dubbing(record.forms),
+                        )
+                        .map_err(serialization_error)?;
+                        let meanings: DraftMeaningsStepContentV3 = serde_json::from_value(
+                            crate::lexicon::voice_versions::stored_dubbing(record.meanings),
+                        )
+                        .map_err(serialization_error)?;
                         (
                             forms.pos.into_iter().map(|pos| pos.pos).collect::<Vec<_>>(),
                             meanings

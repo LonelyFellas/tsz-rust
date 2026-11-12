@@ -697,7 +697,7 @@ impl GeneratedAudioService {
     }
 }
 
-#[utoipa::path(post,path="/api/v1/admin/speech/audio",tag="admin-speech",security(("bearer_auth"=[])),request_body=GenerateVoiceAudioRequest,params(("X-TSZ-Test-Run"=Option<String>,Header,description="独占验收资源批次"),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 支持正式音频；v3 支持分组继承；v4 支持显式官方 ID 局部池与来源；v5 支持多选推荐来源，旧客户端读取兼容视图并拒绝覆盖已转换内容"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 与版本 v2 组合支持原生英语地区；指定发音必须携带 phoneme_locale")),responses((status=201,body=GenerateVoiceAudioResponse),(status=400,description="内容或配音版本无效"),(status=401,description="未登录"),(status=403,description="没有生成和内容编辑权限"),(status=404,description="音色不可用"),(status=409,description="生成中或请求编号冲突"),(status=501,description="长期音频存储未配置"),(status=503,description="生成或存储失败")))]
+#[utoipa::path(post,path="/api/v1/admin/speech/audio",tag="admin-speech",security(("bearer_auth"=[])),request_body=GenerateVoiceAudioRequest,params(("X-TSZ-Test-Run"=Option<String>,Header,description="独占验收资源批次"),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 支持正式音频；v3 支持分组继承；v4 支持显式官方 ID 局部池与来源；v5 支持多选推荐来源，旧客户端读取兼容视图并拒绝覆盖已转换内容 v5 为旧整份多选推荐模型；v6 使用逐侧继承/独立、推荐来源数组、发音来源及归属；旧客户端读取兼容视图并保护旧写。"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 与版本 v2 组合支持原生英语地区；指定发音必须携带 phoneme_locale")),responses((status=201,body=GenerateVoiceAudioResponse),(status=400,description="内容或配音版本无效"),(status=401,description="未登录"),(status=403,description="没有生成和内容编辑权限"),(status=404,description="音色不可用"),(status=409,description="生成中或请求编号冲突"),(status=501,description="长期音频存储未配置"),(status=503,description="生成或存储失败")))]
 pub async fn generate(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -817,12 +817,7 @@ pub(crate) async fn validate_bindings_with_forms(
         value: &Value,
         out: &mut Vec<crate::lexicon::dto::VoiceProfileV3>,
     ) -> Result<(), AppError> {
-        if value.get("voices").is_some()
-            && value
-                .get("dubbing")
-                .and_then(|d| d.get("pool_version"))
-                .is_some()
-        {
+        if value.get("voices").is_some() && value.get("dubbing").is_some() {
             out.push(serde_json::from_value(value.clone()).map_err(|_| invalid())?);
             return Ok(());
         }
@@ -846,11 +841,95 @@ pub(crate) async fn validate_bindings_with_forms(
     for pool in &pools {
         super::dubbing::validate_pool_identities(conn, pool).await?;
     }
-    for configuration in super::generated_source::configurations(value)? {
-        if !configuration
+    // Validate active business sources only; inactive IPA/UPS caches and uploaded recordings
+    // do not require voices. Resolution checks real catalog/markup capability without TTS.
+    let mut checked = std::collections::HashSet::new();
+    let requirements = super::publication_audio::collect(value)?;
+    let active_sources: std::collections::HashSet<_> = requirements
+        .iter()
+        .filter(|requirement| requirement.profile.is_some())
+        .flat_map(|requirement| {
+            let mut accents = requirement.default_for.clone();
+            if let Some(accent) = requirement
+                .setting
+                .as_ref()
+                .and_then(VoiceSettingV3::accent_group)
+            {
+                accents.push(accent);
+            } else if accents.is_empty() {
+                // Older enabled settings may omit locale; their active owner still
+                // scopes capability validation, including disabled versions with assets.
+                accents.extend(
+                    super::dubbing::active_accents(
+                        &requirement.source_path,
+                        requirement.source_dialect.map(|dialect| match dialect {
+                            crate::lexicon::dto::Dialect::Uk => "uk",
+                            crate::lexicon::dto::Dialect::Us => "us",
+                            _ => "common",
+                        }),
+                    )
+                    .into_iter()
+                    .map(|accent| {
+                        if accent == "gb" {
+                            super::locale::AccentGroup::Uk
+                        } else {
+                            super::locale::AccentGroup::Us
+                        }
+                    }),
+                );
+            }
+            accents
+                .into_iter()
+                .map(|accent| (requirement.source_path.as_str(), accent))
+        })
+        .collect();
+    let is_active = |reference: &super::generated_source::GeneratedReference| {
+        reference
             .setting
-            .voice_id
-            .starts_with("azure-hd-flash-")
+            .accent_group()
+            .is_some_and(|accent| active_sources.contains(&(reference.path.as_str(), accent)))
+    };
+    for requirement in &requirements {
+        let (Some(profile), Some(source)) = (&requirement.profile, &requirement.source) else {
+            continue;
+        };
+        if profile.dubbing.is_none()
+            || !checked.insert((requirement.source_path.clone(), requirement.source_dialect))
+        {
+            continue;
+        }
+        for accent in super::dubbing::active_accents(
+            &requirement.source_path,
+            requirement.source_dialect.map(|d| match d {
+                crate::lexicon::dto::Dialect::Uk => "uk",
+                crate::lexicon::dto::Dialect::Us => "us",
+                _ => "common",
+            }),
+        ) {
+            let locale = if accent == "gb" { "en-GB" } else { "en-US" };
+            let content = source
+                .resolve_with_forms(conn, locale, current, batch)
+                .await?;
+            super::dubbing::resolve_in(
+                conn,
+                profile,
+                accent,
+                &content,
+                matches!(
+                    source,
+                    super::generated_source::GeneratedSpeechSource::Phoneme { .. }
+                )
+                .then_some(locale),
+            )
+            .await?;
+        }
+    }
+    for configuration in super::generated_source::configurations(value)? {
+        if !is_active(&configuration)
+            || !configuration
+                .setting
+                .voice_id
+                .starts_with("azure-hd-flash-")
         {
             continue;
         }
@@ -951,6 +1030,7 @@ pub(crate) async fn validate_bindings_with_forms(
     }
     for reference in super::generated_source::references(value)? {
         if reference.setting.enabled
+            && is_active(&reference)
             && let Some(profile) = &reference.profile
         {
             super::dubbing::validate_setting(

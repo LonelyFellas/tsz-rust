@@ -72,7 +72,7 @@ fn id(value: &Value) -> Option<Uuid> {
     value.as_str().and_then(|s| Uuid::parse_str(s).ok())
 }
 
-fn collect(value: &Value) -> Result<Vec<AudioRequirement>, AppError> {
+pub(crate) fn collect(value: &Value) -> Result<Vec<AudioRequirement>, AppError> {
     let mut requirements = Vec::new();
     walk(value, value, "", Uuid::nil(), None, &mut requirements)?;
     Ok(requirements)
@@ -141,26 +141,59 @@ fn add_selected(
         Some("common") => Some(crate::lexicon::dto::Dialect::Common),
         _ => None,
     };
+    let accents = super::dubbing::active_accents(path, owner["dialect"].as_str());
+    let in_scope = |group| match group {
+        Some(AccentGroup::Uk) => accents.contains(&"gb"),
+        Some(AccentGroup::Us) => accents.contains(&"us"),
+        _ => true,
+    };
+    let assets: Vec<_> = owner["audio_assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|asset| {
+            in_scope(
+                asset["locale"]
+                    .as_str()
+                    .and_then(super::locale::EnglishLocale::parse)
+                    .map(|locale| locale.accent_group()),
+            )
+        })
+        .collect();
     if let Some(voices) = owner
         .pointer("/voice_profile/voices")
         .and_then(Value::as_array)
+        .filter(|_| assets.is_empty())
     {
         let profile: VoiceProfileV3 =
             serde_json::from_value(owner["voice_profile"].clone()).map_err(AppError::internal)?;
         let profile = Arc::new(profile);
-        if (profile.mode() == Some(crate::lexicon::dto::VoiceProfileModeV3::Inherit)
-            || profile
-                .dubbing
-                .as_ref()
-                .is_some_and(|dubbing| dubbing.pool_version.is_some()))
-            && !profile.voices.iter().any(|voice| voice.enabled)
-        {
+        for accent in accents.iter().copied() {
+            if profile.dubbing.is_none()
+                || profile.voices.iter().any(|voice| {
+                    voice.enabled
+                        && voice.accent_group().is_some_and(|group| {
+                            group
+                                == if accent == "gb" {
+                                    AccentGroup::Uk
+                                } else {
+                                    AccentGroup::Us
+                                }
+                        })
+                })
+            {
+                continue;
+            }
             out.push(AudioRequirement {
                 target_id: target,
                 content_id: content,
                 source_path: path.into(),
                 source_dialect,
-                default_for: vec![],
+                default_for: vec![if accent == "gb" {
+                    AccentGroup::Uk
+                } else {
+                    AccentGroup::Us
+                }],
                 setting: None,
                 profile: Some(profile.clone()),
                 asset_id: None,
@@ -171,6 +204,9 @@ fn add_selected(
         for setting in voices.iter().filter(|v| v["enabled"] == true) {
             let setting: VoiceSettingV3 =
                 serde_json::from_value(setting.clone()).map_err(AppError::internal)?;
+            if !in_scope(setting.accent_group()) {
+                continue;
+            }
             let source = source_at(root, path).ok();
             let issue = if source.is_none() {
                 Some(RequirementIssue::InvalidSource)
@@ -194,25 +230,73 @@ fn add_selected(
         }
     }
     // Uploaded recordings are selected business assets, not TTS candidates.
-    if let Some(assets) = owner["audio_assets"].as_array() {
-        for asset in assets {
-            if let Some(asset_id) = id(&asset["id"]) {
-                out.push(AudioRequirement {
-                    target_id: target,
-                    content_id: content,
-                    source_path: path.into(),
-                    source_dialect,
-                    default_for: vec![],
-                    setting: None,
-                    profile: None,
-                    asset_id: Some(asset_id),
-                    source: None,
-                    issue: None,
-                });
-            }
+    for asset in assets {
+        if let Some(asset_id) = id(&asset["id"]) {
+            out.push(AudioRequirement {
+                target_id: target,
+                content_id: content,
+                source_path: path.into(),
+                source_dialect,
+                default_for: vec![],
+                setting: None,
+                profile: None,
+                asset_id: Some(asset_id),
+                source: None,
+                issue: None,
+            });
         }
     }
     Ok(())
+}
+
+fn add_side_selected(
+    root: &Value,
+    owner: &Value,
+    path: &str,
+    identity: (Uuid, Option<Uuid>),
+    side: &str,
+    upload: bool,
+    out: &mut Vec<AudioRequirement>,
+) -> Result<(), AppError> {
+    let (target, content) = identity;
+    let mut selected = owner.clone();
+    selected["dialect"] = side.into();
+    let locale = if side == "uk" { "en-GB" } else { "en-US" };
+    if upload {
+        selected
+            .as_object_mut()
+            .expect("source owner")
+            .remove("voice_profile");
+        if let Some(assets) = selected["audio_assets"].as_array_mut() {
+            let choice = assets
+                .iter()
+                .any(|asset| asset["locale"] == locale && asset["is_default"].is_boolean());
+            assets.retain(|asset| {
+                asset["locale"] == locale && (!choice || asset["is_default"] == true)
+            });
+        }
+    } else {
+        selected
+            .as_object_mut()
+            .expect("source owner")
+            .remove("audio_assets");
+        if let Some(voices) = selected
+            .pointer_mut("/voice_profile/voices")
+            .and_then(Value::as_array_mut)
+        {
+            voices.retain(|voice| {
+                serde_json::from_value::<VoiceSettingV3>(voice.clone())
+                    .ok()
+                    .and_then(|setting| setting.accent_group())
+                    == Some(if side == "uk" {
+                        AccentGroup::Uk
+                    } else {
+                        AccentGroup::Us
+                    })
+            });
+        }
+    }
+    add_selected(root, &selected, path, target, content, out)
 }
 
 fn variant(
@@ -224,7 +308,14 @@ fn variant(
 ) -> Result<(), AppError> {
     let variant_id = id(&value["id"]).ok_or_else(super::generated_source::invalid)?;
     let spelling_path = format!("{path}/spelling_speech");
-    if let Some(spelling) = value.get("spelling_speech") {
+    let explicit_sources = value["pronunciations"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            ["uk", "us"]
+                .iter()
+                .any(|side| item["synthesis"][side]["source"].is_string())
+        })
+    });
+    if !explicit_sources && let Some(spelling) = value.get("spelling_speech") {
         add_selected(root, spelling, &spelling_path, variant_id, content, out)?;
     }
     let accents: &[(&str, AccentGroup)] = match path
@@ -243,6 +334,100 @@ fn variant(
     {
         let target = id(&pronunciation["id"]).ok_or_else(super::generated_source::invalid)?;
         let pron_path = format!("{path}/pronunciations/{index}");
+        let synthesis = &pronunciation["synthesis"];
+        if ["uk", "us"]
+            .iter()
+            .any(|side| synthesis[side]["source"].is_string())
+        {
+            for (side, accent) in accents {
+                let source = synthesis[side]["source"].as_str().unwrap_or_else(|| {
+                    if synthesis["use_spelling"] == true {
+                        "spelling"
+                    } else {
+                        synthesis["alphabet"].as_str().unwrap_or("ipa")
+                    }
+                });
+                if source == "none" {
+                    continue;
+                }
+                let start = out.len();
+                match source {
+                    "spelling" => {
+                        if let Some(spelling) = value.get("spelling_speech") {
+                            add_side_selected(
+                                root,
+                                spelling,
+                                &spelling_path,
+                                (target, content),
+                                side,
+                                false,
+                                out,
+                            )?;
+                        }
+                    }
+                    "ipa" | "ups" => {
+                        let field = format!("{source}_speech");
+                        if let Some(speech) = synthesis
+                            .get(*side)
+                            .and_then(|candidate| candidate.get(&field))
+                        {
+                            add_side_selected(
+                                root,
+                                speech,
+                                &format!("{pron_path}/synthesis/{side}/{field}"),
+                                (target, content),
+                                side,
+                                false,
+                                out,
+                            )?;
+                        }
+                    }
+                    "upload" => add_side_selected(
+                        root,
+                        pronunciation,
+                        &pron_path,
+                        (target, content),
+                        side,
+                        true,
+                        out,
+                    )?,
+                    _ => {}
+                }
+                if let Some(index) = (start..out.len()).min_by_key(|index| {
+                    let item = &out[*index];
+                    !root
+                        .pointer(&item.source_path)
+                        .and_then(|owner| owner["audio_assets"].as_array())
+                        .is_some_and(|assets| {
+                            assets.iter().any(|asset| {
+                                id(&asset["id"]) == item.asset_id && asset["is_default"] == true
+                            })
+                        })
+                }) {
+                    if !out[index].default_for.contains(accent) {
+                        out[index].default_for.push(*accent);
+                    }
+                } else {
+                    out.push(AudioRequirement {
+                        target_id: target,
+                        content_id: content,
+                        source_path: pron_path.clone(),
+                        source_dialect: Some(if *side == "uk" {
+                            crate::lexicon::dto::Dialect::Uk
+                        } else {
+                            crate::lexicon::dto::Dialect::Us
+                        }),
+                        default_for: vec![*accent],
+                        setting: None,
+                        profile: None,
+                        asset_id: None,
+                        source: None,
+                        issue: Some(RequirementIssue::MissingConfiguration),
+                    });
+                }
+            }
+            continue;
+        }
         let start = out.len();
         let synthesis = &pronunciation["synthesis"];
         let selected_recording = |item: &AudioRequirement| {
@@ -257,7 +442,7 @@ fn variant(
         let item_accent = |item: &AudioRequirement| {
             item.setting
                 .as_ref()
-                .and_then(|setting| setting.locale)
+                .and_then(VoiceSettingV3::accent_group)
                 .or_else(|| {
                     root.pointer(&item.source_path)
                         .and_then(|owner| owner["audio_assets"].as_array())
@@ -268,8 +453,8 @@ fn variant(
                         })
                         .and_then(|asset| asset["locale"].as_str())
                         .and_then(super::locale::EnglishLocale::parse)
+                        .map(|locale| locale.accent_group())
                 })
-                .map(|locale| locale.accent_group())
         };
         let recording_choice_for = |accent: AccentGroup| {
             pronunciation["audio_assets"]
@@ -361,9 +546,7 @@ fn variant(
                 .filter(|index| {
                     let item = &out[*index];
                     if let Some(setting) = &item.setting {
-                        setting
-                            .locale
-                            .is_some_and(|locale| locale.accent_group() == *accent)
+                        setting.accent_group() == Some(*accent)
                     } else {
                         root.pointer(&item.source_path)
                             .and_then(|v| v["audio_assets"].as_array())
@@ -424,6 +607,54 @@ mod tests {
             }]}
         }}]}})
     }
+    #[test]
+    fn explicit_sources_are_independent_and_paused_caches_do_not_require_audio() {
+        let mut value = fixture("common");
+        let path = "/forms/contents/0/regional_variants/common/pronunciations/0";
+        value.pointer_mut(path).unwrap()["synthesis"]["uk"]["source"] = json!("none");
+        let mut us = value.pointer(path).unwrap()["synthesis"]["uk"].clone();
+        us["source"] = json!("ipa");
+        us["ipa_speech"]["voice_profile"]["voices"][0]["locale"] = json!("en-US");
+        value.pointer_mut(path).unwrap()["synthesis"]["us"] = us;
+        let items = collect(&value).unwrap();
+        assert!(!items.is_empty());
+        assert!(
+            items
+                .iter()
+                .all(|item| !item.default_for.contains(&AccentGroup::Uk))
+        );
+        assert!(items.iter().all(|item| item.source_path.contains("/us/")));
+        let cached = value.pointer(path).unwrap()["synthesis"]["uk"].clone();
+        let recording = Uuid::now_v7();
+        value.pointer_mut(path).unwrap()["audio_assets"] =
+            json!([{"id":recording,"locale":"en-US","is_default":true}]);
+        value.pointer_mut(path).unwrap()["synthesis"]["us"]["source"] = json!("upload");
+        let items = collect(&value).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].asset_id, Some(recording));
+        assert!(items[0].setting.is_none());
+        assert_eq!(items[0].default_for, vec![AccentGroup::Us]);
+        value.pointer_mut(path).unwrap()["audio_assets"][0]["is_default"] = json!(false);
+        let cancelled = collect(&value).unwrap();
+        assert_eq!(cancelled.len(), 1);
+        assert!(cancelled[0].asset_id.is_none());
+        assert!(matches!(
+            cancelled[0].issue,
+            Some(RequirementIssue::MissingConfiguration)
+        ));
+        value.pointer_mut(path).unwrap()["audio_assets"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("is_default");
+        assert_eq!(
+            collect(&value).unwrap()[0].asset_id,
+            Some(recording),
+            "omitted legacy choice keeps its fallback"
+        );
+
+        assert_eq!(value.pointer(path).unwrap()["synthesis"]["uk"], cached);
+    }
+
     #[test]
     fn selected_recording_overrides_generated_default_for_its_accent() {
         let mut value = fixture("common");
@@ -529,11 +760,34 @@ mod tests {
     }
 
     #[test]
+    fn split_grammar_ignores_other_side_voice_and_recording_caches() {
+        let uk_audio = Uuid::now_v7();
+        let us_audio = Uuid::now_v7();
+        for assets in [json!([]), json!([{"id":us_audio,"locale":"en-US"}])] {
+            let value = json!({"meanings":{"id":Uuid::now_v7(),"dialect":"uk",
+                "content":{"version":2,"text":"a safe harbour","annotations":[]},
+                "voice_profile":{"voices":[voice("en-GB",true,Some(uk_audio)),voice("en-US",true,None)],
+                    "dubbing":{"area":"grammar","uk":{"mode":"local"},"us":{"mode":"inherit"}}},
+                "audio_assets":assets}});
+            let before = value.clone();
+            let items = collect(&value).unwrap();
+            assert_eq!(
+                items.len(),
+                1,
+                "inactive side caches are not publication requirements"
+            );
+            assert_eq!(items[0].asset_id, Some(uk_audio));
+            assert!(items[0].issue.is_none());
+            assert_eq!(value, before, "collection must preserve both caches");
+        }
+    }
+
+    #[test]
     fn explicitly_inherited_empty_optional_profile_is_not_silently_ready() {
         let value = json!({"meanings":{"id":Uuid::now_v7(),"content":{"version":2,"text":"meaning","annotations":[]},
-            "voice_profile":{"voices":[],"dubbing":{"mode":"inherit","area":"word"}}}});
+            "voice_profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}}});
         let items = collect(&value).unwrap();
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert!(matches!(
             items[0].issue,
             Some(RequirementIssue::MissingConfiguration)
@@ -543,22 +797,14 @@ mod tests {
 
     #[test]
     fn new_local_empty_pool_requires_configuration_without_changing_legacy_empty() {
-        for enabled in [false, true] {
-            let mut value = json!({"en_text":{"common":{"id":Uuid::now_v7(),"value":{"version":2,"text":"Hello","annotations":[]},
-                "voice_profile":{"voices":[],"dubbing":{"mode":"local","area":"meaning"}}}}});
-            if enabled {
-                value["en_text"]["common"]["voice_profile"]["dubbing"]["pool_version"] =
-                    json!("provider_id_v1");
-            }
-            let items = collect(&value).unwrap();
-            assert_eq!(items.len(), usize::from(enabled));
-            if enabled {
-                assert!(matches!(
-                    items[0].issue,
-                    Some(RequirementIssue::MissingConfiguration)
-                ));
-            }
-        }
+        let value = json!({"en_text":{"common":{"id":Uuid::now_v7(),"value":{"version":2,"text":"Hello","annotations":[]},"voice_profile":{"voices":[],"dubbing":{"area":"meaning","uk":{"mode":"local"},"us":{"mode":"local"}}}}}});
+        let items = collect(&value).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .all(|item| matches!(item.issue, Some(RequirementIssue::MissingConfiguration)))
+        );
     }
 
     #[test]
@@ -574,8 +820,17 @@ mod tests {
         let second = version("en-us-guyneural", "en-US", true, Some(Uuid::now_v7()));
         let cached = version("en-gb-sonianeural", "en-GB", false, None);
         let mut value = json!({"en_text":{"common":{"id":Uuid::now_v7(),"value":{"version":2,"text":"Hello","annotations":[]},
-            "voice_profile":{"voices":[first, cached, second],"dubbing":{"mode":"local","area":"meaning","pool_version":"provider_id_v1"}}}}});
-        let before = collect(&value).unwrap();
+            "voice_profile":{"voices":[first, cached, second],"dubbing":{"area":"meaning","uk":{"mode":"local"},"us":{"mode":"local"}}}}}});
+        let all = collect(&value).unwrap();
+        assert!(
+            all.iter()
+                .any(|item| item.default_for == vec![AccentGroup::Uk]
+                    && matches!(item.issue, Some(RequirementIssue::MissingConfiguration)))
+        );
+        let before = all
+            .into_iter()
+            .filter(|item| item.setting.is_some())
+            .collect::<Vec<_>>();
         assert_eq!(before.len(), 2);
         assert_eq!(
             before[0].asset_id,
@@ -585,7 +840,11 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .swap(0, 2);
-        let after = collect(&value).unwrap();
+        let after = collect(&value)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.setting.is_some())
+            .collect::<Vec<_>>();
         assert_eq!(after[0].asset_id, before[1].asset_id);
         assert_ne!(
             serde_json::to_value(&before).unwrap(),

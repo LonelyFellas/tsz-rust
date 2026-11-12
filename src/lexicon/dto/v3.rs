@@ -266,9 +266,35 @@ where
     SynthesisSpeechV3::deserialize(deserializer).map(|value| Some(Box::new(value)))
 }
 
+fn deserialize_optional_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// The active source belongs to this reading and accent; cached inputs remain intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PronunciationSpeechSourceV3 {
+    Spelling,
+    Ipa,
+    Ups,
+    Upload,
+    None,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PronunciationSynthesisCandidateV3 {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_value"
+    )]
+    #[schema(nullable = false)]
+    pub source: Option<PronunciationSpeechSourceV3>,
     #[schema(max_length = 200)]
     pub ipa: String,
     #[schema(max_length = 1600)]
@@ -322,6 +348,18 @@ pub struct PronunciationSynthesisV3 {
 }
 
 impl PronunciationSynthesisV3 {
+    pub(crate) fn source_for(
+        &self,
+        locale: PhonemeLocaleV3,
+    ) -> Option<PronunciationSpeechSourceV3> {
+        match locale {
+            PhonemeLocaleV3::EnGb => &self.uk,
+            PhonemeLocaleV3::EnUs => &self.us,
+        }
+        .as_ref()
+        .and_then(|candidate| candidate.source)
+    }
+
     pub(crate) fn for_locale(&self, locale: PhonemeLocaleV3, legacy_dialect: Dialect) -> Self {
         let candidate = match locale {
             PhonemeLocaleV3::EnGb => &self.uk,
@@ -338,6 +376,23 @@ impl PronunciationSynthesisV3 {
         selected.ipa_locale = self.ipa_locale.or(legacy_locale);
         selected.ups_locale = self.ups_locale.or(legacy_locale);
         if let Some(candidate) = candidate {
+            if let Some(source) = candidate.source {
+                selected.use_spelling = Some(matches!(
+                    source,
+                    PronunciationSpeechSourceV3::Spelling
+                        | PronunciationSpeechSourceV3::Upload
+                        | PronunciationSpeechSourceV3::None
+                ));
+                match source {
+                    PronunciationSpeechSourceV3::Ipa => {
+                        selected.alphabet = RichTextPhonemeAlphabet::Ipa
+                    }
+                    PronunciationSpeechSourceV3::Ups => {
+                        selected.alphabet = RichTextPhonemeAlphabet::Ups
+                    }
+                    _ => {}
+                }
+            }
             selected.ipa = candidate.ipa.clone();
             selected.ups = candidate.ups.clone();
             selected.ups_words = candidate.ups_words.clone();
@@ -950,6 +1005,14 @@ impl RichTextV3 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceSettingV3 {
+    /// Saved pool side when it differs from the voice's native synthesis locale.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_value"
+    )]
+    #[schema(nullable = false)]
+    pub accent: Option<crate::speech::locale::VoiceAccent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_format: Option<crate::speech::AudioOutputFormat>,
     #[serde(
@@ -1012,6 +1075,19 @@ pub struct VoiceSettingV3 {
     pub role: Option<String>,
 }
 
+impl VoiceSettingV3 {
+    pub(crate) fn accent_group(&self) -> Option<crate::speech::locale::AccentGroup> {
+        use crate::speech::locale::{AccentGroup, VoiceAccent};
+        self.accent
+            .map(|accent| match accent {
+                VoiceAccent::Gb => AccentGroup::Uk,
+                VoiceAccent::Us => AccentGroup::Us,
+                VoiceAccent::None => AccentGroup::Other,
+            })
+            .or_else(|| self.locale.map(|locale| locale.accent_group()))
+    }
+}
+
 pub type VoiceVersionLocaleV3 = crate::speech::locale::EnglishLocale;
 
 fn deserialize_optional_voice_version_id<'de, D: Deserializer<'de>>(
@@ -1043,60 +1119,106 @@ fn deserialize_optional_voice_style<'de, D: Deserializer<'de>>(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceProfileV3 {
+    /// Original stored provenance, retained by the server during lazy v6 upgrades.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_legacy_dubbing"
+    )]
+    #[schema(schema_with = legacy_dubbing_schema)]
+    pub legacy_dubbing: Option<Box<serde_json::Value>>,
     #[schema(max_items = 2000)]
     pub voices: Vec<VoiceSettingV3>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dubbing: Option<Box<VoiceProfileDubbingV3>>,
 }
 
+fn legacy_dubbing_schema() -> Object {
+    ObjectBuilder::new()
+        .schema_type(Type::Object)
+        .description(Some(
+            "Original stored provenance, retained by the server during lazy v6 upgrades.",
+        ))
+        .read_only(true)
+        .additional_properties(Some(
+            utoipa::openapi::schema::AdditionalProperties::FreeForm(true),
+        ))
+        .build()
+}
+
+fn deserialize_legacy_dubbing<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Box<serde_json::Value>>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    if !value.is_object() {
+        return Err(serde::de::Error::custom("legacy dubbing must be an object"));
+    }
+    Ok(Some(Box::new(value)))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceProfileDubbingV3 {
-    pub mode: VoiceProfileModeV3,
     pub area: DubbingAreaV3,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub recommendation_order: Vec<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pool_version: Option<VoicePoolVersionV3>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommendation: Option<Box<LocalVoiceRecommendationV3>>,
+    pub uk: VoiceSideDubbingV3,
+    pub us: VoiceSideDubbingV3,
 }
 
-/// Explicit opt-in: historical profiles keep their existing fallback and version semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum VoicePoolVersionV3 {
-    ProviderIdV1,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceSideDubbingV3 {
+    pub mode: VoiceProfileModeV3,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_local_recommendations"
+    )]
+    #[schema(nullable = false, max_items = 2000)]
+    pub recommendations: Option<Vec<LocalVoiceRecommendationV3>>,
 }
 
+/// A selected source contributes one deduplicated voice; sources may share a contribution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LocalVoiceRecommendationV3 {
     pub group_id: Uuid,
-    pub pair_id: Uuid,
-    #[schema(max_items = 2000)]
-    pub voice_ids: Vec<String>,
-    #[schema(max_items = 2000)]
-    pub contribution_ids: Vec<Uuid>,
+    pub recommendation_id: Uuid,
+    pub voice_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_voice_version_id"
+    )]
+    #[schema(nullable = false)]
+    pub contribution_id: Option<Uuid>,
+}
+
+fn deserialize_optional_local_recommendations<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<LocalVoiceRecommendationV3>>, D::Error> {
+    Vec::<LocalVoiceRecommendationV3>::deserialize(deserializer).map(Some)
 }
 
 impl VoiceProfileV3 {
     pub fn is_provider_pool(&self) -> bool {
-        self.dubbing
-            .as_ref()
-            .is_some_and(|value| value.pool_version.is_some())
+        self.dubbing.is_some()
     }
 
-    pub fn mode(&self) -> Option<VoiceProfileModeV3> {
-        self.dubbing.as_ref().map(|value| value.mode)
-    }
-    pub fn area(&self) -> Option<DubbingAreaV3> {
-        self.dubbing.as_ref().map(|value| value.area)
-    }
-    pub fn recommendation_order(&self) -> &[Uuid] {
+    pub fn side(&self, accent: &str) -> Option<&VoiceSideDubbingV3> {
         self.dubbing
             .as_ref()
-            .map_or(&[], |value| value.recommendation_order.as_slice())
+            .map(|d| if accent == "gb" { &d.uk } else { &d.us })
+    }
+    pub fn mode(&self, accent: &str) -> Option<VoiceProfileModeV3> {
+        self.side(accent).map(|s| s.mode)
+    }
+    pub fn has_inheritance(&self) -> bool {
+        ["gb", "us"]
+            .into_iter()
+            .any(|accent| self.mode(accent) == Some(VoiceProfileModeV3::Inherit))
+    }
+    pub fn area(&self) -> Option<DubbingAreaV3> {
+        self.dubbing.as_ref().map(|d| d.area)
     }
 }
 

@@ -27,8 +27,9 @@ impl CurrentPublication {
     /// Availability checks intentionally do not call this: an existing run uses
     /// its own prompt/answer snapshots, not the latest publication's content.
     pub fn content_v3(&self) -> Result<PublishedContentV3, AppError> {
-        let word: AdminWordV3 =
-            serde_json::from_value(self.snapshot.clone()).map_err(AppError::internal)?;
+        let mut snapshot = self.snapshot.clone();
+        crate::lexicon::voice_versions::project_stored_dubbing(&mut snapshot);
+        let word: AdminWordV3 = serde_json::from_value(snapshot).map_err(AppError::internal)?;
         if word.id != self.entry_id {
             return Err(AppError::internal(std::io::Error::other(
                 "publication entry mismatch",

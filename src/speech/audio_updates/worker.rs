@@ -139,7 +139,10 @@ async fn snapshot(conn: &mut sqlx::PgConnection, claim: &Claim) -> Result<(i64, 
         .await
         .map_err(AppError::internal)?
         .ok_or_else(stale)?;
-    Ok((row.get("revision"), row.get("value")))
+    Ok((
+        row.get("revision"),
+        crate::lexicon::voice_versions::stored_dubbing(row.get("value")),
+    ))
 }
 
 async fn renew(pool: &PgPool, claim: &Claim) -> Result<(), AppError> {
@@ -159,6 +162,7 @@ async fn effective(
     source: &GeneratedSpeechSource,
     path: &str,
     dialect: Option<&str>,
+    active: &[&str],
     groups: Option<&[super::super::library::dto::DubbingGroup]>,
 ) -> Result<Vec<VoiceSettingV3>, AppError> {
     let side = match source {
@@ -184,10 +188,11 @@ async fn effective(
         }
     };
     let mut result = vec![];
-    for accent in ["gb", "us"]
-        .into_iter()
-        .filter(|accent| side.is_none_or(|side| side == *accent))
-    {
+    for accent in ["gb", "us"].into_iter().filter(|accent| {
+        active.contains(accent)
+            && side.is_none_or(|side| side == *accent)
+            && profile.mode(accent) == Some(VoiceProfileModeV3::Inherit)
+    }) {
         let locale = if accent == "gb" { "en-GB" } else { "en-US" };
         let content = source.resolve(conn, locale).await?;
         let native = matches!(source, GeneratedSpeechSource::Phoneme { .. }).then_some(locale);
@@ -234,16 +239,21 @@ async fn run(
     let (revision, mut value) = snapshot(&mut conn, claim).await?;
     if !super::super::dubbing::dependencies(&value)
         .iter()
-        .any(|(target, path, _)| *target == claim.target && path == &claim.path)
+        .any(|(target, path, _, _)| *target == claim.target && path == &claim.path)
     {
         return Ok(false);
     }
     let target = value.pointer(&claim.path).ok_or_else(stale)?;
     let profile: VoiceProfileV3 =
         serde_json::from_value(target["voice_profile"].clone()).map_err(AppError::internal)?;
-    if profile.mode() != Some(VoiceProfileModeV3::Inherit) {
+    if !profile.has_inheritance() {
         return Ok(false);
     }
+    let active = super::super::dubbing::business_accents(
+        &value,
+        &claim.path,
+        target.get("dialect").and_then(Value::as_str),
+    );
     let source = super::super::generated_source::source_at(&value, &claim.path)?;
     let mut settings = effective(
         &mut conn,
@@ -251,6 +261,7 @@ async fn run(
         &source,
         &claim.path,
         target.get("dialect").and_then(Value::as_str),
+        &active,
         None,
     )
     .await?;
@@ -290,6 +301,7 @@ async fn run(
             &source,
             &claim.path,
             target.get("dialect").and_then(Value::as_str),
+            &active,
             Some(&groups),
         )
         .await
@@ -396,6 +408,7 @@ async fn run(
             .pointer(&claim.path)
             .and_then(|target| target.get("dialect"))
             .and_then(Value::as_str),
+        &active,
         None,
     )
     .await?;
@@ -422,7 +435,19 @@ async fn run(
             .voices
             .iter()
             .filter(|old| {
-                !old.enabled
+                (!old.enabled
+                    || old.accent_group().is_some_and(|group| {
+                        let accent = match group {
+                            crate::speech::locale::AccentGroup::Uk => Some("gb"),
+                            crate::speech::locale::AccentGroup::Us => Some("us"),
+                            crate::speech::locale::AccentGroup::Other => None,
+                        };
+                        accent.is_none_or(|accent| {
+                            !active.contains(&accent)
+                                || profile.mode(accent) != Some(VoiceProfileModeV3::Inherit)
+                        })
+                    })
+                    || old.accent_group().is_none())
                     && !next
                         .voices
                         .iter()

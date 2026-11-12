@@ -22,6 +22,19 @@ pub struct ResolveDubbingRequest {
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct ResolveDubbingResponse {
     pub voices: Vec<VoiceSettingV3>,
+    pub source: ResolvedDubbingSource,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResolvedDubbingSource {
+    Local,
+    Recommendation {
+        group_id: Uuid,
+        recommendation_id: Uuid,
+        is_global: bool,
+    },
+    Catalog,
 }
 
 #[utoipa::path(post,path="/api/v1/admin/speech/resolve",tag="admin-speech",security(("bearer_auth"=[])),request_body=ResolveDubbingRequest,
@@ -52,7 +65,13 @@ pub async fn resolve(
         "en-US"
     };
     let resolved = request.source.resolve(&mut conn, source_locale).await?;
-    let voices = resolve_in(
+    let groups: Value =
+        sqlx::query_scalar("SELECT groups FROM speech.dubbing_groups WHERE singleton")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(AppError::internal)?;
+    let groups: Vec<DubbingGroup> = serde_json::from_value(groups).map_err(AppError::internal)?;
+    let voices = resolve_in_groups(
         &mut conn,
         &request.profile,
         request.accent.as_str(),
@@ -62,6 +81,7 @@ pub async fn resolve(
             super::generated_source::GeneratedSpeechSource::Phoneme { .. }
         )
         .then_some(source_locale),
+        &groups,
     )
     .await?;
     for voice in &voices {
@@ -70,7 +90,33 @@ pub async fn resolve(
             .resolve(&mut conn, voice.locale.ok_or_else(unavailable)?.as_str())
             .await?;
     }
-    Ok(axum::Json(ResolveDubbingResponse { voices }))
+    let source =
+        if request.profile.mode(request.accent.as_str()) != Some(VoiceProfileModeV3::Inherit) {
+            ResolvedDubbingSource::Local
+        } else {
+            groups
+                .iter()
+                .find_map(|group| {
+                    (if request.accent.as_str() == "gb" {
+                        &group.uk
+                    } else {
+                        &group.us
+                    })
+                    .iter()
+                    .find(|item| {
+                        voices
+                            .first()
+                            .is_some_and(|voice| voice.version_id == Some(item.id))
+                    })
+                    .map(|item| ResolvedDubbingSource::Recommendation {
+                        group_id: group.id,
+                        recommendation_id: item.id,
+                        is_global: group.is_global,
+                    })
+                })
+                .unwrap_or(ResolvedDubbingSource::Catalog)
+        };
+    Ok(axum::Json(ResolveDubbingResponse { voices, source }))
 }
 
 fn unavailable() -> AppError {
@@ -86,7 +132,7 @@ pub fn resolve_profile(
     accent: &str,
     eligible: impl Fn(&VoiceSettingV3) -> bool,
 ) -> Vec<VoiceSettingV3> {
-    let local = if profile.mode() == Some(VoiceProfileModeV3::Inherit) {
+    let local = if profile.mode(accent) == Some(VoiceProfileModeV3::Inherit) {
         vec![]
     } else {
         profile
@@ -97,8 +143,8 @@ pub fn resolve_profile(
             .collect::<Vec<_>>()
     };
     if !local.is_empty()
-        || profile.mode().is_none()
-        || (profile.is_provider_pool() && profile.mode() == Some(VoiceProfileModeV3::Local))
+        || profile.mode(accent).is_none()
+        || profile.mode(accent) == Some(VoiceProfileModeV3::Local)
     {
         return local;
     }
@@ -131,6 +177,7 @@ pub fn resolve_profile(
 
 fn setting(item: &DubbingRecommendation) -> VoiceSettingV3 {
     VoiceSettingV3 {
+        accent: None,
         output_format: None,
         audio_asset_id: None,
         version_id: Some(item.id),
@@ -230,7 +277,8 @@ pub(crate) fn setting_available(
         .is_some_and(|row| {
             let locale = row.get::<String, _>("locale");
             let id = row.get::<String, _>("provider_voice_id");
-            if row.get::<String, _>("accent") != accent
+            if setting.accent.is_some_and(|saved| saved.as_str() != accent)
+                || row.get::<String, _>("accent") != accent
                 || !super::capabilities::synthesis_available(&id, &locale)
                 || native_locale.is_some_and(|required| locale != required)
                 || (phoneme && locale != if accent == "gb" { "en-GB" } else { "en-US" })
@@ -296,46 +344,12 @@ pub(crate) async fn resolve_in_groups(
     let eligible = |setting: &VoiceSettingV3| {
         setting_available(&rows, setting, accent, content, native_locale)
     };
-    let local_selected = profile.mode() != Some(VoiceProfileModeV3::Inherit)
-        && profile.voices.iter().any(|setting| {
-            setting.enabled
-                && rows.iter().any(|row| {
-                    row.get::<String, _>("alias") == setting.voice_id
-                        && row.get::<String, _>("accent") == accent
-                })
-        });
-    if !profile.is_provider_pool()
-        && profile.mode() != Some(VoiceProfileModeV3::Inherit)
-        && profile.voices.iter().any(|setting| {
-            setting.enabled
-                && !rows
-                    .iter()
-                    .any(|row| row.get::<String, _>("alias") == setting.voice_id)
-        })
-    {
-        return Err(unavailable());
-    }
-    if !profile.is_provider_pool()
-        && local_selected
-        && profile.voices.iter().any(|setting| {
-            setting.enabled
-                && rows.iter().any(|row| {
-                    row.get::<String, _>("alias") == setting.voice_id
-                        && row.get::<String, _>("accent") == accent
-                })
-                && !eligible(setting)
-        })
-    {
-        return Err(unavailable());
-    }
     let mut resolved = resolve_profile(profile, groups, accent, eligible);
-    // Retain the historical local-empty behavior until the explicit pool migration.
-    if resolved.is_empty()
-        && !profile.is_provider_pool()
-        && profile.mode() == Some(VoiceProfileModeV3::Local)
-    {
+    // Only inheritance may fall back to a deterministic eligible catalog voice.
+    if resolved.is_empty() && profile.mode(accent) == Some(VoiceProfileModeV3::Inherit) {
         for row in &rows {
             let candidate = VoiceSettingV3 {
+                accent: None,
                 output_format: None,
                 audio_asset_id: None,
                 version_id: Some(row.get("id")),
@@ -362,6 +376,20 @@ pub(crate) async fn resolve_in_groups(
             .find(|row| row.get::<String, _>("alias") == setting.voice_id)
         {
             setting.locale = super::locale::EnglishLocale::parse(&row.get::<String, _>("locale"));
+            if setting.locale.is_some_and(|locale| {
+                locale.accent_group()
+                    != if accent == "gb" {
+                        super::locale::AccentGroup::Uk
+                    } else {
+                        super::locale::AccentGroup::Us
+                    }
+            }) {
+                setting.accent = Some(if accent == "gb" {
+                    super::locale::VoiceAccent::Gb
+                } else {
+                    super::locale::VoiceAccent::Us
+                });
+            }
             if let Some(stored) = profile
                 .voices
                 .iter()
@@ -396,11 +424,7 @@ pub(crate) async fn validate_setting(
         .ok_or_else(unavailable)?;
     let accent = row.get::<String, _>("accent");
     if accent == "none" {
-        return if profile.mode() == Some(VoiceProfileModeV3::Inherit) {
-            Err(unavailable())
-        } else {
-            Ok(())
-        };
+        return Err(unavailable());
     }
     let locale = setting.locale.ok_or_else(unavailable)?;
     let content = source
@@ -543,50 +567,148 @@ pub fn ensure_direct_phonemes_preserved(previous: &Value, next: &Value) -> Resul
     Ok(())
 }
 
-pub fn dependencies(value: &Value) -> Vec<(Uuid, String, DubbingAreaV3)> {
+/// The business source determines active accents; an empty local pool never disables a side.
+pub(crate) fn active_accents<'a>(path: &str, dialect: Option<&str>) -> Vec<&'a str> {
+    match dialect.filter(|side| *side != "common").or_else(|| {
+        path.split('/')
+            .rev()
+            .find(|part| matches!(*part, "uk" | "us"))
+    }) {
+        Some("uk") => vec!["gb"],
+        Some("us") => vec!["us"],
+        _ => vec!["gb", "us"],
+    }
+}
+
+/// Retained source caches do not register automatic synthesis work.
+pub(crate) fn business_accents<'a>(
+    root: &Value,
+    path: &str,
+    dialect: Option<&str>,
+) -> Vec<&'a str> {
+    active_accents(path, dialect)
+        .into_iter()
+        .filter(|accent| {
+            let side = if *accent == "gb" { "uk" } else { "us" };
+            if let Some((candidate_path, field)) = path.rsplit_once('/')
+                && matches!(field, "ipa_speech" | "ups_speech")
+                && let Some(source) = root
+                    .pointer(candidate_path)
+                    .and_then(|candidate| candidate["source"].as_str())
+            {
+                return source == field.trim_end_matches("_speech");
+            }
+            if let Some(variant_path) = path.strip_suffix("/spelling_speech")
+                && let Some(pronunciations) = root
+                    .pointer(variant_path)
+                    .and_then(|variant| variant["pronunciations"].as_array())
+                && pronunciations.iter().any(|pronunciation| {
+                    ["uk", "us"]
+                        .iter()
+                        .any(|side| pronunciation["synthesis"][side]["source"].is_string())
+                })
+            {
+                return pronunciations.iter().any(|pronunciation| {
+                    let synthesis = &pronunciation["synthesis"];
+                    synthesis[side]["source"]
+                        .as_str()
+                        .map_or(synthesis["use_spelling"] == true, |source| {
+                            source == "spelling"
+                        })
+                });
+            }
+            if let Some(owner) = root.pointer(path)
+                && owner["synthesis"][side]["source"].is_string()
+            {
+                // Explicit sources use the dedicated spelling/phoneme owners.
+                return false;
+            }
+            // Legacy recording selection is scoped to its own accent. Explicit
+            // phoneme/spelling sources above remain authoritative over caches.
+            let group = if *accent == "gb" {
+                super::locale::AccentGroup::Uk
+            } else {
+                super::locale::AccentGroup::Us
+            };
+            let mut ancestor = Some(path);
+            while let Some(pointer) = ancestor {
+                if let Some(assets) = root
+                    .pointer(pointer)
+                    .and_then(|owner| owner["audio_assets"].as_array())
+                {
+                    let matches = |asset: &&Value| {
+                        asset["locale"]
+                            .as_str()
+                            .and_then(super::locale::EnglishLocale::parse)
+                            .is_none_or(|locale| locale.accent_group() == group)
+                    };
+                    let choice = assets
+                        .iter()
+                        .filter(matches)
+                        .any(|asset| asset["is_default"].is_boolean());
+                    if assets
+                        .iter()
+                        .filter(matches)
+                        .any(|asset| !choice || asset["is_default"] == true)
+                    {
+                        return false;
+                    }
+                }
+                ancestor = pointer.rsplit_once('/').map(|(parent, _)| parent);
+            }
+            true
+        })
+        .collect()
+}
+
+pub fn dependencies(value: &Value) -> Vec<(Uuid, String, DubbingAreaV3, Vec<String>)> {
     fn walk(
+        root: &Value,
         value: &Value,
         node: Option<Uuid>,
         path: String,
-        recorded: bool,
-        out: &mut Vec<(Uuid, String, DubbingAreaV3)>,
+        out: &mut Vec<(Uuid, String, DubbingAreaV3, Vec<String>)>,
     ) {
-        let recorded = recorded
-            || value
-                .get("audio_assets")
-                .and_then(Value::as_array)
-                .is_some_and(|assets| !assets.is_empty());
         let node = value
             .get("id")
             .and_then(Value::as_str)
             .and_then(|id| Uuid::parse_str(id).ok())
             .or(node);
         if let (Some(node), Some(profile)) = (node, value.get("voice_profile"))
-            && let Ok(profile) = serde_json::from_value::<VoiceProfileV3>(profile.clone())
-            && profile.mode() == Some(VoiceProfileModeV3::Inherit)
-            && !recorded
+            && let Ok(profile) = serde_json::from_value::<VoiceProfileV3>(
+                crate::lexicon::voice_versions::stored_dubbing(profile.clone()),
+            )
+            && profile.has_inheritance()
             && let Some(area) = profile.area()
         {
-            out.push((node, path.clone(), area));
+            let accents =
+                business_accents(root, &path, value.get("dialect").and_then(Value::as_str))
+                    .into_iter()
+                    .filter(|accent| profile.mode(accent) == Some(VoiceProfileModeV3::Inherit))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+            if !accents.is_empty() {
+                out.push((node, path.clone(), area, accents));
+            }
         }
         match value {
             Value::Object(fields) => {
                 for (key, value) in fields {
                     if key != "voice_profile" {
-                        walk(value, node, format!("{path}/{key}"), recorded, out);
+                        walk(root, value, node, format!("{path}/{key}"), out);
                     }
                 }
             }
             Value::Array(items) => {
                 for (index, value) in items.iter().enumerate() {
-                    walk(value, node, format!("{path}/{index}"), recorded, out);
+                    walk(root, value, node, format!("{path}/{index}"), out);
                 }
             }
             _ => {}
         }
     }
     let mut out = vec![];
-    walk(value, None, String::new(), false, &mut out);
+    walk(value, value, None, String::new(), &mut out);
     out
 }
 
@@ -603,8 +725,8 @@ pub async fn replace_dependencies(
         .execute(&mut *conn)
         .await
         .map_err(AppError::internal)?;
-    for (target, path, area) in dependencies(value) {
-        sqlx::query("INSERT INTO speech.dubbing_dependencies(owner_kind,owner_id,target_id,target_path,area,content_revision) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING").bind(kind).bind(owner).bind(target).bind(path).bind(area.as_str()).bind(revision).execute(&mut *conn).await.map_err(AppError::internal)?;
+    for (target, path, area, accents) in dependencies(value) {
+        sqlx::query("INSERT INTO speech.dubbing_dependencies(owner_kind,owner_id,target_id,target_path,area,content_revision,accents) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING").bind(kind).bind(owner).bind(target).bind(path).bind(area.as_str()).bind(revision).bind(accents).execute(&mut *conn).await.map_err(AppError::internal)?;
     }
     Ok(())
 }
@@ -614,10 +736,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn profile(mode: Option<&str>, voices: Value, order: Vec<Uuid>) -> VoiceProfileV3 {
+    fn profile(mode: Option<&str>, voices: Value, _order: Vec<Uuid>) -> VoiceProfileV3 {
         let mut value = json!({"voices":voices});
         if let Some(mode) = mode {
-            value["dubbing"] = json!({"mode":mode,"area":"word","recommendation_order":order});
+            value["dubbing"] = json!({"area":"word","uk":{"mode":mode},"us":{"mode":mode}});
         }
         serde_json::from_value(value).unwrap()
     }
@@ -717,8 +839,6 @@ mod tests {
     #[test]
     fn provider_pool_empty_or_invalid_never_falls_back_and_disabled_cache_is_not_selected() {
         let mut local = profile(Some("local"), json!([]), vec![]);
-        local.dubbing.as_mut().unwrap().pool_version =
-            Some(crate::lexicon::dto::VoicePoolVersionV3::ProviderIdV1);
         let groups = vec![group(
             true,
             vec![recommendation(Uuid::now_v7(), "global", true)],
@@ -738,50 +858,107 @@ mod tests {
             ["b"]
         );
         assert!(resolve_profile(&local, &groups, "gb", |_| false).is_empty());
-        local.dubbing.as_mut().unwrap().pool_version = None;
         local.voices.clear();
-        assert_eq!(
-            resolve_profile(&local, &groups, "gb", |_| true)[0].voice_id,
-            "global"
-        );
+        assert!(resolve_profile(&local, &groups, "gb", |_| true).is_empty());
     }
 
     #[test]
     fn dependencies_only_include_explicit_inheritance_and_exclude_uploaded_audio() {
         let id = Uuid::now_v7();
         let other = Uuid::now_v7();
-        let value = json!([{"id":id,"voice_profile":{"voices":[],"dubbing":{"mode":"inherit","area":"word"}}},{"id":other,"voice_profile":{"voices":[]}},{"id":Uuid::now_v7(),"audio_assets":[{"id":Uuid::now_v7()}],"voice_profile":{"voices":[],"dubbing":{"mode":"inherit","area":"meaning"}}}]);
+        let value = json!([{"id":id,"voice_profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}},{"id":other,"voice_profile":{"voices":[]}},{"id":Uuid::now_v7(),"audio_assets":[{"id":Uuid::now_v7()}],"voice_profile":{"voices":[],"dubbing":{"area":"meaning","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}}]);
         assert_eq!(
             dependencies(&value),
-            vec![(id, "/0".into(), DubbingAreaV3::Word)]
+            vec![(
+                id,
+                "/0".into(),
+                DubbingAreaV3::Word,
+                vec!["gb".into(), "us".into()]
+            )]
         );
     }
     #[test]
+    fn dependencies_only_follow_each_sides_active_source_and_retain_caches() {
+        let id = Uuid::now_v7();
+        let speech = json!({"voice_profile":{"voices":[],"dubbing":{"area":"azure","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}});
+        let mut value = json!({"id":id,"synthesis":{"uk":{"source":"none","ipa_speech":speech,"ups_speech":speech},"us":{"source":"ups","ipa_speech":speech,"ups_speech":speech}}});
+        let expected = vec![(
+            id,
+            "/synthesis/us/ups_speech".into(),
+            DubbingAreaV3::Azure,
+            vec!["us".into()],
+        )];
+        assert_eq!(dependencies(&value), expected);
+        value["synthesis"]["uk"]["source"] = json!("ipa");
+        assert_eq!(dependencies(&value).len(), 2);
+        value["synthesis"]["us"]["source"] = json!("upload");
+        let remaining = dependencies(&value);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].1, "/synthesis/uk/ipa_speech");
+        assert_eq!(remaining[0].3, vec!["gb"]);
+    }
+
+    #[test]
     fn same_pronunciation_ipa_ups_and_accents_have_distinct_dependency_paths() {
         let id = Uuid::now_v7();
-        let speech =
-            json!({"voice_profile":{"voices":[],"dubbing":{"mode":"inherit","area":"azure"}}});
+        let speech = json!({"voice_profile":{"voices":[],"dubbing":{"area":"azure","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}});
         let value = json!({"id":id,"synthesis":{"uk":{"ipa_speech":speech,"ups_speech":speech},"us":{"ipa_speech":speech}}});
         assert_eq!(
             dependencies(&value),
             vec![
-                (id, "/synthesis/uk/ipa_speech".into(), DubbingAreaV3::Azure),
-                (id, "/synthesis/uk/ups_speech".into(), DubbingAreaV3::Azure),
-                (id, "/synthesis/us/ipa_speech".into(), DubbingAreaV3::Azure),
+                (
+                    id,
+                    "/synthesis/uk/ipa_speech".into(),
+                    DubbingAreaV3::Azure,
+                    vec!["gb".into()]
+                ),
+                (
+                    id,
+                    "/synthesis/uk/ups_speech".into(),
+                    DubbingAreaV3::Azure,
+                    vec!["gb".into()]
+                ),
+                (
+                    id,
+                    "/synthesis/us/ipa_speech".into(),
+                    DubbingAreaV3::Azure,
+                    vec!["us".into()]
+                ),
             ]
         );
     }
     #[test]
     fn pronunciation_recordings_exclude_nested_synthesis_but_not_sibling_spelling() {
         let id = Uuid::now_v7();
-        let speech =
-            json!({"voice_profile":{"voices":[],"dubbing":{"mode":"inherit","area":"azure"}}});
-        let value = json!({"id":id,"spelling_speech":{"voice_profile":{"voices":[],"dubbing":{"mode":"inherit","area":"word"}}},"pronunciations":[{"id":Uuid::now_v7(),"audio_assets":[{"id":Uuid::now_v7()}],"synthesis":{"uk":{"ipa_speech":speech,"ups_speech":speech}}}]});
+        let speech = json!({"voice_profile":{"voices":[],"dubbing":{"area":"azure","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}});
+        let value = json!({"id":id,"spelling_speech":{"voice_profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}},"pronunciations":[{"id":Uuid::now_v7(),"audio_assets":[{"id":Uuid::now_v7()}],"synthesis":{"uk":{"ipa_speech":speech,"ups_speech":speech}}}]});
         assert_eq!(
             dependencies(&value),
-            vec![(id, "/spelling_speech".into(), DubbingAreaV3::Word)]
+            vec![(
+                id,
+                "/spelling_speech".into(),
+                DubbingAreaV3::Word,
+                vec!["gb".into(), "us".into()]
+            )]
         );
     }
+    #[test]
+    fn explicit_active_phoneme_keeps_dependency_despite_ancestor_recording_caches() {
+        let id = Uuid::now_v7();
+        let speech = json!({"content":{"version":2,"text":"hello","annotations":[]},"voice_profile":{"voices":[],"dubbing":{"area":"azure","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}});
+        let value = json!({"id":id,"audio_assets":[{"id":Uuid::now_v7(),"locale":"en-US","is_default":true},{"id":Uuid::now_v7(),"locale":"en-GB","is_default":false}],
+            "synthesis":{"uk":{"source":"ipa","ipa":"həloʊ","ups":"","ipa_speech":speech},"us":{"source":"upload","ipa_speech":speech}}});
+        assert_eq!(
+            dependencies(&value),
+            vec![(
+                id,
+                "/synthesis/uk/ipa_speech".into(),
+                DubbingAreaV3::Azure,
+                vec!["gb".into()]
+            )]
+        );
+    }
+
     #[test]
     fn direct_phoneme_guard_preserves_history_and_normal_synthesis_configuration() {
         let mark = json!({"type":"phoneme","start":0,"end":3,"alphabet":"ipa","phoneme":"kæt"});

@@ -2427,6 +2427,14 @@ impl LexiconService {
         crate::lexicon::shared_forms::ensure_write(&compatibility_forms, &input.content)?;
         preserve_missing_component_usages(&mut input.content, &compatibility_forms)?;
         preserve_missing_spelling_rich(&mut input.content, &compatibility_forms);
+        // Preserve omission state before any provenance backfill needs a DTO round trip.
+        let mut raw = serde_json::to_value(&input.content).map_err(serialization_error)?;
+        if crate::lexicon::voice_versions::preserve_legacy_dubbing(
+            &serde_json::to_value(&compatibility_forms).map_err(serialization_error)?,
+            &mut raw,
+        )? {
+            input.content = serde_json::from_value(raw).map_err(serialization_error)?;
+        }
         crate::speech::dubbing::ensure_direct_phonemes_preserved(
             &serde_json::to_value(&compatibility_forms).map_err(serialization_error)?,
             &serde_json::to_value(&input.content).map_err(serialization_error)?,
@@ -2871,6 +2879,13 @@ impl LexiconService {
         preserve_missing_sense_component_usages(&mut content, &compatibility_meanings);
         super::text_links::preserve_missing(&mut content, &compatibility_meanings)?;
         super::grammar_form_links::preserve_missing(&mut content, &compatibility_meanings)?;
+        let mut raw = serde_json::to_value(&content).map_err(serialization_error)?;
+        if crate::lexicon::voice_versions::preserve_legacy_dubbing(
+            &serde_json::to_value(&compatibility_meanings).map_err(serialization_error)?,
+            &mut raw,
+        )? {
+            content = serde_json::from_value(raw).map_err(serialization_error)?;
+        }
         crate::speech::dubbing::ensure_direct_phonemes_preserved(
             &serde_json::to_value(&compatibility_meanings).map_err(serialization_error)?,
             &serde_json::to_value(&content).map_err(serialization_error)?,

@@ -1,9 +1,4 @@
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, header},
-    response::IntoResponse,
-};
+use axum::{Json, extract::State, http::HeaderMap, response::IntoResponse};
 
 use crate::{
     admin::{AdminAuth, authorization::require_active_admin},
@@ -14,74 +9,121 @@ use crate::{
 
 use super::{VoiceLibraryRepository, dto::*};
 
-#[utoipa::path(
-    get, path = "/api/v1/admin/speech/groups", tag = "admin-speech",
-    security(("bearer_auth" = [])),
-    params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型分组"), ("X-TSZ-Dubbing-Groups"=Option<String>,Header,description="v3 返回显式英美配对或待整理历史项及 order_revision；v2 返回单侧列表；缺省保持旧表示")),
-    responses((status = 200, body = DubbingGroupsReadResponse), (status = 401), (status = 403))
-)]
+const GROUPS_HEADER: &str = "x-tsz-dubbing-groups";
+
+fn require_independent_groups(headers: &HeaderMap) -> Result<(), AppError> {
+    if headers
+        .get(GROUPS_HEADER)
+        .is_some_and(|value| value == "v4")
+    {
+        return Ok(());
+    }
+    Err(AppError::conflict(
+        crate::error::ErrorCode::UnsupportedSchemaVersion,
+        Some("groups"),
+        "配音分组需要 X-TSZ-Dubbing-Groups: v4，请刷新新版客户端后重试",
+    ))
+}
+
+/// Gate before JSON decoding so paired legacy requests get an explicit upgrade error.
+pub struct IndependentDubbingGroups;
+
+impl axum::extract::FromRequestParts<AppState> for IndependentDubbingGroups {
+    type Rejection = AppError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth = <AdminAuth as axum::extract::FromRequestParts<AppState>>::from_request_parts(
+            parts, state,
+        )
+        .await?;
+        require_active_admin(state, &auth).await?;
+        require_independent_groups(&parts.headers)?;
+        Ok(Self)
+    }
+}
+
+#[utoipa::path(get,path="/api/v1/admin/speech/groups",tag="admin-speech",security(("bearer_auth"=[])),
+    params(("X-TSZ-Dubbing-Groups"=Option<String>,Header,description="v4 返回独立单侧列表；v3 仅返回 legacy 单侧只读表示，不能写入")),
+    responses((status=200,body=DubbingGroupsReadResponse),(status=401),(status=403),(status=409)))]
 pub async fn groups(
     State(state): State<AppState>,
     auth: AdminAuth,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, AppError> {
     require_active_admin(&state, &auth).await?;
-    if paired_supported(&headers) {
-        let result = VoiceLibraryRepository::new(state.pool)
-            .groups_v3(auth.subject)
-            .await?;
-        return Ok((
-            [(header::VARY, "x-tsz-dubbing-groups, x-tsz-voice-models")],
-            Json(result),
-        )
-            .into_response());
-    }
+    let legacy = headers
+        .get(GROUPS_HEADER)
+        .is_some_and(|value| value == "v3");
     let result = VoiceLibraryRepository::new(state.pool)
         .groups(auth.subject)
         .await?;
-    let mut value = serde_json::to_value(result).map_err(AppError::internal)?;
-    if headers
-        .get("x-tsz-dubbing-groups")
-        .is_none_or(|value| value != "v2")
-        && let Some(groups) = value["groups"].as_array_mut()
+    let response = if legacy {
+        DubbingGroupsReadResponse::Legacy(LegacyDubbingGroupsResponse {
+            revision: result.revision,
+            order_revision: result.order_revision,
+            groups: result
+                .groups
+                .into_iter()
+                .map(|g| LegacyDubbingGroup {
+                    id: g.id,
+                    name: g.name,
+                    areas: g.areas,
+                    revision: g.revision,
+                    is_global: g.is_global,
+                    recommendations: LegacySideRecommendations::Legacy { uk: g.uk, us: g.us },
+                })
+                .collect(),
+        })
+    } else if headers
+        .get(GROUPS_HEADER)
+        .is_some_and(|value| value == "v4")
     {
-        groups.retain(|group| group["is_global"] != true);
-        for group in groups {
-            let fields = group.as_object_mut().expect("group object");
-            fields.remove("revision");
-            fields.remove("is_global");
-            for key in ["uk", "us"] {
-                if let Some(items) = fields
-                    .get_mut(key)
-                    .and_then(serde_json::Value::as_array_mut)
-                {
-                    items.retain(|item| item["selected"] == true);
-                    for item in items {
-                        item.as_object_mut()
-                            .expect("recommendation object")
-                            .remove("selected");
-                    }
-                }
-            }
-        }
-    }
-    Ok((
-        [(header::VARY, "x-tsz-dubbing-groups, x-tsz-voice-models")],
-        Json(value),
-    )
-        .into_response())
+        DubbingGroupsReadResponse::Independent(result)
+    } else {
+        let v2 = headers
+            .get(GROUPS_HEADER)
+            .is_some_and(|value| value == "v2");
+        let side = |items: Vec<DubbingRecommendation>| {
+            items.into_iter()
+            .filter(|item| v2 || item.selected)
+            .map(|item| if v2 { serde_json::json!(item) } else {
+                serde_json::json!({"id":item.id,"name":item.name,"voice_alias":item.voice_alias,"parameters":item.parameters})
+            }).collect()
+        };
+        DubbingGroupsReadResponse::Unversioned(UnversionedDubbingGroupsResponse {
+            revision: result.revision,
+            groups: result
+                .groups
+                .into_iter()
+                .filter(|group| v2 || !group.is_global)
+                .map(|g| UnversionedDubbingGroup {
+                    id: g.id,
+                    name: g.name,
+                    areas: g.areas,
+                    uk: side(g.uk),
+                    us: side(g.us),
+                    revision: v2.then_some(g.revision),
+                    is_global: v2.then_some(g.is_global),
+                })
+                .collect(),
+        })
+    };
+    Ok(([("vary", GROUPS_HEADER)], Json(response)).into_response())
 }
 
 #[utoipa::path(
     put, path = "/api/v1/admin/speech/groups", tag = "admin-speech",
     security(("bearer_auth" = [])), request_body = SaveDubbingGroupsRequest,
-    params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型分组")),
+    params(("X-TSZ-Dubbing-Groups" = String, Header, description = "v4 独立单侧分组写入；旧版本只读并拒绝写入", example = "v4"), ("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型分组")),
     responses((status = 200, body = DubbingGroupsResponse), (status = 400), (status = 401),
         (status = 403), (status = 404), (status = 409), (status = 422))
 )]
 pub async fn save_groups(
     State(state): State<AppState>,
     auth: AdminAuth,
+    _protocol: IndependentDubbingGroups,
     _headers: HeaderMap,
     ApiJson(request): ApiJson<SaveDubbingGroupsRequest>,
 ) -> Result<Json<DubbingGroupsResponse>, AppError> {
@@ -95,15 +137,17 @@ pub async fn save_groups(
 
 #[utoipa::path(
     put, path = "/api/v1/admin/speech/groups/order", tag = "admin-speech", security(("bearer_auth"=[])),
+    params(("X-TSZ-Dubbing-Groups" = String, Header, description = "v4 独立单侧分组写入；旧版本只读并拒绝写入", example = "v4")),
     request_body = SaveDubbingGroupOrderRequest,
-    responses((status=200,body=DubbingGroupsV3Response),(status=400),(status=401),(status=403),(status=409),(status=422))
+    responses((status=200,body=DubbingGroupsResponse),(status=400),(status=401),(status=403),(status=409),(status=422))
 )]
 pub async fn save_order(
     State(state): State<AppState>,
     auth: AdminAuth,
+    _protocol: IndependentDubbingGroups,
     headers: HeaderMap,
     ApiJson(request): ApiJson<SaveDubbingGroupOrderRequest>,
-) -> Result<Json<DubbingGroupsV3Response>, AppError> {
+) -> Result<Json<DubbingGroupsResponse>, AppError> {
     require_active_admin(&state, &auth).await?;
     let (_, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     Ok(Json(
@@ -116,35 +160,34 @@ pub async fn save_order(
 
 #[utoipa::path(
     post, path = "/api/v1/admin/speech/groups", tag = "admin-speech", security(("bearer_auth"=[])),
-    request_body = DubbingGroupWriteRequest,
-    params(("X-TSZ-Dubbing-Groups"=Option<String>,Header,description="v3 用于配对推荐")),
-    responses((status=200,body=DubbingGroupsReadResponse),(status=400),(status=403),(status=409),(status=422))
+    params(("X-TSZ-Dubbing-Groups" = String, Header, description = "v4 独立单侧分组写入；旧版本只读并拒绝写入", example = "v4")),
+    request_body = SaveDubbingGroupRequest,
+    responses((status=200,body=DubbingGroupsResponse),(status=400),(status=403),(status=409),(status=422))
 )]
 pub async fn create_group(
     State(state): State<AppState>,
     auth: AdminAuth,
+    _protocol: IndependentDubbingGroups,
     headers: HeaderMap,
-    ApiJson(request): ApiJson<DubbingGroupWriteRequest>,
-) -> Result<Json<DubbingGroupsReadResponse>, AppError> {
+    ApiJson(request): ApiJson<SaveDubbingGroupRequest>,
+) -> Result<Json<DubbingGroupsResponse>, AppError> {
     write_group(state, auth, headers, request, true).await
 }
 
 #[utoipa::path(
     put, path = "/api/v1/admin/speech/groups/{id}", tag = "admin-speech", security(("bearer_auth"=[])),
-    params(("id"=uuid::Uuid,Path),("X-TSZ-Dubbing-Groups"=Option<String>,Header,description="v3 用于配对推荐")), request_body = DubbingGroupWriteRequest,
-    responses((status=200,body=DubbingGroupsReadResponse),(status=400),(status=403),(status=409),(status=422))
+    params(("X-TSZ-Dubbing-Groups" = String, Header, description = "v4 独立单侧分组写入；旧版本只读并拒绝写入", example = "v4"), ("id"=uuid::Uuid,Path)), request_body = SaveDubbingGroupRequest,
+    responses((status=200,body=DubbingGroupsResponse),(status=400),(status=403),(status=409),(status=422))
 )]
 pub async fn save_group(
     State(state): State<AppState>,
     auth: AdminAuth,
+    _protocol: IndependentDubbingGroups,
     ApiPath(id): ApiPath<uuid::Uuid>,
     headers: HeaderMap,
-    ApiJson(request): ApiJson<DubbingGroupWriteRequest>,
-) -> Result<Json<DubbingGroupsReadResponse>, AppError> {
-    let group_id = match &request {
-        DubbingGroupWriteRequest::Legacy(input) => input.group.id,
-        DubbingGroupWriteRequest::Paired(input) => input.group.id,
-    };
+    ApiJson(request): ApiJson<SaveDubbingGroupRequest>,
+) -> Result<Json<DubbingGroupsResponse>, AppError> {
+    let group_id = request.group.id;
     if id != group_id {
         return Err(crate::error::AppError::bad_request(
             crate::error::ErrorCode::InvalidRequestBody,
@@ -154,67 +197,42 @@ pub async fn save_group(
     write_group(state, auth, headers, request, false).await
 }
 
-fn paired_supported(headers: &HeaderMap) -> bool {
-    headers
-        .get("x-tsz-dubbing-groups")
-        .is_some_and(|value| value == "v3")
-}
-
 async fn write_group(
     state: AppState,
     auth: AdminAuth,
     headers: HeaderMap,
-    request: DubbingGroupWriteRequest,
+    request: SaveDubbingGroupRequest,
     create: bool,
-) -> Result<Json<DubbingGroupsReadResponse>, AppError> {
+) -> Result<Json<DubbingGroupsResponse>, AppError> {
     require_active_admin(&state, &auth).await?;
     let (_, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     let repo = VoiceLibraryRepository::new(state.pool).with_test_run(run);
-    let result = match (paired_supported(&headers), request) {
-        (true, DubbingGroupWriteRequest::Paired(input)) => DubbingGroupsReadResponse::Paired(
-            repo.save_paired_group(auth.subject, auth.security_version, input, create)
-                .await?,
-        ),
-        (false, DubbingGroupWriteRequest::Legacy(input)) => DubbingGroupsReadResponse::Legacy(
-            repo.save_group(auth.subject, auth.security_version, input, create)
-                .await?,
-        ),
-        _ => {
-            return Err(AppError::bad_request(
-                crate::error::ErrorCode::InvalidRequestBody,
-                "配对请求必须使用 X-TSZ-Dubbing-Groups: v3",
-            ));
-        }
-    };
+    let result = repo
+        .save_group(auth.subject, auth.security_version, request, create)
+        .await?;
     Ok(Json(result))
 }
 
 #[utoipa::path(
     delete, path = "/api/v1/admin/speech/groups/{id}", tag = "admin-speech", security(("bearer_auth"=[])),
-    params(("id"=uuid::Uuid,Path),("X-TSZ-Dubbing-Groups"=Option<String>,Header,description="v3 删除配对组")), request_body = DeleteDubbingGroupRequest,
-    responses((status=200,body=DubbingGroupsReadResponse),(status=400),(status=403),(status=404),(status=409),(status=422))
+    params(("X-TSZ-Dubbing-Groups" = String, Header, description = "v4 独立单侧分组写入；旧版本只读并拒绝写入", example = "v4"), ("id"=uuid::Uuid,Path)), request_body = DeleteDubbingGroupRequest,
+    responses((status=200,body=DubbingGroupsResponse),(status=400),(status=403),(status=404),(status=409),(status=422))
 )]
 pub async fn delete_group(
     State(state): State<AppState>,
     auth: AdminAuth,
+    _protocol: IndependentDubbingGroups,
     ApiPath(id): ApiPath<uuid::Uuid>,
     headers: HeaderMap,
     ApiJson(request): ApiJson<DeleteDubbingGroupRequest>,
-) -> Result<Json<DubbingGroupsReadResponse>, AppError> {
+) -> Result<Json<DubbingGroupsResponse>, AppError> {
     require_active_admin(&state, &auth).await?;
     let (_, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     let repo = VoiceLibraryRepository::new(state.pool).with_test_run(run);
-    Ok(Json(if paired_supported(&headers) {
-        DubbingGroupsReadResponse::Paired(
-            repo.delete_paired_group(auth.subject, auth.security_version, id, request)
-                .await?,
-        )
-    } else {
-        DubbingGroupsReadResponse::Legacy(
-            repo.delete_group(auth.subject, auth.security_version, id, request)
-                .await?,
-        )
-    }))
+    Ok(Json(
+        repo.delete_group(auth.subject, auth.security_version, id, request)
+            .await?,
+    ))
 }
 
 #[utoipa::path(
