@@ -5,3 +5,5 @@ pub mod router;
 pub mod service;
 
 pub mod form_types;
+
+pub mod taxonomies;

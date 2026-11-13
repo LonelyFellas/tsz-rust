@@ -384,8 +384,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "lexicon_settings.access",
         "lexicon_settings",
-        "查看全部词性配置",
-        "可以查看平台已经配置好的全部词性，包括基本词性、细分词性和词形变化",
+        "查看词库配置",
+        "查看基本词性、细分词性、词形变化、语体色彩和行业领域配置",
         "page",
         [],
         "low"
@@ -418,10 +418,18 @@ pub const CATALOG: &[PermissionDefinition] = &[
         "high"
     ),
     permission!(
+        "lexicon_settings.edit_taxonomies",
+        "lexicon_settings",
+        "编辑语体色彩和行业领域",
+        "action",
+        ["lexicon_settings.access"],
+        "high"
+    ),
+    permission!(
         "lexicon_settings.delete",
         "lexicon_settings",
-        "删除词性或词形",
-        "可以删除平台已经配置好的细分词性和词形变化；基本词性仅超级管理员可删除",
+        "删除词库配置",
+        "删除细分词性、词形变化、语体色彩和行业领域；基本词性仅超级管理员可删除",
         "action",
         ["lexicon_settings.access"],
         "high"

@@ -453,6 +453,26 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "GET",
+        "/lexicon/taxonomies/{kind}",
+        RoutePolicy::All(&["lexicon_settings.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon/taxonomies/{kind}",
+        RoutePolicy::All(&["lexicon_settings.edit_taxonomies"]),
+    ),
+    (
+        "PATCH",
+        "/lexicon/taxonomies/{kind}/{id}",
+        RoutePolicy::All(&["lexicon_settings.edit_taxonomies"]),
+    ),
+    (
+        "DELETE",
+        "/lexicon/taxonomies/{kind}/{id}",
+        RoutePolicy::All(&["lexicon_settings.delete"]),
+    ),
+    (
+        "GET",
         "/settings/parts-of-speech",
         RoutePolicy::All(&["lexicon_settings.access"]),
     ),
@@ -997,6 +1017,10 @@ mod tests {
             (
                 include_str!("../catalog/form_types.rs"),
                 "/settings/form-types",
+            ),
+            (
+                include_str!("../catalog/taxonomies/mod.rs"),
+                "/lexicon/taxonomies",
             ),
             (include_str!("../lexicon/router.rs"), "/lexicon"),
             (include_str!("../lexicon_next/mod.rs"), "/lexicon-next"),

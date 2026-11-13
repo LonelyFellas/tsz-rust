@@ -13,6 +13,7 @@ pub fn router(_state: AppState) -> Router<AppState> {
     let business = Router::new()
         .nest("/settings/parts-of-speech", catalog::router::router())
         .nest("/settings/form-types", catalog::form_types::router())
+        .nest("/lexicon/taxonomies", catalog::taxonomies::router())
         .nest("/lexicon", lexicon::router::router())
         .nest("/lexicon-next", crate::lexicon_next::router())
         .nest("/speech", speech::preview::router::router());
