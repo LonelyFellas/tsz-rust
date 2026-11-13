@@ -160,15 +160,40 @@ fn add_selected(
             )
         })
         .collect();
+    let recorded = |group| {
+        assets.iter().any(|asset| {
+            asset["locale"]
+                .as_str()
+                .and_then(super::locale::EnglishLocale::parse)
+                .is_none_or(|locale| Some(locale.accent_group()) == group)
+        })
+    };
+    let voice_accents = accents
+        .iter()
+        .copied()
+        .filter(|accent| {
+            !recorded(Some(if *accent == "gb" {
+                AccentGroup::Uk
+            } else {
+                AccentGroup::Us
+            }))
+        })
+        .collect::<Vec<_>>();
+    // Review and capability checks must not resolve inheritance on a recorded side.
+    let voice_dialect = match voice_accents.as_slice() {
+        ["gb"] if !assets.is_empty() => Some(crate::lexicon::dto::Dialect::Uk),
+        ["us"] if !assets.is_empty() => Some(crate::lexicon::dto::Dialect::Us),
+        _ => source_dialect,
+    };
     if let Some(voices) = owner
         .pointer("/voice_profile/voices")
         .and_then(Value::as_array)
-        .filter(|_| assets.is_empty())
+        .filter(|_| !voice_accents.is_empty())
     {
         let profile: VoiceProfileV3 =
             serde_json::from_value(owner["voice_profile"].clone()).map_err(AppError::internal)?;
         let profile = Arc::new(profile);
-        for accent in accents.iter().copied() {
+        for accent in voice_accents {
             if profile.dubbing.is_none()
                 || profile.voices.iter().any(|voice| {
                     voice.enabled
@@ -188,7 +213,7 @@ fn add_selected(
                 target_id: target,
                 content_id: content,
                 source_path: path.into(),
-                source_dialect,
+                source_dialect: voice_dialect,
                 default_for: vec![if accent == "gb" {
                     AccentGroup::Uk
                 } else {
@@ -204,7 +229,7 @@ fn add_selected(
         for setting in voices.iter().filter(|v| v["enabled"] == true) {
             let setting: VoiceSettingV3 =
                 serde_json::from_value(setting.clone()).map_err(AppError::internal)?;
-            if !in_scope(setting.accent_group()) {
+            if !in_scope(setting.accent_group()) || recorded(setting.accent_group()) {
                 continue;
             }
             let source = source_at(root, path).ok();
@@ -219,7 +244,7 @@ fn add_selected(
                 target_id: target,
                 content_id: content,
                 source_path: path.into(),
-                source_dialect,
+                source_dialect: voice_dialect,
                 default_for: vec![],
                 asset_id: setting.audio_asset_id,
                 setting: Some(setting),
@@ -779,6 +804,54 @@ mod tests {
             assert_eq!(items[0].asset_id, Some(uk_audio));
             assert!(items[0].issue.is_none());
             assert_eq!(value, before, "collection must preserve both caches");
+        }
+    }
+
+    #[test]
+    fn common_text_recording_does_not_hide_the_other_accents_missing_audio() {
+        let recording = Uuid::now_v7();
+        let generated = Uuid::now_v7();
+        for selected in [false, true] {
+            let mut value = json!({"mode":"unified","common":{
+                "id":Uuid::now_v7(),"origin":"manual",
+                "value":{"version":2,"text":"Hello","annotations":[]},
+                "voice_profile":{"voices":[voice("en-GB",true,None)],
+                    "dubbing":{"area":"example","uk":{"mode":"inherit"},"us":{"mode":"local"}}},
+                "audio_assets":[{"id":recording,"locale":"en-GB","gender":"female",
+                    "content_type":"audio/mpeg","size_bytes":3,"original_name":"recording.mp3",
+                    "created_at":"2026-11-13T01:00:00Z"}]
+            }});
+            if selected {
+                value["common"]["voice_profile"]["voices"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(voice("en-US", true, None));
+            }
+            let requirements = |value: &Value| {
+                sentence_requirements(&serde_json::from_value(value.clone()).unwrap()).unwrap()
+            };
+            let items = requirements(&value);
+            assert_eq!(items.len(), 2, "one recording cannot cover both accents");
+            let missing = items.iter().find(|item| item.issue.is_some()).unwrap();
+            assert!(if selected {
+                matches!(missing.issue, Some(RequirementIssue::MissingAsset))
+            } else {
+                matches!(missing.issue, Some(RequirementIssue::MissingConfiguration))
+            });
+            assert_eq!(
+                missing.source_dialect,
+                Some(crate::lexicon::dto::Dialect::Us)
+            );
+            assert!(items.iter().any(|item| item.asset_id == Some(recording)));
+
+            value["common"]["voice_profile"]["voices"] = json!([
+                voice("en-GB", true, None),
+                voice("en-US", true, Some(generated))
+            ]);
+            let ready = requirements(&value);
+            assert_eq!(ready.len(), 2);
+            assert!(ready.iter().all(|item| item.issue.is_none()));
+            assert!(ready.iter().any(|item| item.asset_id == Some(generated)));
         }
     }
 
