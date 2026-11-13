@@ -34,7 +34,7 @@ use tsz_rust::admin::{AdminRepository, AdminRole, NewAdmin};
 use tsz_rust::auth::{Realm, TokenManager};
 use tsz_rust::state::AppState;
 
-const EXPECTED_PERMISSION_KEYS: [&str; 49] = [
+const EXPECTED_PERMISSION_KEYS: [&str; 50] = [
     "wordlists.access",
     "wordlists.visibility",
     "wordlists.recommend",
@@ -80,6 +80,7 @@ const EXPECTED_PERMISSION_KEYS: [&str; 49] = [
     "lexicon_settings.edit_basic",
     "lexicon_settings.edit_sub",
     "lexicon_settings.edit_forms",
+    "lexicon_settings.edit_taxonomies",
     "lexicon_settings.delete",
     "speech.global_dubbing",
     "speech.generate",

@@ -114,6 +114,7 @@ EXPECTED_TARGETS = {
         "coins_schema",
         "catalog_handler",
         "catalog_schema",
+        "catalog_taxonomies",
         "health",
         "object_storage",
         "object_storage_oss_smoke",

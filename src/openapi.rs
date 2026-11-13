@@ -269,6 +269,10 @@ use utoipa::{
         crate::admin::accounts::handler::set_user_status,
         crate::admin::accounts::handler::update_user,
         // catalog 域
+        crate::catalog::taxonomies::list,
+        crate::catalog::taxonomies::create,
+        crate::catalog::taxonomies::update,
+        crate::catalog::taxonomies::remove,
         crate::catalog::handler::catalog,
         crate::catalog::form_types::list,
         crate::catalog::form_types::create,
@@ -495,6 +499,11 @@ use utoipa::{
             crate::dashboard::dto::DashboardCoinFlowPoint,
             crate::dashboard::dto::DashboardLearningProgress,
             // catalog
+            crate::catalog::taxonomies::model::LexiconTaxonomy,
+            crate::catalog::taxonomies::model::LexiconTaxonomyKind,
+            crate::catalog::taxonomies::model::CreateTaxonomyRequest,
+            crate::catalog::taxonomies::model::UpdateTaxonomyRequest,
+            crate::api::PaginatedResponse<crate::catalog::taxonomies::model::LexiconTaxonomy>,
             crate::catalog::model::Actor,
             crate::catalog::model::CatalogResponse,
             crate::catalog::model::CatalogPart,

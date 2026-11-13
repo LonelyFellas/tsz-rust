@@ -87,6 +87,7 @@ pub enum ErrorCode {
     SubPartOfSpeechNotFound,
     PartOfSpeechConflict,
     SubPartOfSpeechConflict,
+    TaxonomyConflict,
     AnnotationConflict,
     RevisionConflict,
     CefrLevelLocked,
@@ -165,7 +166,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 144] = [
+    pub const ALL: [Self; 145] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -242,6 +243,7 @@ impl ErrorCode {
         Self::SubPartOfSpeechNotFound,
         Self::PartOfSpeechConflict,
         Self::SubPartOfSpeechConflict,
+        Self::TaxonomyConflict,
         Self::AnnotationConflict,
         Self::RevisionConflict,
         Self::CefrLevelLocked,
@@ -692,6 +694,11 @@ impl ErrorCode {
             Self::SubPartOfSpeechConflict => (
                 "sub_part_of_speech_conflict",
                 "Sub part of speech conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::TaxonomyConflict => (
+                "taxonomy_conflict",
+                "Taxonomy value conflict",
                 StatusCode::CONFLICT,
             ),
             Self::AnnotationConflict => (

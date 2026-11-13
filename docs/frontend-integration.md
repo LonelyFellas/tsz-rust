@@ -384,3 +384,9 @@ Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写�
 - 本任务新增 `20261112090000_dubbing_side_dependencies`；up 只给已有依赖加双侧默认值，后续保存精确登记继承侧。down 在存在单侧依赖时拒绝有损回退；新逐侧写入也不能假定旧二进制可读，发布必须依据实际基线的隔离演练及批准恢复策略。后端先提供兼容只读及旧写保护，再启用配套 v6 客户端的新写入；完整新旧组合仍以配套验证回执为准。
 
 TASK#190 与后续 #402 的耦合：录音 `is_default` 保留 absent／true／false 三态；显式取消不得变回旧 fallback。无显式 v6 source 的旧数据继续采用 #402 的录音优先与取消规则；v6 显式 IPA／UPS／spelling／none 不被其他源的缓存录音覆盖。upload 活动源若本侧已明确取消全部录音，保存／发布拒绝空池，不改选别的取消缓存；未设置选用状态的旧数据保留兼容初值。
+
+## 语体色彩与行业领域配置
+
+新增独立管理目录 API：`/api/v1/admin/lexicon/taxonomies/{kind}`，类别为 `registers` / `domains`；GET 分页搜索、POST 新建、PATCH `/{id}` 修改、DELETE `/{id}?base_revision=` 删除。修改也须发送 `base_revision`。读取沿用 `lexicon_settings.access`，新增/编辑使用 `lexicon_settings.edit_taxonomies`，删除沿用 `lexicon_settings.delete`；写入会在事务内重新核实授权。
+
+迁移 `20261113150000_lexicon_taxonomies` 仅新增目录表，尚未接入词条/译词/例句引用。配套前端任务主记录见 tsz 仓库 `docs/features/lexicon-taxonomies/README.md`，包含范围、错误契约、兼容顺序、验证与清理；不在此重复维护任务状态。

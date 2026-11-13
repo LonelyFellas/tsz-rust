@@ -82,6 +82,7 @@ pub fn title(code: ErrorCode, locale: Locale) -> &'static str {
         SubPartOfSpeechNotFound => ("细分词性不存在", "找不到細分詞性"),
         PartOfSpeechConflict => ("词性已存在", "詞性已存在"),
         SubPartOfSpeechConflict => ("细分词性已存在", "細分詞性已存在"),
+        TaxonomyConflict => ("同类别的编码或名称已存在", "同類別的編碼或名稱已存在"),
         AnnotationConflict => ("词条标注需要确认", "詞條標註需要確認"),
         RevisionConflict => ("内容版本已变化", "內容版本已變更"),
         CefrLevelLocked => ("初始 CEFR 等级已锁定", "初始 CEFR 等級已鎖定"),
