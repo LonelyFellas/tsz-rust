@@ -117,6 +117,7 @@ pub async fn create(
         headword: input.headword,
         forms: vec![],
         senses: vec![],
+        form_editor: None,
     };
     snapshot(&mut tx, id, 1, auth.subject, &draft).await?;
     let result = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
@@ -169,7 +170,7 @@ pub async fn save(
     pool: &PgPool,
     auth: &AdminAuth,
     id: Uuid,
-    input: SaveNextDraft,
+    mut input: SaveNextDraft,
 ) -> Result<NextEntry, AppError> {
     if input.expected_revision < 1 {
         return Err(language::invalid());
@@ -203,9 +204,33 @@ pub async fn save(
         ));
     }
     let conn = &mut *tx;
-    let draft = &input.draft;
+    let draft = &mut input.draft;
     let actor = auth.subject;
     language::validate(&language, draft)?;
+    let previous = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(AppError::internal)?
+        .entry()?;
+    if previous.draft.form_editor.is_some() && draft.form_editor.is_none() {
+        return Err(crate::lexicon::shared_forms::upgrade_error());
+    }
+    if let Some(editor) = &draft.form_editor {
+        let forms = editor
+            .clone()
+            .resolve()
+            .map_err(|error| error.into_app_error())?;
+        let kind = match previous.kind {
+            NextEntryKind::Word => "word",
+            NextEntryKind::Phrase => "phrase",
+        };
+        crate::lexicon::service::v3::resolve_v3_catalog_parts(&mut tx, &forms, kind)
+            .await
+            .map_err(crate::lexicon::handler::map_error)?;
+    }
+    let conn = &mut *tx;
+    super::forms::persist(conn, auth.subject, id, draft).await?;
     // Only current content is replaced. Nodes and previous revision snapshots remain intact.
     for sql in [
         "DELETE FROM lexicon_next.equivalents WHERE id IN (SELECT id FROM lexicon_next.nodes WHERE entry_id=$1)",
@@ -219,7 +244,7 @@ pub async fn save(
             .await
             .map_err(AppError::internal)?;
     }
-    for (order, form) in draft.forms.iter().enumerate() {
+    for (order, form) in super::forms::projection(draft)?.iter().enumerate() {
         node(conn, form.id, id, "form", None).await?;
         sqlx::query(
             "INSERT INTO lexicon_next.forms(id,locale,text,sort_order) VALUES($1,$2,$3,$4)",

@@ -4547,7 +4547,7 @@ async fn validate_requested_audio_assets(
                ) OR EXISTS (
                    SELECT 1 FROM lexicon.shared_sentence_audio_asset_references reference
                    WHERE reference.asset_id = asset.id
-               ) AS taken
+               ) OR EXISTS (SELECT 1 FROM lexicon_next.audio_asset_references reference WHERE reference.asset_id=asset.id) AS taken
         FROM lexicon.audio_assets asset
         WHERE asset.id = ANY($1) AND asset.reclamation_started_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=asset.id AND g.state<>'ready')
@@ -5365,7 +5365,7 @@ fn v3_form_node_types(content: &DraftFormsStepContentV3) -> HashMap<Uuid, FormsI
     nodes
 }
 
-async fn resolve_v3_catalog_parts(
+pub(crate) async fn resolve_v3_catalog_parts(
     tx: &mut Transaction<'_, Postgres>,
     content: &DraftFormsStepContentV3,
     entry_kind: &str,

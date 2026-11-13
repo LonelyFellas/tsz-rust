@@ -62,6 +62,14 @@ pub struct NextDraft {
     pub headword: String,
     pub forms: Vec<NextForm>,
     pub senses: Vec<NextSense>,
+    /// V1 editor content, with independent lexicon-next identities.
+    #[serde(
+        default,
+        deserialize_with = "non_null_form_editor",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub form_editor: Option<crate::lexicon::dto::SharedFormsStepContentV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -113,6 +121,9 @@ pub struct NextCapabilities {
     pub manual_drafts: bool,
     pub generation: bool,
     pub publishing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub form_editor: Option<bool>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -180,4 +191,10 @@ pub struct NextEntryView {
     pub forms: Vec<NextForm>,
     pub missing_forms: bool,
     pub senses: Vec<NextSenseView>,
+}
+
+fn non_null_form_editor<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::lexicon::dto::SharedFormsStepContentV3>, D::Error> {
+    crate::lexicon::dto::SharedFormsStepContentV3::deserialize(deserializer).map(Some)
 }

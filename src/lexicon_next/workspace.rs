@@ -26,7 +26,8 @@ pub(super) fn select(medium_locale: Option<&str>) -> QueryBuilder<Postgres> {
     e.annotation,e.annotation_revision,
     EXISTS(SELECT 1 FROM lexicon_next.entries other WHERE {SAME_NAME}) AS annotation_visible,
     ARRAY(SELECT DISTINCT s.part_of_speech FROM lexicon_next.senses s JOIN lexicon_next.nodes n ON n.id=s.id
-      WHERE n.entry_id=e.id AND s.part_of_speech IS NOT NULL ORDER BY s.part_of_speech) AS part_of_speech,
+      WHERE n.entry_id=e.id AND s.part_of_speech IS NOT NULL
+      UNION SELECT p->>'pos' FROM jsonb_array_elements(COALESCE(current.document->'form_editor'->'pos','[]'::jsonb)) p ORDER BY 1) AS part_of_speech,
     COALESCE((SELECT d.text FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id WHERE n.entry_id=e.id
       AND ("#
     ));
@@ -88,7 +89,7 @@ pub(super) fn filter(sql: &mut QueryBuilder<Postgres>, query: &NextWorkspaceQuer
         sql.push(" AND e.kind=").push_bind(kind);
     }
     if let Some(pos) = &query.pos {
-        sql.push(" AND EXISTS(SELECT 1 FROM lexicon_next.senses s JOIN lexicon_next.nodes n ON n.id=s.id WHERE n.entry_id=e.id AND s.part_of_speech=").push_bind(pos).push(")");
+        sql.push(" AND (EXISTS(SELECT 1 FROM lexicon_next.senses s JOIN lexicon_next.nodes n ON n.id=s.id WHERE n.entry_id=e.id AND s.part_of_speech=").push_bind(pos).push(") OR EXISTS(SELECT 1 FROM lexicon_next.draft_revisions r, jsonb_array_elements(COALESCE(r.document->'form_editor'->'pos','[]'::jsonb)) p WHERE r.entry_id=e.id AND r.revision=e.revision AND p->>'pos'=").push_bind(pos).push("))");
     }
     // Language foundation drafts have no CEFR classification yet. Never infer one.
     if query.level.is_some() {
