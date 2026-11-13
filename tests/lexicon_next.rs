@@ -40,11 +40,24 @@ async fn call(
     path: &str,
     body: Value,
 ) -> (StatusCode, Value) {
+    call_with_groups(state, actor, method, path, body, false).await
+}
+async fn call_with_groups(
+    state: &AppState,
+    actor: Option<Uuid>,
+    method: &str,
+    path: &str,
+    body: Value,
+    groups: bool,
+) -> (StatusCode, Value) {
     let mut req = Request::builder()
         .method(method)
         .uri(format!("{ROOT}{path}"))
         .header("content-type", "application/json")
         .header("x-tsz-next-forms", "v1");
+    if groups {
+        req = req.header("x-tsz-next-sense-groups", "v1");
+    }
     if let Some(actor) = actor {
         req = req.header(
             "authorization",
@@ -2087,4 +2100,188 @@ async fn form_editor_recordings_are_canonical_owned_and_protected(pool: PgPool) 
         .await
         .unwrap()
     );
+}
+
+#[sqlx::test]
+async fn sense_groups_round_trip_reorder_detach_and_protect_legacy_clients(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let reader = admin(&pool, &["words.access"]).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let (_, old_caps) = call(&state, Some(actor), "GET", "/capabilities", Value::Null).await;
+    assert!(old_caps.get("sense_groups").is_none());
+    let (_, caps) = call_with_groups(
+        &state,
+        Some(actor),
+        "GET",
+        "/capabilities",
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(caps["sense_groups"], true);
+    let g1 = Uuid::now_v7();
+    let g2 = Uuid::now_v7();
+    let mut content = draft();
+    content["sense_groups"] = json!([{ "id":g1,"name_zh":"位置","name_en":"position" },{ "id":g2,"name_zh":"机构","name_en":"institution" }]);
+    content["senses"][0]["sense_group_id"] = json!(g1);
+    let (status, saved) = call_with_groups(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["draft"], content);
+    let (_, read) = call_with_groups(&state, Some(actor), "GET", &path, Value::Null, true).await;
+    assert_eq!(read["draft"], content);
+    let (_, legacy) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert!(legacy["draft"].get("sense_groups").is_none());
+    assert!(legacy["draft"]["senses"][0].get("sense_group_id").is_none());
+    let (status, _) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":legacy["draft"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = call_with_groups(
+        &state,
+        Some(reader),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    content["sense_groups"].as_array_mut().unwrap().reverse();
+    content["senses"][0]["sense_group_id"] = json!(g2);
+    let (status, saved) = call_with_groups(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, preview) = call_with_groups(
+        &state,
+        Some(actor),
+        "GET",
+        &format!("{path}/view?target_locale=en-US&medium_locale=zh-Hant"),
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["sense_groups"], content["sense_groups"]);
+    assert_eq!(preview["senses"][0]["sense_group_id"], json!(g2));
+    let (status, legacy_view) = call(
+        &state,
+        Some(actor),
+        "GET",
+        &format!("{path}/view?target_locale=en-US&medium_locale=zh-Hant"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(legacy_view.get("sense_groups").is_none());
+    assert!(legacy_view["senses"][0].get("sense_group_id").is_none());
+
+    content["sense_groups"].as_array_mut().unwrap().remove(0);
+    content["senses"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("sense_group_id");
+    let (status, saved) = call_with_groups(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["draft"]["senses"][0]["definitions"],
+        content["senses"][0]["definitions"]
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon_next.nodes WHERE entry_id=$1 AND kind='sense_group'",
+    )
+    .bind(Uuid::parse_str(entry["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 2);
+    let other = create(&state, actor).await;
+    let mut other_content = draft();
+    other_content["sense_groups"] = json!([{ "id":g2,"name_zh":"归属测试","name_en":"ownership" }]);
+    other_content["senses"][0]["sense_group_id"] = json!(g2);
+    let (status, _) = call_with_groups(
+        &state,
+        Some(actor),
+        "PUT",
+        &format!("/entries/{}", other["id"].as_str().unwrap()),
+        json!({"expected_revision":1,"draft":other_content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (_, read) = call_with_groups(&state, Some(actor), "GET", &path, Value::Null, true).await;
+    assert_eq!(read["revision"], 4);
+    assert_eq!(read["draft"], content);
+}
+
+#[sqlx::test]
+async fn sense_groups_migration_reverses_legacy_data_and_refuses_extended_snapshots(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let down = include_str!("../migrations/20261113140000_lexicon_next_sense_groups.down.sql");
+    let up = include_str!("../migrations/20261113140000_lexicon_next_sense_groups.up.sql");
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    let (_, legacy) = call(
+        &state,
+        Some(actor),
+        "GET",
+        &format!("/entries/{}", entry["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(legacy["draft"], entry["draft"]);
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    let mut content = entry["draft"].clone();
+    content["sense_groups"] = json!([{ "id":Uuid::now_v7(),"name_zh":"","name_en":"" }]);
+    let (status, saved) = call_with_groups(
+        &state,
+        Some(actor),
+        "PUT",
+        &format!("/entries/{}", entry["id"].as_str().unwrap()),
+        json!({"expected_revision":1,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert!(sqlx::raw_sql(down).execute(&pool).await.is_err());
+    let (_, read) = call_with_groups(
+        &state,
+        Some(actor),
+        "GET",
+        &format!("/entries/{}", entry["id"].as_str().unwrap()),
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(read["draft"], content);
 }

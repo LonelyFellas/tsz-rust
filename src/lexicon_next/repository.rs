@@ -113,6 +113,7 @@ pub async fn create(
     sqlx::query("INSERT INTO lexicon_next.entries(id,target_language,kind,headword,owner_id,revision) VALUES($1,$2,$3,$4,$5,1)")
         .bind(id).bind(&input.target_language).bind(kind).bind(&input.headword).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?;
     let draft = NextDraft {
+        sense_groups: None,
         schema_version: 1,
         headword: input.headword,
         forms: vec![],
@@ -213,6 +214,12 @@ pub async fn save(
         .await
         .map_err(AppError::internal)?
         .entry()?;
+    if previous.draft.sense_groups.is_some() && draft.sense_groups.is_none() {
+        return Err(AppError::unprocessable(
+            ErrorCode::InvalidRequestBody,
+            "sense groups require an updated client; reopen the entry before saving",
+        ));
+    }
     if previous.draft.form_editor.is_some() && draft.form_editor.is_none() {
         return Err(crate::lexicon::shared_forms::upgrade_error());
     }
@@ -243,6 +250,9 @@ pub async fn save(
             .execute(&mut *conn)
             .await
             .map_err(AppError::internal)?;
+    }
+    for group in draft.sense_groups.as_deref().unwrap_or_default() {
+        node(conn, group.id, id, "sense_group", None).await?;
     }
     for (order, form) in super::forms::projection(draft)?.iter().enumerate() {
         node(conn, form.id, id, "form", None).await?;

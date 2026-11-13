@@ -89,6 +89,9 @@ pub async fn capabilities(
     {
         capability.form_editor = Some(true);
     }
+    if supports_sense_groups(&headers) {
+        capability.sense_groups = Some(true);
+    }
     Ok(Json(capability))
 }
 
@@ -122,38 +125,67 @@ pub async fn read(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<NextEntry>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.access")?;
-    Ok(Json(repository::get(&state.pool, id).await?))
+    Ok(Json(entry_for_client(
+        repository::get(&state.pool, id).await?,
+        &headers,
+    )))
 }
 #[utoipa::path(put, path="/api/v1/admin/lexicon-next/entries/{id}", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("id"=Uuid, Path)), request_body=SaveNextDraft, responses((status=200, body=NextEntry), (status=401), (status=403), (status=404), (status=409, description="revision_conflict or stable_node_id_changed"), (status=422)))]
 pub async fn save(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
+    headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<SaveNextDraft>,
 ) -> Result<Json<NextEntry>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.edit")?;
-    Ok(Json(repository::save(&state.pool, &auth, id, input).await?))
+    Ok(Json(entry_for_client(
+        repository::save(&state.pool, &auth, id, input).await?,
+        &headers,
+    )))
 }
 #[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}/view", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("id"=Uuid, Path), NextViewQuery), responses((status=200, body=NextEntryView), (status=401), (status=403), (status=404), (status=422, description="capability_unavailable")))]
 pub async fn view(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
+    headers: axum::http::HeaderMap,
     ApiQuery(query): ApiQuery<NextViewQuery>,
 ) -> Result<Json<NextEntryView>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.access")?;
-    Ok(Json(language::view(
-        &repository::get(&state.pool, id).await?,
-        query,
-    )?))
+    let mut view = language::view(&repository::get(&state.pool, id).await?, query)?;
+    if !supports_sense_groups(&headers) {
+        view.sense_groups = None;
+        for sense in &mut view.senses {
+            sense.sense_group_id = None;
+        }
+    }
+    Ok(Json(view))
+}
+
+fn supports_sense_groups(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-tsz-next-sense-groups")
+        .is_some_and(|value| value == "v1")
+}
+
+fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> NextEntry {
+    if !supports_sense_groups(headers) {
+        entry.draft.sense_groups = None;
+        for sense in &mut entry.draft.senses {
+            sense.sense_group_id = None;
+        }
+    }
+    entry
 }
 
 #[cfg(test)]

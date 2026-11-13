@@ -54,6 +54,7 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
         let typed: FutureFormRules = serde_json::from_value(extension.clone()).unwrap();
         assert_eq!(serde_json::to_value(typed).unwrap(), extension);
         let core = NextDraft {
+            sense_groups: None,
             form_editor: None,
             schema_version: 1,
             headword: surface.into(),
@@ -63,6 +64,7 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
                 text: surface.into(),
             }],
             senses: vec![NextSense {
+                sense_group_id: None,
                 id: Uuid::now_v7(),
                 part_of_speech: None,
                 definitions: vec![NextDefinition {
@@ -116,4 +118,43 @@ fn openapi_declares_closed_drafts_and_distinct_endpoints() {
     assert!(
         paths["/api/v1/admin/lexicon-next/entries/{id}"]["put"]["responses"]["409"].is_object()
     );
+}
+
+#[test]
+fn sense_groups_keep_draft_names_and_validate_identity_membership_and_closed_wire() {
+    let group = Uuid::now_v7();
+    let sense = Uuid::now_v7();
+    let raw = json!({"schema_version":1,"headword":"centre","forms":[],"sense_groups":[
+        {"id":group,"name_zh":"","name_en":""}
+    ],"senses":[{"id":sense,"part_of_speech":null,"sense_group_id":group,"definitions":[],"equivalents":[]}]});
+    let valid: NextDraft = serde_json::from_value(raw.clone()).unwrap();
+    language::validate("en", &valid).unwrap();
+    assert_eq!(serde_json::to_value(valid).unwrap(), raw);
+    for (field, value) in [("sense_groups", json!(null)), ("unknown", json!(true))] {
+        let mut invalid = raw.clone();
+        invalid[field] = value;
+        assert!(serde_json::from_value::<NextDraft>(invalid).is_err());
+    }
+    let mut null_id = raw.clone();
+    null_id["senses"][0]["sense_group_id"] = json!(null);
+    assert!(serde_json::from_value::<NextDraft>(null_id).is_err());
+    for invalid in [
+        {
+            let mut v = raw.clone();
+            v["senses"][0]["sense_group_id"] = json!(Uuid::now_v7());
+            v
+        },
+        {
+            let mut v = raw.clone();
+            v["sense_groups"][0]["id"] = json!(sense);
+            v
+        },
+        {
+            let mut v = raw.clone();
+            v["sense_groups"][0]["name_zh"] = json!("字".repeat(201));
+            v
+        },
+    ] {
+        assert!(language::validate("en", &serde_json::from_value(invalid).unwrap()).is_err());
+    }
 }
