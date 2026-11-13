@@ -57,6 +57,108 @@ async fn create(state: &AppState, actor: Uuid, source: Uuid, value: Value) -> (S
 }
 
 #[sqlx::test]
+async fn one_accent_recording_cannot_bypass_the_other_accents_publication_review(pool: PgPool) {
+    let mut state = AppState::for_test(pool.clone());
+    let store = storage(&mut state);
+    let actor = admin(&pool).await;
+    let uk = audio_asset(&pool, actor).await;
+    let mut us = audio_asset(&pool, actor).await;
+    let us_id: Uuid = us["id"].as_str().unwrap().parse().unwrap();
+    sqlx::query("UPDATE lexicon.audio_assets SET locale='en-US' WHERE id=$1")
+        .bind(us_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    us["locale"] = json!("en-US");
+    for asset in [&uk, &us] {
+        store
+            .put(
+                &ObjectKey::parse(format!("assets/{}.wav", asset["id"].as_str().unwrap())).unwrap(),
+                vec![1, 2, 3],
+                PutOptions::new(Some(ObjectContentType::parse("audio/wav").unwrap())),
+            )
+            .await
+            .unwrap();
+    }
+    let mut value = with_audio(Uuid::now_v7(), json!([uk.clone()]));
+    value["annotations"] = json!([]);
+    value["sentence"]["en_text"]["common"]["voice_profile"] = json!({"voices":[{
+        "voice_id":"en-us-jennyneural","version_id":Uuid::now_v7(),"version_name":"US",
+        "locale":"en-US","enabled":true,"rate_percent":0
+    }]});
+    let (status, created) = call(
+        &state,
+        actor,
+        Method::POST,
+        ROOT,
+        Some(json!({"content":value})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let (status, review) = call(
+        &state,
+        actor,
+        Method::POST,
+        &format!("{ROOT}/{id}/publication-audio/check"),
+        Some(json!({"base_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["manifest"]["ready"], false, "{review}");
+    assert!(
+        review["manifest"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["issue"] == "missing_asset" && item["setting"]["locale"] == "en-US"),
+        "{review}"
+    );
+    for (path, body) in [
+        (
+            "publication-audio/confirm",
+            json!({"base_revision":1,"manifest_hash":review["manifest"]["manifest_hash"]}),
+        ),
+        (
+            "publications",
+            json!({"base_revision":1,"base_lifecycle_revision":1}),
+        ),
+    ] {
+        let (status, body) = call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{ROOT}/{id}/{path}"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    }
+
+    let mut complete = created["content"].clone();
+    complete["sentence"]["en_text"]["common"]["audio_assets"] = json!([uk, us]);
+    let (status, saved) = call(
+        &state,
+        actor,
+        Method::PUT,
+        &format!("{ROOT}/{id}"),
+        Some(json!({"base_revision":1,"content":complete})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    confirm_sentence_audio(&state, actor, id, 2).await;
+    let (status, published) = call(
+        &state,
+        actor,
+        Method::POST,
+        &format!("{ROOT}/{id}/publications"),
+        Some(json!({"base_revision":2,"base_lifecycle_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+}
+
+#[sqlx::test]
 async fn canonical_audio_metadata_and_invalid_claims_are_atomic(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let actor = admin(&pool).await;
