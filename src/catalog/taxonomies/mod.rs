@@ -112,9 +112,7 @@ pub async fn create(
     let zh = text(input.name_zh, "name_zh")?;
     let en = text(input.name_en, "name_en")?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    permissions::lock(&mut tx, auth.subject)
-        .await?
-        .require("lexicon_settings.edit_taxonomies")?;
+    permissions::lock_session(&mut tx, &auth, "lexicon_settings.edit_taxonomies").await?;
     let item = sqlx::query_as::<_, LexiconTaxonomy>("INSERT INTO catalog.lexicon_taxonomies (id,kind,code,name_zh,name_en,sort_order,created_by_admin_id,updated_by_admin_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$7) RETURNING id,code,name_zh,name_en,sort_order,revision,created_at,updated_at")
         .bind(Uuid::now_v7()).bind(path.kind.as_str()).bind(input.code).bind(zh).bind(en).bind(input.sort_order).bind(auth.subject)
         .fetch_one(&mut *tx).await.map_err(database_error)?;
@@ -165,9 +163,7 @@ pub async fn update(
     let zh = text(input.name_zh, "name_zh")?;
     let en = text(input.name_en, "name_en")?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    permissions::lock(&mut tx, auth.subject)
-        .await?
-        .require("lexicon_settings.edit_taxonomies")?;
+    permissions::lock_session(&mut tx, &auth, "lexicon_settings.edit_taxonomies").await?;
     lock_item(&mut tx, &path, input.base_revision).await?;
     let item = sqlx::query_as::<_, LexiconTaxonomy>("UPDATE catalog.lexicon_taxonomies SET name_zh=$3,name_en=$4,sort_order=$5,revision=revision+1,updated_at=now(),updated_by_admin_id=$6 WHERE kind=$1 AND id=$2 RETURNING id,code,name_zh,name_en,sort_order,revision,created_at,updated_at")
         .bind(path.kind.as_str()).bind(path.id).bind(zh).bind(en).bind(input.sort_order).bind(auth.subject)
@@ -192,9 +188,7 @@ pub async fn remove(
         .await?
         .require("lexicon_settings.delete")?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    permissions::lock(&mut tx, auth.subject)
-        .await?
-        .require("lexicon_settings.delete")?;
+    permissions::lock_session(&mut tx, &auth, "lexicon_settings.delete").await?;
     lock_item(&mut tx, &path, query.base_revision).await?;
     sqlx::query("DELETE FROM catalog.lexicon_taxonomies WHERE kind=$1 AND id=$2")
         .bind(path.kind.as_str())

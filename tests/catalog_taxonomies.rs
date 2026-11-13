@@ -428,3 +428,90 @@ async fn migration_can_be_reversed_and_reapplied_without_changing_parts(pool: Pg
         .unwrap();
     assert_eq!(before, after);
 }
+
+#[sqlx::test]
+async fn logout_all_rejects_writes_authenticated_before_the_body_arrives(pool: PgPool) {
+    for method in [Method::POST, Method::PATCH] {
+        let state = AppState::for_test(pool.clone());
+        let actor = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+        let bearer = token(&state, actor, AdminRole::SuperAdmin);
+        let root = format!("{ROOT}/registers");
+        let input = json!({"code":format!("p_{}", &actor.simple().to_string()[..20]), "name_zh":"延迟请求", "name_en":"Paused request", "sort_order":10});
+        let (uri, payload, existing) = if method == Method::PATCH {
+            let (status, _, created, _) = call(
+                &state,
+                Method::POST,
+                &root,
+                Some(&bearer),
+                Some(input.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            (
+                format!("{root}/{}", created["id"].as_str().unwrap()),
+                json!({"name_zh":"过期会话写入", "name_en":"Stale session", "sort_order":20, "base_revision":1}),
+                Some(created),
+            )
+        } else {
+            (root, input, None)
+        };
+        let (reading, has_started) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel::<Vec<u8>>();
+        let body = Body::from_stream(futures_util::stream::once(async move {
+            // ApiJson 开始读 body 时，路由 middleware 已完成头部鉴权。
+            reading.send(()).unwrap();
+            Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(resume.await.unwrap()))
+        }));
+        let request = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .unwrap();
+        let app = tsz_rust::router(state.clone());
+        let pending = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(5), has_started)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            call(
+                &state,
+                Method::POST,
+                "/api/v1/admin/auth/logout-all",
+                Some(&bearer),
+                None
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        release.send(serde_json::to_vec(&payload).unwrap()).unwrap();
+        let response = pending.await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} must recheck the revoked session inside its write transaction"
+        );
+        let problem: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(problem["code"], "invalid_token");
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT name_zh,revision FROM catalog.lexicon_taxonomies WHERE created_by_admin_id=$1",
+        )
+        .bind(actor)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        if let Some(created) = existing {
+            assert_eq!(
+                rows,
+                vec![(created["name_zh"].as_str().unwrap().to_owned(), 1)]
+            );
+        } else {
+            assert!(rows.is_empty());
+        }
+    }
+}
