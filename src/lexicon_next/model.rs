@@ -47,6 +47,13 @@ pub struct NextEquivalent {
 #[serde(deny_unknown_fields)]
 pub struct NextSense {
     pub id: Uuid,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_group_id"
+    )]
+    #[schema(nullable = false)]
+    pub sense_group_id: Option<Uuid>,
     /// Language-specific code; null is an incomplete draft, not an inferred POS.
     #[schema(required)]
     pub part_of_speech: Option<String>,
@@ -56,7 +63,24 @@ pub struct NextSense {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct NextSenseGroup {
+    pub id: Uuid,
+    #[schema(max_length = 200)]
+    pub name_zh: String,
+    #[schema(max_length = 200)]
+    pub name_en: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NextDraft {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_sense_groups"
+    )]
+    #[schema(nullable = false)]
+    pub sense_groups: Option<Vec<NextSenseGroup>>,
     #[schema(minimum = 1, maximum = 1)]
     pub schema_version: i32,
     pub headword: String,
@@ -124,6 +148,9 @@ pub struct NextCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub form_editor: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sense_groups: Option<bool>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -173,6 +200,9 @@ pub struct NextEntryList {
 #[serde(deny_unknown_fields)]
 pub struct NextSenseView {
     pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sense_group_id: Option<Uuid>,
     pub target_definitions: Vec<NextDefinition>,
     pub medium_definitions: Vec<NextDefinition>,
     pub equivalents: Vec<NextEquivalent>,
@@ -184,6 +214,9 @@ pub struct NextSenseView {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextEntryView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sense_groups: Option<Vec<NextSenseGroup>>,
     pub entry_id: Uuid,
     pub revision: i64,
     pub target_locale: String,
@@ -197,4 +230,15 @@ fn non_null_form_editor<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<crate::lexicon::dto::SharedFormsStepContentV3>, D::Error> {
     crate::lexicon::dto::SharedFormsStepContentV3::deserialize(deserializer).map(Some)
+}
+
+fn non_null_group_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Uuid>, D::Error> {
+    Uuid::deserialize(deserializer).map(Some)
+}
+fn non_null_sense_groups<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<NextSenseGroup>>, D::Error> {
+    Vec::<NextSenseGroup>::deserialize(deserializer).map(Some)
 }

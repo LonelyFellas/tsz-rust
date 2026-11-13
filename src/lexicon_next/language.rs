@@ -32,6 +32,7 @@ pub fn capabilities() -> NextCapabilities {
         generation: false,
         publishing: false,
         form_editor: None,
+        sense_groups: None,
     }
 }
 pub fn unavailable() -> AppError {
@@ -83,7 +84,8 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
     }
     text(&draft.headword, 200)?;
     // A bounded initial editing contract, not a content production quota.
-    let count = draft.forms.len()
+    let count = draft.sense_groups.as_ref().map_or(0, Vec::len)
+        + draft.forms.len()
         + draft.senses.len()
         + draft
             .senses
@@ -94,6 +96,16 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
         return Err(invalid());
     }
     let mut ids = HashSet::new();
+    let groups = draft.sense_groups.as_deref().unwrap_or_default();
+    let group_ids = groups.iter().map(|group| group.id).collect::<HashSet<_>>();
+    for group in groups {
+        identity(&mut ids, group.id)?;
+        for name in [&group.name_zh, &group.name_en] {
+            if name.chars().count() > 200 || name.chars().any(char::is_control) {
+                return Err(invalid());
+            }
+        }
+    }
     for form in &draft.forms {
         identity(&mut ids, form.id)?;
         if !matches!(form.locale.as_str(), "en" | "en-GB" | "en-US") {
@@ -103,6 +115,12 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
     }
     for sense in &draft.senses {
         identity(&mut ids, sense.id)?;
+        if sense
+            .sense_group_id
+            .is_some_and(|id| !group_ids.contains(&id))
+        {
+            return Err(invalid());
+        }
         if sense
             .part_of_speech
             .as_deref()
@@ -189,6 +207,7 @@ pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView
                 .collect();
             NextSenseView {
                 id: sense.id,
+                sense_group_id: sense.sense_group_id,
                 missing_target_definitions: target_definitions.is_empty(),
                 missing_medium_definitions: medium_definitions.is_empty(),
                 missing_equivalents: equivalents.is_empty(),
@@ -199,6 +218,7 @@ pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView
         })
         .collect();
     Ok(NextEntryView {
+        sense_groups: entry.draft.sense_groups.clone(),
         entry_id: entry.id,
         revision: entry.revision,
         target_locale: selection.target_locale,
