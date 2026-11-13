@@ -1,6 +1,7 @@
 //! Independent language-aware drafts; no legacy identities.
 pub mod detection;
 pub mod entry_matches;
+mod forms;
 pub mod language;
 pub mod list_model;
 pub mod model;
@@ -43,7 +44,9 @@ pub fn router() -> Router<AppState> {
         .route("/entries", get(list).post(create))
         .route("/entries/{id}", get(read).put(save))
         .route("/entries/{id}/view", get(view))
-        .layer(DefaultBodyLimit::max(512 * 1024))
+        .layer(DefaultBodyLimit::max(
+            crate::lexicon::validation::MAX_STEP_CONTENT_BODY_BYTES + 512 * 1024,
+        ))
 }
 
 #[utoipa::path(post, path="/api/v1/admin/lexicon-next/entry-matches", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=entry_matches::NextEntryMatchInput, responses((status=200, body=entry_matches::NextEntryMatches), (status=401), (status=403), (status=422)))]
@@ -74,11 +77,19 @@ pub async fn detect(
 pub async fn capabilities(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<NextCapabilities>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.access")?;
-    Ok(Json(language::capabilities()))
+    let mut capability = language::capabilities();
+    if headers
+        .get("x-tsz-next-forms")
+        .is_some_and(|value| value == "v1")
+    {
+        capability.form_editor = Some(true);
+    }
+    Ok(Json(capability))
 }
 
 #[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(NextListQuery), responses((status=200, body=NextEntryList), (status=401), (status=403), (status=422)))]

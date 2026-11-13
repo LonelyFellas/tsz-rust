@@ -54,6 +54,7 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
         let typed: FutureFormRules = serde_json::from_value(extension.clone()).unwrap();
         assert_eq!(serde_json::to_value(typed).unwrap(), extension);
         let core = NextDraft {
+            form_editor: None,
             schema_version: 1,
             headword: surface.into(),
             forms: vec![NextForm {

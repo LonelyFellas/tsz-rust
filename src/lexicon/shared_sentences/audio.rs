@@ -67,7 +67,8 @@ pub(super) async fn validate_assets(
                 WHERE r.asset_id=asset.id AND r.sentence_id=$2)) AS accessible,
             (EXISTS (SELECT 1 FROM lexicon.v3_audio_asset_references r WHERE r.asset_id=asset.id)
              OR EXISTS (SELECT 1 FROM lexicon.shared_sentence_audio_asset_references r
-                WHERE r.asset_id=asset.id AND r.sentence_id<>$2)) AS taken,
+                WHERE r.asset_id=asset.id AND r.sentence_id<>$2)
+             OR EXISTS (SELECT 1 FROM lexicon_next.audio_asset_references r WHERE r.asset_id=asset.id)) AS taken,
             jsonb_build_object('id',asset.id,'locale',asset.locale,'gender',asset.gender,
                 'content_type',asset.content_type,'size_bytes',asset.size_bytes,
                 'duration_ms',asset.duration_ms,'original_name',asset.original_name,

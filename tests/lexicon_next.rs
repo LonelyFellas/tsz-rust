@@ -43,7 +43,8 @@ async fn call(
     let mut req = Request::builder()
         .method(method)
         .uri(format!("{ROOT}{path}"))
-        .header("content-type", "application/json");
+        .header("content-type", "application/json")
+        .header("x-tsz-next-forms", "v1");
     if let Some(actor) = actor {
         req = req.header(
             "authorization",
@@ -1866,5 +1867,224 @@ async fn homonym_annotations_use_forms_or_initial_headword_fallback(pool: PgPool
             .unwrap()
             .iter()
             .all(|row| row["annotation_visible"] == false)
+    );
+}
+
+fn form_editor() -> Value {
+    let pos = Uuid::now_v7();
+    let content = Uuid::now_v7();
+    let form = Uuid::now_v7();
+    let uk = Uuid::now_v7();
+    let us = Uuid::now_v7();
+    let uk_pron = Uuid::now_v7();
+    let us_pron = Uuid::now_v7();
+    json!({"forms_format":"shared_v1","contents":[{
+        "id":content,"dialect_rules":{"spelling_mode":"distinguish","phonetic_mode":"distinguish"},
+        "regional_variants":{"mode":"uk_us",
+            "uk":{"id":uk,"spelling":"centre","origin":"manual","pronunciations":[{"id":uk_pron,"dict_phonetic":"sentə","actual_pron":"sentə","style":"citation"}]},
+            "us":{"id":us,"spelling":"center","origin":"manual","pronunciations":[{"id":us_pron,"dict_phonetic":"sentər","actual_pron":"sentər","style":"citation"}]}
+        }}],"pos":[{"pos_id":pos,"pos":"noun","forms":[{
+            "id":form,"form_type":"base","content_id":content,
+            "regional_bindings":{"mode":"uk_us",
+                "uk":{"id":Uuid::now_v7(),"content_slot_id":uk,"is_regular":true,"component_usages":[],"pronunciations":[{"id":Uuid::now_v7(),"content_slot_id":uk_pron}]},
+                "us":{"id":Uuid::now_v7(),"content_slot_id":us,"is_regular":true,"component_usages":[],"pronunciations":[{"id":Uuid::now_v7(),"content_slot_id":us_pron}]}
+            }}],"form_groups":[{"id":Uuid::now_v7(),"is_regular":true,"scope":"general","members":[{"id":Uuid::now_v7(),"form_id":form}]}]}]})
+}
+
+#[sqlx::test]
+async fn v1_forms_editor_round_trips_and_projects_without_legacy_entry_data(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut draft = entry["draft"].clone();
+    let editor = form_editor();
+    draft["form_editor"] = editor.clone();
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, reopened) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(reopened["draft"]["form_editor"], editor);
+    assert_eq!(reopened["draft"]["forms"], json!([]));
+    let (_, view) = call(
+        &state,
+        Some(actor),
+        "GET",
+        &format!("{path}/view?target_locale=en-US&medium_locale=zh-Hans"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(view["forms"][0]["text"], "center");
+    let (_, list) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/workspace/entries?headword=center&pos=noun",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(list["items"][0]["id"], entry["id"]);
+    assert_eq!(list["items"][0]["part_of_speech"], json!(["noun"]));
+    assert_eq!(list["items"][0]["forms"].as_array().unwrap().len(), 2);
+    // A cached old client must not silently erase the editor content.
+    let mut old = draft.clone();
+    old.as_object_mut().unwrap().remove("form_editor");
+    let (status, _) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":old}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let other = create(&state, actor).await;
+    let (status, _) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &format!("/entries/{}", other["id"].as_str().unwrap()),
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let mut invalid = saved["draft"].clone();
+    invalid["form_editor"]["pos"][0]["forms"][0]["regional_bindings"]["uk"]["content_slot_id"] =
+        json!(Uuid::now_v7());
+    let (status, _) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":invalid}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, unchanged) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(unchanged["revision"], 2);
+    assert_eq!(unchanged["draft"]["form_editor"], editor);
+    let mut collision = saved["draft"].clone();
+    collision["senses"] = json!([{"id":editor["pos"][0]["pos_id"],"part_of_speech":null,"definitions":[],"equivalents":[]}]);
+    let (status, _) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":collision}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let mut invalid_null = saved["draft"].clone();
+    invalid_null["form_editor"] = Value::Null;
+    let (status, _) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":invalid_null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261113120000_lexicon_next_form_editor.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    let (_, after_refused_rollback) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(after_refused_rollback["draft"]["form_editor"], editor);
+}
+
+#[sqlx::test]
+async fn form_editor_recordings_are_canonical_owned_and_protected(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let asset = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,'audio/mpeg',3,'en-GB','female','fixture.mp3',$4)")
+        .bind(asset).bind(format!("local-fixture/{asset}"))
+        .bind(format!("local-fixture/source/{asset}")).bind(actor).execute(&pool).await.unwrap();
+    let metadata: Value = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'locale',locale,'gender',gender,'content_type',content_type,'size_bytes',size_bytes,'duration_ms',duration_ms,'original_name',original_name,'created_at',created_at,'is_default',true) FROM lexicon.audio_assets WHERE id=$1")
+        .bind(asset).fetch_one(&pool).await.unwrap();
+    let mut editor = form_editor();
+    let mut forged = metadata.clone();
+    forged["original_name"] = json!("forged.mp3");
+    editor["contents"][0]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"] =
+        json!([forged]);
+    let mut draft = entry["draft"].clone();
+    draft["form_editor"] = editor;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        serde_json::from_value::<tsz_rust::lexicon::audio_assets::dto::AudioAsset>(saved["draft"]["form_editor"]["contents"][0]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"][0].clone()).unwrap(),
+        serde_json::from_value::<tsz_rust::lexicon::audio_assets::dto::AudioAsset>(metadata.clone()).unwrap()
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon_next.audio_asset_references WHERE asset_id=$1",
+    )
+    .bind(asset)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    let other = create(&state, actor).await;
+    let mut another = other["draft"].clone();
+    let mut another_editor = form_editor();
+    another_editor["contents"][0]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"] =
+        json!([metadata]);
+    another["form_editor"] = another_editor;
+    let (status, _) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &format!("/entries/{}", other["id"].as_str().unwrap()),
+        json!({"expected_revision":1,"draft":another}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let mut removed = saved["draft"].clone();
+    removed["form_editor"]["contents"][0]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"] =
+        json!([]);
+    let (status, result) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":removed}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon_next.audio_asset_references WHERE asset_id=$1",
+    )
+    .bind(asset)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM lexicon.audio_assets WHERE id=$1)"
+        )
+        .bind(asset)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
     );
 }

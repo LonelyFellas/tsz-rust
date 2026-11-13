@@ -31,6 +31,7 @@ pub fn capabilities() -> NextCapabilities {
         manual_drafts: true,
         generation: false,
         publishing: false,
+        form_editor: None,
     }
 }
 pub fn unavailable() -> AppError {
@@ -127,6 +128,9 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
             text(&equivalent.text, 200)?;
         }
     }
+    if let Some(editor) = &draft.form_editor {
+        super::forms::validate(editor, &mut ids)?;
+    }
     Ok(())
 }
 
@@ -137,9 +141,8 @@ pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView
     {
         return Err(unavailable());
     }
-    let form_locale = if entry
-        .draft
-        .forms
+    let all_forms = super::forms::projection(&entry.draft)?;
+    let form_locale = if all_forms
         .iter()
         .any(|f| f.locale == selection.target_locale)
     {
@@ -147,9 +150,7 @@ pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView
     } else {
         &entry.target_language
     };
-    let forms: Vec<_> = entry
-        .draft
-        .forms
+    let forms: Vec<_> = all_forms
         .iter()
         .filter(|f| &f.locale == form_locale)
         .cloned()
