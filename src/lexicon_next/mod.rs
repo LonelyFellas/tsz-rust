@@ -170,25 +170,27 @@ pub async fn workspace_read(
         .require("words.access")?;
     Ok(Json(workspace::get(&state.pool, id).await?))
 }
-#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/stats",tag="admin-lexicon-next",security(("bearer_auth"=[])),responses((status=200,body=NextWorkspaceStats),(status=401),(status=403)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/stats",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(NextWorkspaceQuery),responses((status=200,body=NextWorkspaceStats),(status=401),(status=403),(status=422)))]
 pub async fn workspace_stats(
     State(state): State<AppState>,
     auth: AdminAuth,
+    ApiQuery(query): ApiQuery<NextWorkspaceQuery>,
 ) -> Result<Json<NextWorkspaceStats>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.access")?;
-    Ok(Json(workspace::stats(&state.pool).await?))
+    Ok(Json(workspace::stats(&state.pool, query).await?))
 }
-#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/creators",tag="admin-lexicon-next",security(("bearer_auth"=[])),responses((status=200,body=Vec<NextWorkspaceCreator>),(status=401),(status=403)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/creators",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(NextWorkspaceQuery),responses((status=200,body=Vec<NextWorkspaceCreator>),(status=401),(status=403),(status=422)))]
 pub async fn workspace_creators(
     State(state): State<AppState>,
     auth: AdminAuth,
+    ApiQuery(query): ApiQuery<NextWorkspaceQuery>,
 ) -> Result<Json<Vec<NextWorkspaceCreator>>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.access")?;
-    Ok(Json(workspace::creators(&state.pool).await?))
+    Ok(Json(workspace::creators(&state.pool, query).await?))
 }
 #[utoipa::path(patch,path="/api/v1/admin/lexicon-next/workspace/entries/{id}/annotation",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),request_body=NextAnnotationInput,responses((status=200,body=NextAnnotationResult),(status=401),(status=403),(status=404),(status=409),(status=422)))]
 pub async fn workspace_annotation(

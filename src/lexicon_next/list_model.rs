@@ -8,6 +8,10 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
 pub struct NextWorkspaceQuery {
+    /// Restrict entries to this target language; omitted means all languages.
+    pub target_language: Option<String>,
+    /// Require definitions or equivalents in this locale and scope gloss search/display to it.
+    pub medium_locale: Option<String>,
     pub headword: Option<String>,
     pub gloss: Option<String>,
     pub kind: Option<String>,

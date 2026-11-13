@@ -940,6 +940,28 @@ async fn workspace_filters_stats_and_language_drafts_stay_separate(pool: PgPool)
     assert_eq!(list["items"][0]["forms"].as_array().unwrap().len(), 2);
     assert_eq!(list["items"][0]["revision"], 2);
     assert_eq!(list["items"][0]["status"], "draft");
+    let (_, traditional) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries?target_language=en&medium_locale=zh-Hant",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(traditional["pagination"]["total"], 1);
+    assert_eq!(
+        traditional["items"][0]["gloss"],
+        "某物的中心位置（繁體說明）"
+    );
+    let (_, target_only_text) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries?medium_locale=zh-Hant&gloss=middle",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(target_only_text["pagination"]["total"], 0);
     for (query, total) in [
         ("headword=100%25", 1),
         ("level=A1", 0),
@@ -994,6 +1016,182 @@ async fn workspace_filters_stats_and_language_drafts_stay_separate(pool: PgPool)
     assert_eq!(reopened["draft"], content);
     assert!(reopened.get("status").is_none());
     assert_eq!(old_record(&pool, protected).await, before);
+}
+
+#[sqlx::test]
+async fn language_scope_matches_list_search_trash_stats_and_creators(pool: PgPool) {
+    let owner = admin(&pool, EDIT).await;
+    let foreign_owner = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let mut entries = Vec::new();
+    for (target, locale, text, equivalent, archived) in [
+        ("en", Some("zh-Hans"), "simplified", false, false),
+        ("en", Some("zh-Hant"), "traditional", false, false),
+        ("fr", Some("zh-Hans"), "simplified", false, false),
+        ("en", Some("zh-Hans"), "equivalent", true, false),
+        ("en", None, "", false, false),
+        ("en", Some("zh-Hans"), "simplified", false, true),
+    ] {
+        let actor = if target == "fr" { foreign_owner } else { owner };
+        let entry = create(&state, actor).await;
+        let id = entry["id"].as_str().unwrap();
+        if let Some(locale) = locale {
+            let definition =
+                json!({"id":Uuid::now_v7(),"locale":locale,"text":text,"style":"definition"});
+            let equivalent_content = json!({"id":Uuid::now_v7(),"locale":locale,"text":text});
+            let (status, saved) = call(
+                &state,
+                Some(actor),
+                "PUT",
+                &format!("/entries/{id}"),
+                json!({
+                    "expected_revision":1,
+                    "draft":{"schema_version":1,"headword":"centre","forms":[],"senses":[{
+                        "id":Uuid::now_v7(),"part_of_speech":"noun",
+                        "definitions":if equivalent {json!([])} else {json!([definition])},
+                        "equivalents":if equivalent {json!([equivalent_content])} else {json!([])}
+                    }]}
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+        }
+        // Simulate historical content in a language not currently open for creation.
+        sqlx::query("UPDATE lexicon_next.entries SET target_language=$2,status=$3 WHERE id=$1")
+            .bind(id.parse::<Uuid>().unwrap())
+            .bind(target)
+            .bind(if archived { "archived" } else { "draft" })
+            .execute(&pool)
+            .await
+            .unwrap();
+        entries.push(entry);
+    }
+    for (query, total) in [
+        ("", 5),
+        ("target_language=en", 4),
+        ("target_language=fr&medium_locale=zh-Hans", 1),
+        ("target_language=en&medium_locale=zh-Hans", 2),
+        ("target_language=en&medium_locale=zh-Hant", 1),
+        (
+            "target_language=en&medium_locale=zh-Hans&gloss=traditional",
+            0,
+        ),
+        (
+            "target_language=en&medium_locale=zh-Hant&gloss=simplified",
+            0,
+        ),
+        (
+            "target_language=en&medium_locale=zh-Hans&gloss=equivalent",
+            1,
+        ),
+        (
+            "target_language=en&medium_locale=zh-Hans&status=archived",
+            1,
+        ),
+        (
+            "target_language=en&medium_locale=zh-Hant&status=archived",
+            0,
+        ),
+    ] {
+        let (status, list) = call(
+            &state,
+            Some(owner),
+            "GET",
+            &format!("/workspace/entries?{query}&page_size=1"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{query}: {list}");
+        assert_eq!(list["pagination"]["total"], total, "{query}: {list}");
+        assert_eq!(
+            list["items"].as_array().unwrap().len(),
+            usize::from(total > 0)
+        );
+        let (status, stats) = call(
+            &state,
+            Some(owner),
+            "GET",
+            &format!("/workspace/stats?{query}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{query}: {stats}");
+        assert_eq!(
+            stats,
+            json!({"total":total,"today":total,"month":total}),
+            "{query}"
+        );
+    }
+    let (_, list) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries?target_language=en&medium_locale=zh-Hans&page_size=1&page=2",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(list["pagination"]["total"], 2);
+    assert_eq!(list["pagination"]["total_pages"], 2);
+    assert_eq!(list["items"][0]["gloss"], "simplified");
+    let (_, equivalents) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/entries?target_language=en&medium_locale=zh-Hans&gloss=equivalent",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(equivalents["items"][0]["gloss"], "equivalent");
+    let (_, basic) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/entries?target_language=en&medium_locale=zh-Hans",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(basic["pagination"]["total"], 2);
+    let (_, creators) = call(
+        &state,
+        Some(owner),
+        "GET",
+        "/workspace/creators?target_language=fr&medium_locale=zh-Hans",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        creators,
+        json!([{"id":foreign_owner,"display_name":"本批隔离测试"}])
+    );
+    for query in [
+        "target_language=EN",
+        "target_language=en-GB",
+        "target_language=",
+        "medium_locale=en-GB",
+        "medium_locale=",
+        "medium_locale=unknown",
+    ] {
+        for path in [
+            "/workspace/entries",
+            "/workspace/stats",
+            "/workspace/creators",
+            "/entries",
+        ] {
+            let (status, problem) = call(
+                &state,
+                Some(owner),
+                "GET",
+                &format!("{path}?{query}"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{path}?{query}: {problem}"
+            );
+        }
+    }
 }
 
 fn list_command(action: &str, targets: &[(&Value, i64)]) -> Value {
