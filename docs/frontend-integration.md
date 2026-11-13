@@ -29,6 +29,10 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 该命令会更新前端生成文件；同步后必须检查差异并执行项目规定的契约验证，不能把同步成功等同于联调完成。
 
+## 新版词库语言筛选
+
+`lexicon-next` 的 `/entries`、`/workspace/entries`、`/workspace/stats` 和 `/workspace/creators` 接受可选 `target_language` / `medium_locale`。选定媒介语言后，词条须具备对应释义或译词，词义搜索与常见释义仅取该语言；省略时保留空草稿。管理列表、垃圾桶、计数和统计复用过滤条件，旧请求与响应结构保持兼容。配套后端须先于启用筛选参数的前端发布；主任务与验收记录在前端仓库 `docs/features/lexicon-language-filters/README.md`。
+
 ## 推荐音色多选（禅道 #193）
 
 客户端携带 `X-TSZ-Voice-Versions: v5` 读取和保存多选推荐来源；`voice_ids`、`contribution_ids` 与音色池同为最多 2000 项，仍校验去重和贡献版本归属。`recommendation_order` 记录已选推荐项 ID，来源对象保留首组身份及全部局部贡献。旧 v4 及以下读取隐藏超出旧上限的来源对象，保留音色配置；旧客户端不能覆盖已有多选来源，须刷新后保存。

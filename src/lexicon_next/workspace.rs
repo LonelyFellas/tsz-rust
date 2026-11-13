@@ -19,29 +19,44 @@ const SAME_NAME: &str = r#"e.status<>'archived' AND other.status<>'archived' AND
    AND lower(COALESCE(f.text,target.headword))=lower(COALESCE(oform.text,other.headword))
    AND (f.locale IS NULL OR oform.locale IS NULL OR oform.locale=f.locale OR oform.locale='en' OR f.locale='en'))"#;
 
-pub(super) fn select() -> String {
-    format!(
+pub(super) fn select(medium_locale: Option<&str>) -> QueryBuilder<Postgres> {
+    let mut sql = QueryBuilder::new(format!(
         r#"SELECT e.id,e.target_language,e.kind,e.headword,e.owner_id,e.revision,e.lifecycle_revision,e.status,
     e.created_at,e.updated_at,creator.display_name AS created_by_name,editor.display_name AS updated_by_name,
     e.annotation,e.annotation_revision,
     EXISTS(SELECT 1 FROM lexicon_next.entries other WHERE {SAME_NAME}) AS annotation_visible,
     ARRAY(SELECT DISTINCT s.part_of_speech FROM lexicon_next.senses s JOIN lexicon_next.nodes n ON n.id=s.id
       WHERE n.entry_id=e.id AND s.part_of_speech IS NOT NULL ORDER BY s.part_of_speech) AS part_of_speech,
-    (SELECT d.text FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id WHERE n.entry_id=e.id
-      ORDER BY CASE d.locale WHEN 'zh-Hans' THEN 0 WHEN 'zh-Hant' THEN 1 ELSE 2 END,d.sort_order,d.id LIMIT 1) AS gloss,
+    COALESCE((SELECT d.text FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id WHERE n.entry_id=e.id
+      AND ("#
+    ));
+    sql.push_bind(medium_locale).push("::text IS NULL OR d.locale=").push_bind(medium_locale).push(r#")
+      ORDER BY CASE d.locale WHEN 'zh-Hans' THEN 0 WHEN 'zh-Hant' THEN 1 ELSE 2 END,d.sort_order,d.id LIMIT 1),
+    (SELECT q.text FROM lexicon_next.equivalents q JOIN lexicon_next.nodes n ON n.id=q.id WHERE n.entry_id=e.id
+      AND ("#).push_bind(medium_locale).push("::text IS NULL OR q.locale=").push_bind(medium_locale).push(r#")
+      ORDER BY CASE q.locale WHEN 'zh-Hans' THEN 0 WHEN 'zh-Hant' THEN 1 ELSE 2 END,q.sort_order,q.id LIMIT 1)) AS gloss,
     COALESCE((SELECT jsonb_agg(jsonb_build_object('id',f.id,'locale',f.locale,'text',f.text) ORDER BY f.sort_order,f.id)
       FROM lexicon_next.forms f JOIN lexicon_next.nodes n ON n.id=f.id WHERE n.entry_id=e.id),'[]'::jsonb) AS forms
     FROM lexicon_next.entries e JOIN admins creator ON creator.id=e.owner_id
     JOIN lexicon_next.draft_revisions current ON current.entry_id=e.id AND current.revision=e.revision
-    JOIN admins editor ON editor.id=current.actor_id"#
-    )
+    JOIN admins editor ON editor.id=current.actor_id"#);
+    sql
 }
-fn filter(sql: &mut QueryBuilder<Postgres>, query: &NextWorkspaceQuery) {
+pub(super) fn filter(sql: &mut QueryBuilder<Postgres>, query: &NextWorkspaceQuery) {
     sql.push(" WHERE ");
     if let Some(status) = &query.status {
         sql.push("e.status=").push_bind(status);
     } else {
         sql.push("e.status<>'archived'");
+    }
+    if let Some(language) = &query.target_language {
+        sql.push(" AND e.target_language=").push_bind(language);
+    }
+    if let Some(locale) = &query.medium_locale {
+        sql.push(" AND (EXISTS(SELECT 1 FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id WHERE n.entry_id=e.id AND d.locale=")
+            .push_bind(locale)
+            .push(") OR EXISTS(SELECT 1 FROM lexicon_next.equivalents q JOIN lexicon_next.nodes n ON n.id=q.id WHERE n.entry_id=e.id AND q.locale=")
+            .push_bind(locale).push("))");
     }
     if let Some(word) = query
         .headword
@@ -57,7 +72,17 @@ fn filter(sql: &mut QueryBuilder<Postgres>, query: &NextWorkspaceQuery) {
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        sql.push(" AND (EXISTS(SELECT 1 FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id WHERE n.entry_id=e.id AND position(lower(").push_bind(gloss).push(") in lower(d.text))>0) OR EXISTS(SELECT 1 FROM lexicon_next.equivalents q JOIN lexicon_next.nodes n ON n.id=q.id WHERE n.entry_id=e.id AND position(lower(").push_bind(gloss).push(") in lower(q.text))>0))");
+        sql.push(" AND (EXISTS(SELECT 1 FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id WHERE n.entry_id=e.id");
+        if let Some(locale) = &query.medium_locale {
+            sql.push(" AND d.locale=").push_bind(locale);
+        }
+        sql.push(" AND position(lower(").push_bind(gloss).push(") in lower(d.text))>0) OR EXISTS(SELECT 1 FROM lexicon_next.equivalents q JOIN lexicon_next.nodes n ON n.id=q.id WHERE n.entry_id=e.id");
+        if let Some(locale) = &query.medium_locale {
+            sql.push(" AND q.locale=").push_bind(locale);
+        }
+        sql.push(" AND position(lower(")
+            .push_bind(gloss)
+            .push(") in lower(q.text))>0))");
     }
     if let Some(kind) = &query.kind {
         sql.push(" AND e.kind=").push_bind(kind);
@@ -79,7 +104,20 @@ fn filter(sql: &mut QueryBuilder<Postgres>, query: &NextWorkspaceQuery) {
         sql.push(" AND e.created_at<").push_bind(to);
     }
 }
-pub async fn list(pool: &PgPool, query: NextWorkspaceQuery) -> Result<NextWorkspaceList, AppError> {
+pub(super) fn validate(query: &NextWorkspaceQuery) -> Result<(), AppError> {
+    if let Some(target) = &query.target_language {
+        // Query historical languages too, without enabling new-language draft creation.
+        if !(2..=3).contains(&target.len()) || !target.bytes().all(|c| c.is_ascii_lowercase()) {
+            return Err(language::invalid());
+        }
+    }
+    if query
+        .medium_locale
+        .as_deref()
+        .is_some_and(|locale| !["zh-Hans", "zh-Hant"].contains(&locale))
+    {
+        return Err(language::unavailable());
+    }
     let page = query.page.unwrap_or(1);
     let size = query.page_size.unwrap_or(20);
     if page == 0
@@ -115,6 +153,12 @@ pub async fn list(pool: &PgPool, query: NextWorkspaceQuery) -> Result<NextWorksp
     {
         return Err(language::invalid());
     }
+    Ok(())
+}
+pub async fn list(pool: &PgPool, query: NextWorkspaceQuery) -> Result<NextWorkspaceList, AppError> {
+    validate(&query)?;
+    let page = query.page.unwrap_or(1);
+    let size = query.page_size.unwrap_or(20);
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
@@ -127,7 +171,7 @@ pub async fn list(pool: &PgPool, query: NextWorkspaceQuery) -> Result<NextWorksp
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let mut rows = QueryBuilder::new(select());
+    let mut rows = select(query.medium_locale.as_deref());
     filter(&mut rows, &query);
     rows.push(" ORDER BY e.created_at DESC,e.id DESC LIMIT ")
         .push_bind(i64::from(size))
@@ -145,7 +189,7 @@ pub async fn list(pool: &PgPool, query: NextWorkspaceQuery) -> Result<NextWorksp
     })
 }
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<NextWorkspaceEntry, AppError> {
-    QueryBuilder::new(select())
+    select(None)
         .push(" WHERE e.id=")
         .push_bind(id)
         .build_query_as()
@@ -154,15 +198,37 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<NextWorkspaceEntry, AppError
         .map_err(AppError::internal)?
         .ok_or_else(|| AppError::not_found("lexicon-next entry not found"))
 }
-pub async fn stats(pool: &PgPool) -> Result<NextWorkspaceStats, AppError> {
-    sqlx::query_as(r#"SELECT count(*) AS total,
-        count(*) FILTER(WHERE (created_at AT TIME ZONE 'Asia/Shanghai')::date=(now() AT TIME ZONE 'Asia/Shanghai')::date) AS today,
-        count(*) FILTER(WHERE date_trunc('month',created_at AT TIME ZONE 'Asia/Shanghai')=date_trunc('month',now() AT TIME ZONE 'Asia/Shanghai')) AS month
-        FROM lexicon_next.entries WHERE status<>'archived'"#).fetch_one(pool).await.map_err(AppError::internal)
+pub async fn stats(
+    pool: &PgPool,
+    query: NextWorkspaceQuery,
+) -> Result<NextWorkspaceStats, AppError> {
+    validate(&query)?;
+    let mut sql = QueryBuilder::new(
+        r#"SELECT count(*) AS total,
+        count(*) FILTER(WHERE (e.created_at AT TIME ZONE 'Asia/Shanghai')::date=(now() AT TIME ZONE 'Asia/Shanghai')::date) AS today,
+        count(*) FILTER(WHERE date_trunc('month',e.created_at AT TIME ZONE 'Asia/Shanghai')=date_trunc('month',now() AT TIME ZONE 'Asia/Shanghai')) AS month
+        FROM lexicon_next.entries e"#,
+    );
+    filter(&mut sql, &query);
+    sql.build_query_as()
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::internal)
 }
-pub async fn creators(pool: &PgPool) -> Result<Vec<NextWorkspaceCreator>, AppError> {
-    sqlx::query_as("SELECT DISTINCT a.id,a.display_name FROM admins a JOIN lexicon_next.entries e ON e.owner_id=a.id ORDER BY a.display_name,a.id")
-        .fetch_all(pool).await.map_err(AppError::internal)
+pub async fn creators(
+    pool: &PgPool,
+    query: NextWorkspaceQuery,
+) -> Result<Vec<NextWorkspaceCreator>, AppError> {
+    validate(&query)?;
+    let mut sql = QueryBuilder::new(
+        "SELECT DISTINCT a.id,a.display_name FROM admins a JOIN lexicon_next.entries e ON e.owner_id=a.id",
+    );
+    filter(&mut sql, &query);
+    sql.push(" ORDER BY a.display_name,a.id")
+        .build_query_as()
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::internal)
 }
 pub async fn annotation(
     pool: &PgPool,

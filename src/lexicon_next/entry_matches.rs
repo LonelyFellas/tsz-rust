@@ -68,7 +68,7 @@ pub async fn find(pool: &PgPool, input: NextEntryMatchInput) -> Result<NextEntry
         .map_err(AppError::internal)?;
     let mut pagination = crate::api::page_meta(page, size, total);
     pagination.page = i64::from(page).min(pagination.total_pages.max(1)) as u32;
-    let mut rows = QueryBuilder::new(super::workspace::select());
+    let mut rows = super::workspace::select(None);
     filter(&mut rows, &surface.key, &input.target_language);
     rows.push(" ORDER BY CASE e.status WHEN 'archived' THEN 1 ELSE 0 END,e.updated_at DESC,e.id DESC LIMIT ")
         .push_bind(i64::from(size)).push(" OFFSET ").push_bind(i64::from(pagination.page-1)*i64::from(size));

@@ -41,46 +41,51 @@ pub(super) async fn lock_list_writers(conn: &mut PgConnection) -> Result<(), App
 }
 
 pub async fn list(pool: &PgPool, query: NextListQuery) -> Result<NextEntryList, AppError> {
+    let query = super::list_model::NextWorkspaceQuery {
+        target_language: query.target_language,
+        medium_locale: query.medium_locale,
+        headword: query.headword,
+        kind: query.kind.map(|kind| match kind {
+            NextEntryKind::Word => "word".into(),
+            NextEntryKind::Phrase => "phrase".into(),
+        }),
+        page: query.page,
+        page_size: query.page_size,
+        ..Default::default()
+    };
+    super::workspace::validate(&query)?;
     let page = query.page.unwrap_or(1);
-    let page_size = query.page_size.unwrap_or(20);
-    if page < 1 || !(1..=100).contains(&page_size) {
-        return Err(language::invalid());
-    }
-    let offset = i64::from(page - 1) * i64::from(page_size);
-    let headword = query.headword.unwrap_or_default().trim().to_owned();
-    if headword.chars().count() > 200 {
-        return Err(language::invalid());
-    }
-    let kind = query.kind.map(|kind| match kind {
-        NextEntryKind::Word => "word",
-        NextEntryKind::Phrase => "phrase",
-    });
-    // Count and page share one snapshot, including concurrent creates/saves.
+    let size = query.page_size.unwrap_or(20);
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let total = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.entries e WHERE e.status<>'archived' AND position(lower($1) in lower(e.headword)) > 0 AND ($2::text IS NULL OR e.kind=$2)")
-        .bind(&headword).bind(kind).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
-    let items = sqlx::query_as::<_, NextEntrySummary>(r#"
-        SELECT e.id,e.target_language,e.kind,e.headword,e.owner_id,e.revision,e.updated_at,
-            ARRAY(SELECT DISTINCT s.part_of_speech FROM lexicon_next.senses s
-                JOIN lexicon_next.nodes n ON n.id=s.id
-                WHERE n.entry_id=e.id AND s.part_of_speech IS NOT NULL ORDER BY s.part_of_speech) AS part_of_speech,
-            (SELECT d.text FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id
-                WHERE n.entry_id=e.id ORDER BY CASE d.locale WHEN 'zh-Hans' THEN 0 WHEN 'zh-Hant' THEN 1 ELSE 2 END,d.sort_order,d.id LIMIT 1) AS gloss
-        FROM lexicon_next.entries e
-        WHERE e.status<>'archived' AND position(lower($1) in lower(e.headword)) > 0 AND ($2::text IS NULL OR e.kind=$2)
-        ORDER BY e.updated_at DESC,e.id DESC LIMIT $3 OFFSET $4
-    "#).bind(&headword).bind(kind).bind(i64::from(page_size)).bind(offset)
-        .fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    let mut count = sqlx::QueryBuilder::new("SELECT count(*) FROM lexicon_next.entries e");
+    super::workspace::filter(&mut count, &query);
+    let total = count
+        .build_query_scalar()
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+    let mut rows = super::workspace::select(query.medium_locale.as_deref());
+    super::workspace::filter(&mut rows, &query);
+    rows.push(" ORDER BY e.updated_at DESC,e.id DESC LIMIT ")
+        .push_bind(i64::from(size))
+        .push(" OFFSET ")
+        .push_bind(i64::from(page - 1) * i64::from(size));
+    let items = rows
+        .build_query_as()
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(NextEntryList {
         items,
-        pagination: crate::api::page_meta(page, page_size, total),
+        pagination: crate::api::page_meta(page, size, total),
     })
 }
+
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<NextEntry, AppError> {
     sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
         .bind(id)

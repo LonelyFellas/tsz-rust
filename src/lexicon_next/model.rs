@@ -127,6 +127,8 @@ pub struct NextViewQuery {
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
 pub struct NextListQuery {
+    pub target_language: Option<String>,
+    pub medium_locale: Option<String>,
     pub headword: Option<String>,
     pub kind: Option<NextEntryKind>,
     pub page: Option<u32>,
