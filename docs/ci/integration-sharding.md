@@ -141,15 +141,19 @@ other case may produce one. Full-shard discovery/execution auditing remains in
 place. Measurements include one-time bootstrap/verification overhead and actual
 clone/fresh counts, as well as the original phase timings. Compare both execution
 and compile/whole-job time against successful run 38225091081; do not treat
-cumulative concurrent phase savings as wall-time savings. This limited pilot
-does not promise to shorten the independent lexicon shard's critical path.
+cumulative concurrent phase savings as wall-time savings. The lexicon shards now
+use the same template route without a per-case whitelist: the template is built
+and verified by the identical migrator, so cloning is equivalent to a fresh
+database plus full migration, and the audit requires one clone per executed case.
 
 ## Lexicon handler lifecycle and maximum-batch measurements
 
-The lexicon-handler shard reuses the same verified SQLx 0.9.0 private-copy
-lifecycle timers, without the identity template/helper or cloning route. Every
-enabled case must retain fresh database creation, automatic migration, body,
-connection lifecycle and cleanup timing. The pagination shard retains its
+Both lexicon shards reuse the same verified SQLx 0.9.0 private-copy lifecycle
+timers and the same job-owned template route. Every executed case must clone the
+template exactly once; a missing, duplicate or foreign template use fails the
+job. Migration timers stay in the report: cloning skips the DDL work but still
+runs the idempotent migrator, so the phase stays observable instead of vanishing
+from the audit. The pagination shard retains its
 original business path and uses an explicit test-local Router scope; all existing execution/ignored-case audits remain in place.
 
 Only the disposable copy of the existing 50-entry cyclic maximum-batch test
