@@ -11,20 +11,6 @@ Linux 用 `ss -ltnp`、`/proc/<pid>/cwd`、`/proc/<pid>/exe`；权限不足标�
 现有 manifest/构建日志能证明版本就复用；mtime、端口、当前 HEAD 或 health 本身不能证明构建 SHA。
 需要新进程才能绑定来源时，记录构建输入 SHA/差异和启动句柄，不擅自把原监听服务停掉。
 
-## 前端配置与 mock
-
-| 来源                                                           | 核对内容                                                                                                  |
-| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `apps/web/next.config.mjs`                                     | `/api/v1` rewrites；`BACKEND_API_URL` 默认 `http://localhost:8383/api/v1`；同时核实构建时和启动时输入     |
-| `apps/admin/vite.config.ts`、`apps/admin/src/lib/dev-proxy.ts` | 当前 mode 加载的 env、serve 代理、路径 rewrite、cookie domain；preview 的实际路由单独验证                 |
-| `apps/admin/src/lib/env.ts`、`apps/admin/src/lib/env-flags.ts` | `VITE_API_BASE_URL` 默认 `/api/v1`；布尔值使用受支持的 `true`/`false`，不用 `0`/`TRUE` 猜含义             |
-| `e2e/playwright.admin.config.ts`、测试 `page.route`            | 现有 admin e2e 用 API 拦截，不提供真实后端证据；复用 server 时核实 PID 与来源                             |
-| 页面实际 client 装配                                           | 例如 `apps/web/src/features/placement/lib/client.ts` 当前直接创建 mock client；无真实接线的路径列为未接通 |
-
-真实 admin 验收检查 `VITE_ADMIN_WORDS_MOCK`、`VITE_ADMIN_PART_OF_SPEECH_MOCK`、`VITE_ADMIN_TTS_MOCK` 的有效值为 false。
-功能开关只核对目标路径需要的项；voice preview/editor、related search、audio upload 等状态不能用「全开」替代已实现契约。
-还要检查 browser route 拦截、service worker 或 fixture 是否替换了目标请求；不得输出登录凭据。
-
 ## 后端依赖与启动
 
 - `src/config.rs` 定义端口与配置，默认端口 8383；实际值以目标进程配置/监听为准。
@@ -38,3 +24,5 @@ Linux 用 `ss -ltnp`、`/proc/<pid>/cwd`、`/proc/<pid>/exe`；权限不足标�
 隔离库/Redis DB 或键空间仍有其他任务数据时不能整库清理。只删除本任务确实创建且可识别的 fixture；保留共享服务。
 
 代码更新不代表运行进程已重启，必须核对进程与制品来源；旧验收记录中的 PID、端口、数据库及 Redis DB 不是本技能的默认设置。
+
+有前端/Agent 调用链时读取各自任务 checkout 的 dev-env；前端代理、mock 和浏览器构建不由本文件推定。
