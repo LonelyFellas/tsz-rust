@@ -3,7 +3,12 @@ use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, Executor, PgConnection, SqlSafeStr, migrate::Migrator};
-use std::{collections::BTreeMap, path::Path, str::FromStr, time::Instant};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    str::FromStr,
+    time::{Duration, Instant},
+};
 
 static MIGRATOR: Migrator = sqlx::migrate!();
 
@@ -136,6 +141,32 @@ async fn snapshot(name: &str) -> Result<Value> {
     Ok(json!({"definitions": definitions, "data": data}))
 }
 
+// SQLx close flushes Terminate; PostgreSQL may still be unregistering the
+// backend. Wait for the server to observe zero sessions without terminating any.
+async fn wait_for_database_idle(
+    master: &mut PgConnection,
+    database: &str,
+    limit: Duration,
+) -> Result<bool> {
+    let drain = async {
+        loop {
+            let active: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=$1")
+                    .bind(database)
+                    .fetch_one(&mut *master)
+                    .await?;
+            if active == 0 {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    match tokio::time::timeout(limit, drain).await {
+        Ok(result) => result.map(|()| true).map_err(Into::into),
+        Err(_) => Ok(false),
+    }
+}
+
 async fn verify(
     master: &mut PgConnection,
     template: &str,
@@ -164,8 +195,18 @@ async fn verify(
     // Commit data, DDL and an actual application sequence change in A.
     a.execute("CREATE TABLE public.ci_isolation_probe (id bigint PRIMARY KEY); INSERT INTO public.ci_isolation_probe VALUES (1); UPDATE catalog.metadata SET version=version+1; SELECT nextval('lexicon.surface_projection_event_offset_seq')").await?;
     ensure!(snapshot(&probes[1]).await? == baseline, "A mutated B");
+    // A live session must remain a blocker; waiting must never terminate it.
+    ensure!(
+        !wait_for_database_idle(master, &probes[0], Duration::from_millis(40)).await?,
+        "active database connection was accepted as idle"
+    );
+    a.ping().await?;
     // Delete A while B is connected; SQLx cleanup must never affect another case.
     a.close().await?;
+    ensure!(
+        wait_for_database_idle(master, &probes[0], Duration::from_secs(2)).await?,
+        "closed database connection did not drain"
+    );
     let b = connect(&probes[1]).await?;
     master
         .execute(sql(format!("DROP DATABASE {}", quote(&probes[0]))))
@@ -205,7 +246,7 @@ async fn verify(
     );
     checksum.close().await?;
     Ok(
-        json!({"fresh_clone_equivalent": true, "data_schema_sequence_isolated": true, "cleanup_isolated": true, "template_unchanged": true, "dirty_rejected": true, "checksum_rejected": true, "state_sha256": Sha256::digest(baseline.to_string()).iter().map(|b| format!("{b:02x}")).collect::<String>(), "verification_ms": started.elapsed().as_millis()}),
+        json!({"fresh_clone_equivalent": true, "data_schema_sequence_isolated": true, "cleanup_isolated": true, "connection_drain_verified": true, "template_unchanged": true, "dirty_rejected": true, "checksum_rejected": true, "state_sha256": Sha256::digest(baseline.to_string()).iter().map(|b| format!("{b:02x}")).collect::<String>(), "verification_ms": started.elapsed().as_millis()}),
     )
 }
 
@@ -251,8 +292,7 @@ async fn main() -> Result<()> {
         ensure!(count as usize==MIGRATOR.iter().filter(|m| !m.migration_type.is_down_migration()).count(), "incomplete migration ledger");
         source.close().await?;
         master.execute(sql(format!("ALTER DATABASE {} ALLOW_CONNECTIONS false",quote(template)))).await?;
-        let active: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=$1").bind(template).fetch_one(&mut master).await?;
-        ensure!(active==0,"template connections remain open");
+        ensure!(wait_for_database_idle(&mut master, template, Duration::from_secs(2)).await?, "template connections remain open after drain deadline");
         let bootstrap_ms = started.elapsed().as_millis();
         let checks = verify(&mut master, template, &mut owned).await?;
         Ok(json!({"template":template,"migration_fingerprint":migration_fingerprint(&MIGRATOR),"migration_count":count,"bootstrap_ms":bootstrap_ms,"checks":checks}))

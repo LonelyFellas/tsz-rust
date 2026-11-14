@@ -43,6 +43,16 @@ identity 的两个 IP 预算用例包含 101/205 次请求，原 helper 每次�
 （排除编译，非 GitHub runner 性能承诺）。受影响 Python 检查 70 项通过。
 本批未调整 timeout、编译缓存、模板克隆白名单或分支保护。
 
+首轮 PR CI [43573896120](https://github.com/LonelyFellas/tsz-rust/actions/runs/43573896120)
+在 handler-b 的模板准备阶段失败（job `132383899310`，`template connections remain open`），
+尚未开始执行用例。`source.close().await` 发送 Terminate 后，PostgreSQL 仍可能短暂保留
+backend；原 helper 立即读取 `pg_stat_activity` 并断言为零，存在退出竞态。
+改为最多等待 2s、每 20ms 检查一次，SQL 错误直接失败，超时仍拒绝使用模板，不终止
+任何会话。模板等价/隔离验证增加真实活动连接的拒绝、连接未被终止（ping）及关闭后
+排空验证，作为每次 prepare 的运行检查。本地通过临时 manifest 注册真实 helper binary，
+在隔离 PostgreSQL 16 下连续完成 3 次 prepare / live-session 拒绝 / drain / cleanup，
+每次模板等价、数据/DDL/序列隔离、dirty/checksum 拒绝及连接排空检查均通过。
+
 ## 2026-11-14 第 1 批（已合并 #414）
 
 根因证据来自成功 main 运行 [43557475052](https://github.com/LonelyFellas/tsz-rust/actions/runs/43557475052)
