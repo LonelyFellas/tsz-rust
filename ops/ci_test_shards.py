@@ -14,10 +14,10 @@ from ci_test_modules import ClassificationError, cargo_command, classify_targets
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGINATION = "component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_late_entry"
-# Keep the pagination probe with wordlists; the other former companions ran
-# serially for another ~370 s. Schedule them on less loaded existing runners.
+# Keep pagination with wordlists; schedule the related question-bank target
+# with learning, which has spare capacity after the router preparation fix.
 PAGINATION_COMPANIONS = {"wordlists_handler"}
-PLATFORM_LEXICON_TARGETS = {"question_bank_handler"}
+LEARNING_COMPANIONS = {"question_bank_handler"}
 HANDLER_SHARD, HANDLER_TAIL_SHARD = "lexicon-handler", "lexicon-handler-b"
 # Split the handler executable across two runners by alternating sorted names;
 # new cases join automatically and verify still audits complete execution.
@@ -45,13 +45,11 @@ def targets_for(shard, grouped):
     if shard == "lexicon-pagination":
         return ("lexicon_handler",) + tuple(target for target in targets if target in PAGINATION_COMPANIONS)
     if shard == "lexicon-learning":
-        return tuple(target for target in targets if target.startswith("learning_"))
+        return tuple(target for target in targets if target.startswith("learning_") or target in LEARNING_COMPANIONS)
     if shard in (HANDLER_SHARD, HANDLER_TAIL_SHARD):
         return ("lexicon_handler",)
     if shard == "lexicon-other":
-        return tuple(target for target in targets if target != "lexicon_handler" and not target.startswith("learning_") and target not in PAGINATION_COMPANIONS and target not in PLATFORM_LEXICON_TARGETS)
-    if shard == "platform":
-        return targets + tuple(target for target in grouped["lexicon"] if target in PLATFORM_LEXICON_TARGETS)
+        return tuple(target for target in targets if target != "lexicon_handler" and not target.startswith("learning_") and target not in PAGINATION_COMPANIONS and target not in LEARNING_COMPANIONS)
     return targets
 
 

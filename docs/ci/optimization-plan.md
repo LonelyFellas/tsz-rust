@@ -1,8 +1,56 @@
 # Rust 后端 CI/CD 对标评估与优化方案
 
 评估日期：2026-11-03（Asia/Singapore）。本项目基线：`4e13630c01aebc4833457e47605d5fe337c024e4`。
-当前阶段：第 1 批优化已随 #414 合并，main `8d60adf` CI 全绿，墙钟 16m10s；第 2 批的 PR #415（`7a45450`）全绿，单次 PR 墙钟 13m55s；继续在该 PR 验证第 3 批的静态文档路由复用。本文是 CI 优化的唯一主记录，复用
+当前阶段：#415 已合并为 main `2f62a14`，代码树与已测的 `4ca0ee4` 相同；PR CI 10m34s，合并后 main CI 10m45s，均全绿。本轮在复用 worktree 的新分支 `codex/ci-admin-template-batch4` 上评估 admin 选择性模板克隆与题库调度。本文是 CI 优化的唯一主记录，复用
 [集成测试分片设计](integration-sharding.md)和[部署控制器说明](deployment-controller.md)，不另建发布体系。
+
+## 2026-11-14 第 4 批：选择性复用 admin 迁移初始状态
+
+固定基线为 main `2f62a14d0c8d6ec4d0ee99d498fc77321b963aba`。
+[main CI 43584586833](https://github.com/LonelyFellas/tsz-rust/actions/runs/43584586833)
+整体 10m45s，其中 admin job 530s（编译184s、执行306s），platform job 590s
+（编译202s、执行347s）。前一同代码树的 PR `4ca0ee4` / run 43582859848 为10m34s，
+admin / platform job 分别596s /536s。不能把不同 runner 的波动全归为代码变化。
+
+隔离 PostgreSQL16/Redis7 下，对全部 admin 用例插入现有 SQLx 生命周期计时，
+执行256个数据库用例及1个纯单元用例。数据库生命周期累计714.157s，其中自动迁移
+566.605s，约79%；累计量包含并行重叠，不是 CPU 时间或 job 墙钟。
+
+本批只对20个显式批准的普通 admin 业务 target 启用已有模板机制，并要求该用例
+存在自动 migrator、完整迁移 fingerprint 与 job-owned 模板一致。schema 与
+迁移/回退较密集的4个模块保持新库；白名单 target 内 `migrations=false` 的用例也
+保持新库。新 target 默认不启用模板。每个用例继续独享数据库/连接/清理，克隆后仍
+运行 migrator 验证账本；严格审计实际迁移事件与 clone marker 的一一对应。
+
+| 本地 admin 对照 | 全部新库迁移 | 选择性克隆 |
+| --- | ---: | ---: |
+| 数据库/纯单元用例数 | 256 / 1 | 256 / 1 |
+| 各测试进程运行耗时合计 | 64.804s | 25.714s |
+| 含测试发现等的运行墙钟 | 94.939s | 71.191s |
+| 自动迁移累计时间 | 566.605s | 129.808s |
+| clone / fresh | 0 / 256 | 198 / 58 |
+
+克隆侧包含模板建立、等价/隔离/排空/dirty/checksum检查与清理；两侧都不含编译。
+上表本地差异不能直接预测 GitHub 墙钟。所有原始用例及断言未修改。
+
+此前优化后 learning 的执行阶段为75s，platform 中 question_bank_handler 为64s；
+本批将整个题库 target 从 platform 调到 learning，保持8个 job、完整 target 归属与
+唯一执行审计。learning_runs_handler 与 question_bank_handler 的本地真实回归为
+39 passed、42 passed /2 ignored；74项受影响Python检查通过。对前版完整执行报告
+重放新归属，103 targets /1373 cases /8 shards，包含ignored的结果多重集不变。
+真实CI还需报告新增的模板构建成本、所有job和完整用例清单。
+
+### 并行 worktree 的基线复核
+
+#415 合并时，旧 HEAD `4ca0ee4` 与新 main `2f62a14` 的 tree 都为
+`bdc0156654ec7b3cb6f4b54bc32ef6c6e4946f2d`，因此已有功能验证可复用；旧 PR 已合并，
+本批从新 main 建分支，保留现有未提交改动并复用 worktree。
+
+同步检查了并行 #416（当时 OPEN，head `9eb4a24`），merge-base 已是 `2f62a14`。
+其新增迁移只调整 lexicon_next.nodes 的 kind CHECK，不增加种子数据；OpenAPI 和
+新增语法用例仍在现有 lexicon-next target 中。它会改变完整迁移 fingerprint，因此
+若进入本批新基线，必须重验模板等价性与执行清单；不能沿用旧 fingerprint 或把旧版
+计时标成新版结果。提 PR 前再次 fetch 并对新增主线改动检查受影响路径与冲突。
 
 ## 2026-11-14 第 3 批：静态文档路由复用与无依赖健康检查
 
