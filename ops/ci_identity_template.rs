@@ -114,7 +114,7 @@ async fn snapshot(name: &str) -> Result<Value> {
         for row in &mut rows {
             let fields: &[&str] = match (schema.as_str(), table.as_str()) {
                 ("public", "_sqlx_migrations") => &["installed_on", "execution_time"],
-                ("catalog", "metadata") => &["updated_at"],
+                ("catalog", "metadata" | "form_sharing_settings") => &["updated_at"],
                 ("catalog", "parts_of_speech" | "sub_parts_of_speech" | "form_types") => {
                     &["created_at", "updated_at"]
                 }
