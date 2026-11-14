@@ -7,7 +7,7 @@ import tempfile
 import tomllib
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ci_identity_profile import BATCH_COUNTS, BATCH_FIXTURES, BATCH_HTTP_REQUESTS, BATCH_TEST, PACKAGES, audit_router_pilot, audit_template_uses, instrument_core, instrument_maximum_batch, instrument_postgres, profile_lock, profile_manifest, replace_once, summarize, summarize_maximum_batch, template_cases, validate_profile_lock
+from ci_identity_profile import BATCH_COUNTS, BATCH_FIXTURES, BATCH_HTTP_REQUESTS, BATCH_TEST, PACKAGES, audit_cloned_cases, audit_router_pilot, audit_template_uses, instrument_core, instrument_maximum_batch, instrument_postgres, profile_lock, profile_manifest, replace_once, summarize, summarize_maximum_batch, template_cases, validate_profile_lock
 
 
 class IdentityProfileTests(unittest.TestCase):
@@ -102,6 +102,37 @@ class IdentityProfileTests(unittest.TestCase):
             mutation(changed)
             with self.assertRaises(ValueError):
                 audit_template_uses(changed, cases, "owned-template")
+
+    def test_clone_all_route_injects_module_wide_template_use(self):
+        source = (
+            "static MASTER_POOL: i32 = 1;\n"
+            '    let create_command = format!("create database {db_name:?}");\n'
+            "    conn.execute(AssertSqlSafe(create_command)).await?;\n"
+        )
+        patched = instrument_postgres(source, (), "fn migration_fingerprint() {}", clone_all=True)
+        self.assertIn("const CI_TEMPLATE_ALL: bool = true;", patched)
+        self.assertIn("const CI_TEMPLATE_CASES: &[&str] = &[\n\n];", patched)
+        self.assertIn("CI_TEMPLATE_ALL || CI_TEMPLATE_CASES.contains(&args.test_path)", patched)
+        whitelisted = instrument_postgres(source, ["auth_me::case"], "fn migration_fingerprint() {}")
+        self.assertIn("const CI_TEMPLATE_ALL: bool = false;", whitelisted)
+        self.assertIn('"auth_me::case"', whitelisted)
+        self.assertNotIn("CI_TEMPLATE_ALL ||", instrument_postgres(source))
+
+    def test_cloned_route_audit_requires_every_executed_case_once(self):
+        report = self.fixture()
+        executed = ["identity_test::case", "pure::unit"]
+        report["template_uses"] = [{"test": test, "template": "owned-template"} for test in executed]
+        self.assertEqual(audit_cloned_cases(report, "owned-template"), {"cloned_cases": 2, "fresh_sqlx_cases": 0})
+        for mutation in [
+            lambda r: r["template_uses"].pop(),
+            lambda r: r["template_uses"].append(r["template_uses"][0]),
+            lambda r: r["template_uses"][0].update(template="stale"),
+            lambda r: r["template_uses"][0].update(test="identity_test::other"),
+        ]:
+            changed = copy.deepcopy(report)
+            mutation(changed)
+            with self.assertRaises(ValueError):
+                audit_cloned_cases(changed, "owned-template")
 
     def test_whitelist_cannot_silently_expand_to_migration_tests(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -52,8 +52,26 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      # cargo-audit 每次从源码编译要 3 分钟，而它只随版本变化。缓存该二进制即
+      # 可复用；命中时 cargo install 会直接报 already installed 并成功退出。
+      - name: Restore pinned audit tool
+        id: audit-tool
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-audit-0.22.2
       - name: Install pinned audit tool
-        run: cargo install cargo-audit --version 0.22.2 --locked
+        # 缓存只恢复二进制，cargo 的安装记录不在缓存里。直接调用该二进制判断能否
+        # 复用（绕开 cargo/rustup 包装），不能就删掉重装，避免 "already exists"。
+        run: |
+          set -eu
+          binary="$HOME/.cargo/bin/cargo-audit"
+          if [ -x "$binary" ] && "$binary" --version >/dev/null 2>&1; then
+            echo "reusing cached $("$binary" --version)"
+          else
+            rm -f "$binary"
+            cargo install cargo-audit --version 0.22.2 --locked
+          fi
       - name: Audit locked dependencies
         run: cargo audit --deny warnings
 
@@ -328,12 +346,12 @@ jobs:
     if: github.event_name != 'schedule'
     name: Integration (${{ matrix.module }})
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ (matrix.module == 'lexicon-handler' || matrix.module == 'lexicon-other') && 35 || 20 }}
+    timeout-minutes: ${{ (startsWith(matrix.module, 'lexicon-handler') || matrix.module == 'lexicon-other') && 35 || 20 }}
 
     strategy:
       fail-fast: false
       matrix:
-        module: [lexicon-pagination, lexicon-learning, lexicon-handler, lexicon-other, admin, identity, platform]
+        module: [lexicon-pagination, lexicon-learning, lexicon-handler, lexicon-handler-b, lexicon-other, admin, identity, platform]
 
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/tsz_rust
@@ -488,6 +506,15 @@ jobs:
         with:
           name: lexicon-handler-phase-measurements
           path: target/ci-shards/lexicon-handler-phases.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload lexicon handler tail phase measurements
+        if: (matrix.module == 'lexicon-handler-b') && needs.change-scope.outputs.docs_only != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lexicon-handler-b-phase-measurements
+          path: target/ci-shards/lexicon-handler-b-phases.json
           if-no-files-found: error
           retention-days: 7
 

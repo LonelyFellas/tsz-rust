@@ -22,6 +22,11 @@ from ci_test_modules import classify_targets, discover_targets
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = {"sqlx-core", "sqlx-postgres"}
 PREFIX = "SQLX_CI_PHASE "
+# 这些分片会在一次性工作区里运行，并可以用预先迁移好的模板库克隆测试库。
+TEMPLATE_SHARDS = ("identity", "lexicon-handler", "lexicon-handler-b")
+# lexicon 分片没有按用例维护的白名单：模板由同一 migrator 建立并校验，
+# 克隆与“新建库 + 全量迁移”等价，因此全片启用比逐条列举更容易保持完整。
+CLONE_ALL_SHARDS = ("lexicon-handler", "lexicon-handler-b")
 
 TIMER = r'''
 /// Timing only: installed in a disposable CI source copy, never the registry.
@@ -108,17 +113,18 @@ def template_cases(root):
     return cases
 
 
-def instrument_postgres(source, cases=(), fingerprint=""):
-    if cases:
+def instrument_postgres(source, cases=(), fingerprint="", clone_all=False):
+    if cases or clone_all:
         helper = fingerprint.replace("sqlx::migrate::", "sqlx_core::migrate::")
         helper += '\nconst CI_TEMPLATE_CASES: &[&str] = &[\n' + ",\n".join(json.dumps(c) for c in cases) + '\n];\n'
+        helper += "\nconst CI_TEMPLATE_ALL: bool = %s;\n" % ("true" if clone_all else "false")
         source = replace_once(source, "static MASTER_POOL:", helper + "\nstatic MASTER_POOL:")
-        source = replace_once(source, '    let create_command = format!("create database {db_name:?}");', '''    let create_command = if CI_TEMPLATE_CASES.contains(&args.test_path) {
+        source = replace_once(source, '    let create_command = format!("create database {db_name:?}");', '''    let create_command = if CI_TEMPLATE_ALL || CI_TEMPLATE_CASES.contains(&args.test_path) {
         let template = std::env::var("SQLX_CI_TEMPLATE").expect("missing job-owned template");
         let suffix = template.strip_prefix("_tsz_ci_tpl_").expect("invalid template prefix");
         assert!(suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()));
         let expected = std::env::var("SQLX_CI_TEMPLATE_FINGERPRINT").expect("missing template fingerprint");
-        assert_eq!(migration_fingerprint(args.migrator.expect("whitelisted test needs migrations")), expected,
+        assert_eq!(migration_fingerprint(args.migrator.expect("cloned test needs migrations")), expected,
             "template belongs to different migrations");
         eprintln!("SQLX_CI_TEMPLATE_USE {{\\"test\\":{:?},\\"template\\":{:?}}}", args.test_path, template);
         format!("create database {db_name:?} template {template:?} strategy WAL_LOG")
@@ -320,15 +326,15 @@ def prepare(root, state, shard="identity"):
             package.extractall(state, filter="data")
         copy = state / f"{name}-0.9.0"
         fingerprint = ""
-        if shard == "identity":
+        if shard in TEMPLATE_SHARDS:
             helper_source = (root / "ops/ci_identity_template.rs").read_text()
             fingerprint = helper_source.split("// BEGIN MIGRATION FINGERPRINT\n")[1].split("// END MIGRATION FINGERPRINT")[0]
-        patched = instrument_core(upstream.decode()) if name == "sqlx-core" else instrument_postgres(upstream.decode(), template_cases(root) if shard == "identity" else (), fingerprint)
+        patched = instrument_core(upstream.decode()) if name == "sqlx-core" else instrument_postgres(upstream.decode(), template_cases(root) if shard == "identity" else (), fingerprint, shard in CLONE_ALL_SHARDS)
         (copy / relative).write_text(patched)
         evidence[name] = {"version": "0.9.0", "upstream_sha256": hashlib.sha256(upstream).hexdigest(), "timed_sha256": hashlib.sha256(patched.encode()).hexdigest()}
         patches[name] = str(copy)
     manifest = snapshot / "Cargo.toml"
-    helper_bin = '\n[[bin]]\nname = "ci-identity-template"\npath = "ops/ci_identity_template.rs"\n' if shard == "identity" else ""
+    helper_bin = '\n[[bin]]\nname = "ci-identity-template"\npath = "ops/ci_identity_template.rs"\n' if shard in TEMPLATE_SHARDS else ""
     manifest.write_text(profile_manifest(manifest.read_text(), patches, helper_bin))
     # Preserve every pinned transitive version; only the two reviewed path sources change.
     (snapshot / "Cargo.lock").write_text(profile_lock((root / "Cargo.lock").read_text()))
@@ -387,6 +393,17 @@ def summarize(report, unit_cases=()):
     return {"sha": report["sha"], "executed_cases": len(results), "profiled_sqlx_cases": len(cases) - len(units), "profiled_unit_cases": len(units), "unit_body_ms": round(sum(cases[key]["body"] for key in units) / 1000, 3), "without_sqlx_phases": [{"target": t, "name": n} for t, n in results.keys() - cases.keys()], "cumulative_phase_ms": totals, "slowest_cases": slowest}
 
 
+def audit_cloned_cases(report, template):
+    """全片克隆时每个执行用例必须恰好克隆一次，且都来自本 job 的模板。"""
+    executed = Counter(f"{row['target']}::{row['name']}" for row in report["executed"])
+    uses = report.get("template_uses", [])
+    if Counter(row["test"] for row in uses) != executed:
+        raise ValueError("cloned route did not cover every executed case exactly once")
+    if any(row["template"] != template for row in uses):
+        raise ValueError("cloned route used an unexpected template")
+    return {"cloned_cases": len(uses), "fresh_sqlx_cases": 0}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["build", "run"])
@@ -395,7 +412,7 @@ def main():
     parser.add_argument("--state", type=Path)
     args = parser.parse_args()
     args.state = (args.state or Path(os.environ.get("RUNNER_TEMP", str(ROOT / "target"))) / f"{args.shard}-phase-profile").resolve()
-    if args.shard not in ("identity", "lexicon-handler"):
+    if args.shard not in TEMPLATE_SHARDS:
         command = [sys.executable, str(ROOT / "ops/ci_test_shards.py"), args.action, args.shard]
         if args.report:
             command += ["--report", str(args.report)]
@@ -408,19 +425,6 @@ def main():
         if not args.report:
             parser.error("profiled run requires --report")
         command += ["--report", str(args.report.resolve())]
-    if args.shard == "lexicon-handler":
-        subprocess.run(command, cwd=snapshot, env=env, check=True)
-        if args.action == "run":
-            report = json.loads(args.report.read_text())
-            summary = summarize(report)
-            summary["source_evidence"] = json.loads((args.state / "source-evidence.json").read_text())
-            summary["maximum_batch"] = summarize_maximum_batch(report)
-            summary["router_pilot"] = audit_router_pilot(report)
-            if report.get("template_uses") or any("migration" not in {t["phase"] for t in report["timings"] if t["test"] == f"{r['target']}::{r['name']}"} for r in report["executed"]):
-                raise ValueError("lexicon profiling changed the fresh migration path")
-            (args.report.parent / "lexicon-handler-phases.json").write_text(json.dumps(summary, indent=2) + "\n")
-            print(json.dumps({"profiled_sqlx_cases": summary["profiled_sqlx_cases"], "cumulative_phase_ms": summary["cumulative_phase_ms"], "maximum_batch": summary["maximum_batch"]}), flush=True)
-        return
     helper = args.state / "template-executable.json"
     template_report = args.state / "template-checks.json"
     template = "_tsz_ci_tpl_" + uuid.uuid4().hex
@@ -450,15 +454,21 @@ def main():
             cleanup_started = time.monotonic()
             subprocess.run([executable, "cleanup", template, str(template_report)], cwd=snapshot, env=env, check=True)
             checks["cleanup_ms"] = round((time.monotonic() - cleanup_started) * 1000, 3)
-    if args.action == "run":
-        report = json.loads(args.report.read_text())
-        evidence = json.loads((args.state / "source-evidence.json").read_text())
-        summary = summarize(report, evidence["unit_cases"])
-        summary["source_evidence"] = evidence
+    report = json.loads(args.report.read_text())
+    evidence = json.loads((args.state / "source-evidence.json").read_text())
+    summary = summarize(report, evidence.get("unit_cases", ()))
+    summary["source_evidence"] = evidence
+    if args.shard == "identity":
         summary["template_pilot"] = {**checks, **audit_template_uses(report, template_cases(ROOT), template)}
         output = args.report.parent / "identity-phases.json"
-        output.write_text(json.dumps(summary, indent=2) + "\n")
-        print(json.dumps({"profiled_sqlx_cases": summary["profiled_sqlx_cases"], "cumulative_phase_ms": summary["cumulative_phase_ms"]}), flush=True)
+    else:
+        summary["template"] = {"template": template, "migration_fingerprint": checks["migration_fingerprint"], **audit_cloned_cases(report, template)}
+        if args.shard == "lexicon-handler":
+            summary["maximum_batch"] = summarize_maximum_batch(report)
+            summary["router_pilot"] = audit_router_pilot(report)
+        output = args.report.parent / f"{args.shard}-phases.json"
+    output.write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps({"profiled_sqlx_cases": summary["profiled_sqlx_cases"], "cumulative_phase_ms": summary["cumulative_phase_ms"], "template": summary.get("template") or summary.get("template_pilot")}), flush=True)
 
 
 if __name__ == "__main__":

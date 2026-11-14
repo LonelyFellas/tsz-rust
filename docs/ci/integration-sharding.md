@@ -11,15 +11,23 @@ fail-closed aggregate, so branch protection does not need to change.
   selected by its complete libtest name with `--exact`, plus the complete `wordlists_handler`,
   `question_bank_handler` and `shared_sentences` targets without that filter.
 - `lexicon-learning`: all `learning_*` targets without the pagination filter.
-- `lexicon-handler`: every other case in the same `lexicon_handler` executable.
-  The skip filter is rejected if it could accidentally match another case.
+- `lexicon-handler`: the profiling shard. It keeps every `batch5::` case (the
+  maximum-batch audit measures the same execution that contains the case) plus
+  every other `lexicon_handler` case at an even index after sorting by name.
+- `lexicon-handler-b`: the remaining `lexicon_handler` cases. The two shards skip
+  each other's complete case names, so a name that is a substring of a case the
+  other shard must run fails closed instead of silently dropping coverage.
 - `lexicon-other`: every other target in the original lexicon module, excluding
   `lexicon_handler`, `learning_*` and the three pagination companion targets.
 - `admin`, `identity`, `platform`: their original complete target sets.
 
 The old module classifier still requires every repository integration target to
-belong to exactly one logical module. New cases in lexicon_handler automatically
-join the handler shard; removing or renaming the pagination case fails closed.
+belong to exactly one logical module. New cases in `lexicon_handler` automatically
+join one of the two handler shards, so neither shard needs an edited case list;
+removing or renaming the pagination case fails closed. Splitting the handler
+executable is the only lever that lowers its wall time: one shard already
+saturates every core of the 4-vCPU runner, so the two shards halve its critical
+path at the cost of one more compile and runner.
 Each matrix job has its own PostgreSQL and Redis containers. No test result,
 database, publication, token or credential is cached or shared between jobs.
 There are three additional jobs compared with the original four modules, so reduced elapsed time may cost more aggregate
@@ -34,7 +42,7 @@ runs the same binaries, and checks actual result names against the selected
 inventory. Expected ignored cases are retained; unexpectedly ignored cases,
 failures, duplicates and omissions cannot produce a passing report.
 
-Seven reports are uploaded from the current run. The aggregate checks every
+Eight reports are uploaded from the current run. The aggregate checks every
 report's workflow SHA, complete target membership, matching shared-binary
 inventories, and actual execution counts. Every discovered integration case
 must occur exactly once across the reports. Missing jobs/reports fail the gate.
@@ -133,15 +141,19 @@ other case may produce one. Full-shard discovery/execution auditing remains in
 place. Measurements include one-time bootstrap/verification overhead and actual
 clone/fresh counts, as well as the original phase timings. Compare both execution
 and compile/whole-job time against successful run 38225091081; do not treat
-cumulative concurrent phase savings as wall-time savings. This limited pilot
-does not promise to shorten the independent lexicon shard's critical path.
+cumulative concurrent phase savings as wall-time savings. The lexicon shards now
+use the same template route without a per-case whitelist: the template is built
+and verified by the identical migrator, so cloning is equivalent to a fresh
+database plus full migration, and the audit requires one clone per executed case.
 
 ## Lexicon handler lifecycle and maximum-batch measurements
 
-The lexicon-handler shard reuses the same verified SQLx 0.9.0 private-copy
-lifecycle timers, without the identity template/helper or cloning route. Every
-enabled case must retain fresh database creation, automatic migration, body,
-connection lifecycle and cleanup timing. The pagination shard retains its
+Both lexicon shards reuse the same verified SQLx 0.9.0 private-copy lifecycle
+timers and the same job-owned template route. Every executed case must clone the
+template exactly once; a missing, duplicate or foreign template use fails the
+job. Migration timers stay in the report: cloning skips the DDL work but still
+runs the idempotent migrator, so the phase stays observable instead of vanishing
+from the audit. The pagination shard retains its
 original business path and uses an explicit test-local Router scope; all existing execution/ignored-case audits remain in place.
 
 Only the disposable copy of the existing 50-entry cyclic maximum-batch test

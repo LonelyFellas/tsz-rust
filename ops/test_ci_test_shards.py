@@ -29,7 +29,7 @@ class IntegrationShardsTests(unittest.TestCase):
             self.reports.append({"shard": shard, "sha": "exact-sha", "inventory": inventory, "executed": executed})
 
     def test_complete_partition_and_workflow_matrix(self):
-        self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha"), {"targets": 6, "cases": 8, "shards": 7})
+        self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha"), {"targets": 6, "cases": 8, "shards": 8})
         import re
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         matrix = re.search(r"module: \[([^\]]+)\]", workflow)[1].split(", ")
@@ -49,10 +49,10 @@ class IntegrationShardsTests(unittest.TestCase):
             pagination["inventory"][target] = {"names": ["ordinary", "ignored"], "ignored": ["ignored"]}
             pagination["executed"] += [{"target": target, "name": "ordinary", "status": "ok"},
                                        {"target": target, "name": "ignored", "status": "ignored"}]
-            self.assertEqual(filters_for("lexicon-pagination", target), [])
+            self.assertEqual(filters_for("lexicon-pagination", target, ["ordinary", "ignored"]), [])
             self.assertEqual(selected_cases("lexicon-pagination", target, ["ordinary", "ignored"]), ["ordinary", "ignored"])
             self.assertNotIn(target, targets_for("lexicon-other", self.grouped))
-        self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha"), {"targets": 9, "cases": 14, "shards": 7})
+        self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha"), {"targets": 9, "cases": 14, "shards": 8})
 
     def test_omitted_duplicate_or_unexpected_execution_fails(self):
         for mutation in [lambda r: r[1]["executed"].pop(), lambda r: r[1]["executed"].append(r[1]["executed"][0]), lambda r: r[1]["executed"].append({"target": "unknown", "name": "extra", "status": "ok"})]:
@@ -79,12 +79,23 @@ class IntegrationShardsTests(unittest.TestCase):
         for names in [["ordinary"], [PAGINATION, PAGINATION], [PAGINATION, PAGINATION + "_extra"]]:
             with self.assertRaises(ClassificationError):
                 selected_cases("lexicon-handler", "lexicon_handler", names)
-        self.assertEqual(filters_for("lexicon-pagination", "lexicon_handler"), [PAGINATION, "--exact"])
-        self.assertEqual(filters_for("lexicon-handler", "lexicon_handler"), ["--skip", PAGINATION])
-        self.assertEqual(filters_for("lexicon-pagination", "learning_runs_handler"), [])
+        names = [PAGINATION, "ordinary", "ignored_case"]
+        self.assertEqual(filters_for("lexicon-pagination", "lexicon_handler", names), [PAGINATION, "--exact"])
+        self.assertEqual(filters_for("lexicon-handler", "lexicon_handler", names), ["--skip", PAGINATION, "--skip", "ordinary"])
+        self.assertEqual(filters_for("lexicon-handler-b", "lexicon_handler", names), ["--skip", PAGINATION, "--skip", "ignored_case"])
+        # 两片互补且都不重跑分页用例。
+        self.assertEqual(selected_cases("lexicon-handler", "lexicon_handler", names), ["ignored_case"])
+        self.assertEqual(selected_cases("lexicon-handler-b", "lexicon_handler", names), ["ordinary"])
+        self.assertEqual(filters_for("lexicon-pagination", "learning_runs_handler", ["ordinary"]), [])
         self.assertEqual(targets_for("lexicon-pagination", self.grouped), ("lexicon_handler",))
         self.assertEqual(targets_for("lexicon-learning", self.grouped), ("learning_runs_handler",))
+        self.assertEqual(targets_for("lexicon-handler-b", self.grouped), ("lexicon_handler",))
         self.assertEqual(targets_for("lexicon-other", self.grouped), ("wordlists_test",))
+
+    def test_overlapping_skipped_names_are_rejected(self):
+        # --skip 是子串匹配：若某片要跑的名字包含另一片的名字，两片会漏跑。
+        with self.assertRaises(ClassificationError):
+            filters_for("lexicon-handler-b", "lexicon_handler", [PAGINATION, "v3_case", "v3_case_extended"])
 
     def test_build_uses_locked_all_feature_target_and_records_real_executable(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch("ci_test_shards.subprocess.run") as runner:
@@ -142,7 +153,8 @@ if '--list' in args:
     print(str(len(names)) + ' tests, 0 benchmarks')
 else:
     if '--exact' in args: names = [args[0]]
-    if '--skip' in args: names = [name for name in names if args[args.index('--skip')+1] not in name]
+    skips = [args[index + 1] for index, arg in enumerate(args) if arg == '--skip']
+    names = [name for name in names if not any(skip in name for skip in skips)]
     for name in names: print('test ' + name + ' ... ' + ('ignored' if name == 'ignored_case' else 'ok'))
 ''')
             binary.chmod(0o755)
@@ -157,18 +169,21 @@ else:
     print('test learning_case ... ok')
 ''')
             learning.chmod(0o755)
-            for shard in ["lexicon-pagination", "lexicon-learning", "lexicon-handler"]:
+            for shard in ["lexicon-pagination", "lexicon-learning", "lexicon-handler", "lexicon-handler-b"]:
                 executables = {target: str(binary if target == "lexicon_handler" else learning) for target in targets_for(shard, self.grouped)}
                 (root / f"{shard}-executables.json").write_text(json.dumps(executables))
                 with mock.patch.dict("os.environ", {"GITHUB_SHA": "exact-sha"}):
                     run(shard, self.grouped, root, root / f"{shard}-report.json")
             heavy = json.loads((root / "lexicon-pagination-report.json").read_text())
             rest = json.loads((root / "lexicon-handler-report.json").read_text())
+            tail = json.loads((root / "lexicon-handler-b-report.json").read_text())
             learned = json.loads((root / "lexicon-learning-report.json").read_text())
             self.assertEqual([row["name"] for row in heavy["executed"]], [PAGINATION])
             self.assertEqual([row["name"] for row in learned["executed"]], ["learning_case"])
-            self.assertEqual([row["name"] for row in rest["executed"]], ["ordinary", "ignored_case"])
+            self.assertEqual([row["name"] for row in rest["executed"]], ["ignored_case"])
+            self.assertEqual([row["name"] for row in tail["executed"]], ["ordinary"])
             self.assertEqual(heavy["inventory"]["lexicon_handler"], rest["inventory"]["lexicon_handler"])
+            self.assertEqual(tail["inventory"]["lexicon_handler"], rest["inventory"]["lexicon_handler"])
 
 
 if __name__ == "__main__":

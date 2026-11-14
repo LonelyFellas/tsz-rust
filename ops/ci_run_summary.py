@@ -9,6 +9,9 @@ import subprocess
 
 
 SUMMARY_JOB = "CI timing summary"
+# PR/main 关键路径的目标值。只用于报告偏差，不改变任何门禁：这个 job 在任何
+# depends_on 之外，且 continue-on-error，保持无授权改变质量检查结果。
+WALL_CLOCK_BUDGET_SECONDS = 900
 
 
 def seconds(start, end):
@@ -80,13 +83,27 @@ def summarize(run, jobs):
             "scope": "current attempt only; excludes summary job and reused jobs from previous attempts; runner minutes are not billed minutes"}
 
 
+def budget(report):
+    measured = report["measured_latency_seconds"]
+    if measured is None:
+        return None
+    return {"budget_seconds": WALL_CLOCK_BUDGET_SECONDS, "measured_seconds": measured,
+            "over_budget": measured > WALL_CLOCK_BUDGET_SECONDS}
+
+
 def markdown(report):
     lines = ["## CI attempt timings", "", report["scope"], "",
              f"Reused previous-attempt jobs (excluded from this attempt cost): {len(report['reused_jobs'])}.",
              f"Run {report['run_id']} / attempt {report['attempt']} / source head {report['head_sha']}",
              f"Evaluated workflow SHA: {report.get('workflow_sha') or 'unknown (historical API does not identify the PR merge checkout)'}",
              f"Measured latency: {report['measured_latency_seconds']} s; completed runner time: {report['completed_runner_minutes']} min.",
-             f"Last completed: {report['last_completed_job']}; longest job: {report['longest_job']}.",
+             f"Last completed: {report['last_completed_job']}; longest job: {report['longest_job']}."]
+    limit = budget(report)
+    if limit:
+        verdict = "over" if limit["over_budget"] else "within"
+        lines.append(f"Wall-clock budget: {limit['budget_seconds']} s ({verdict} the measured latency). "
+                     "A breach is reported for review and never changes a gate.")
+    lines += [
              "Created-to-start may include dependency and scheduling delay; missing timestamps remain unknown. This is not a reconstructed DAG critical path.", "",
              "| Job | Result | Wall s | Created-to-start s | Compile/lint s | Test s | Cache s | Upload s |",
              "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
@@ -127,6 +144,10 @@ def main():
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
             output.write(rendered)
     print(rendered)
+    limit = budget(report)
+    if limit and limit["over_budget"]:
+        print(f"::warning::CI attempt wall clock {limit['measured_seconds']} s exceeds the "
+              f"{limit['budget_seconds']} s budget; inspect the shard and phase columns above")
 
 
 if __name__ == "__main__":

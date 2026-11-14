@@ -15,10 +15,17 @@ from ci_test_modules import ClassificationError, cargo_command, classify_targets
 ROOT = Path(__file__).resolve().parents[1]
 PAGINATION = "component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_late_entry"
 PAGINATION_COMPANIONS = {"wordlists_handler", "question_bank_handler", "shared_sentences"}
+HANDLER_SHARD, HANDLER_TAIL_SHARD = "lexicon-handler", "lexicon-handler-b"
+# 词形共享与批量用例都压在同一个可执行文件里，单片已占满 runner 的全部核心。
+# 这里按名称交替二分，让两片各拿约一半用例时间；新增用例自动落入其中一片，
+# 完整性仍由 verify 审计保证。batch5 固定留在 profiling 片：identity-profile
+# 的 maximum-batch 审计要求该用例与被测量的同一次执行。
+HANDLER_ANCHOR_MODULES = ("batch5",)
 SHARD_MODULES = {
     "lexicon-pagination": "lexicon",
     "lexicon-learning": "lexicon",
-    "lexicon-handler": "lexicon",
+    HANDLER_SHARD: "lexicon",
+    HANDLER_TAIL_SHARD: "lexicon",
     "lexicon-other": "lexicon",
     "admin": "admin",
     "identity": "identity",
@@ -36,36 +43,49 @@ def targets_for(shard, grouped):
         return ("lexicon_handler",) + tuple(target for target in targets if target in PAGINATION_COMPANIONS)
     if shard == "lexicon-learning":
         return tuple(target for target in targets if target.startswith("learning_"))
-    if shard == "lexicon-handler":
+    if shard in (HANDLER_SHARD, HANDLER_TAIL_SHARD):
         return ("lexicon_handler",)
     if shard == "lexicon-other":
         return tuple(target for target in targets if target != "lexicon_handler" and not target.startswith("learning_") and target not in PAGINATION_COMPANIONS)
     return targets
 
 
+def handler_parts(names):
+    if names.count(PAGINATION) != 1:
+        raise ClassificationError("pagination case must exist exactly once")
+    # libtest --skip matches substrings; reject ambiguous future case names.
+    if any(PAGINATION in name and name != PAGINATION for name in names):
+        raise ClassificationError("ambiguous pagination skip filter")
+    anchors = sorted(name for name in names if name.partition("::")[0] in HANDLER_ANCHOR_MODULES)
+    rest = sorted(name for name in names if name != PAGINATION and name.partition("::")[0] not in HANDLER_ANCHOR_MODULES)
+    return anchors + rest[0::2], rest[1::2]
+
+
 def selected_cases(shard, target, names):
     if len(names) != len(set(names)):
         raise ClassificationError(f"duplicate discovered cases in {target}")
     if target == "lexicon_handler":
-        if names.count(PAGINATION) != 1:
-            raise ClassificationError("pagination case must exist exactly once")
-        # libtest --skip matches substrings; reject ambiguous future case names.
-        if any(PAGINATION in name and name != PAGINATION for name in names):
-            raise ClassificationError("ambiguous pagination skip filter")
         if shard == "lexicon-pagination":
+            handler_parts(names)
             return [PAGINATION]
-        if shard == "lexicon-handler":
-            return [name for name in names if name != PAGINATION]
+        if shard in (HANDLER_SHARD, HANDLER_TAIL_SHARD):
+            return handler_parts(names)[0 if shard == HANDLER_SHARD else 1]
     return names
 
 
-def filters_for(shard, target):
+def filters_for(shard, target, names):
     if target != "lexicon_handler":
         return []
     if shard == "lexicon-pagination":
         return [PAGINATION, "--exact"]
-    if shard == "lexicon-handler":
-        return ["--skip", PAGINATION]
+    if shard in (HANDLER_SHARD, HANDLER_TAIL_SHARD):
+        selected = set(selected_cases(shard, target, names))
+        skipped = [name for name in names if name not in selected]
+        # --skip 是子串匹配：任何本片要跑的用例名都不能包含被跳过的名字。
+        ambiguous = next((name for name in selected for other in skipped if other in name), None)
+        if ambiguous:
+            raise ClassificationError(f"ambiguous handler skip filter: {ambiguous}")
+        return [argument for name in skipped for argument in ("--skip", name)]
     return []
 
 
@@ -132,7 +152,7 @@ def run(shard, grouped, directory, report):
             current_results = results
             print(f"Running {target}: shard={shard}, selected={len(selected)}, discovered={len(names)}", flush=True)
             started = time.monotonic_ns()
-            with subprocess.Popen([executable, *filters_for(shard, target), "--show-output"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
+            with subprocess.Popen([executable, *filters_for(shard, target, names), "--show-output"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
                 for line in process.stdout:
                     print(line, end="", flush=True)
                     cleaned = ANSI.sub("", line).strip()
