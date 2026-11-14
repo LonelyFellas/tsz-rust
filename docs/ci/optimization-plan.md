@@ -1,22 +1,113 @@
 # Rust 后端 CI/CD 对标评估与优化方案
 
 评估日期：2026-11-03（Asia/Singapore）。本项目基线：`4e13630c01aebc4833457e47605d5fe337c024e4`。
-当前阶段：PR #381、#384 和结果文档 #385 均已合并，后续 main CI 成功；2026-11-05 的本地工程治理补丁与验证见下节，待 PR CI 验证，稳定低于15分钟尚未证明。本文是 CI 优化的唯一主记录，复用
+当前阶段：第 1 批优化已随 #414 合并，main `8d60adf` CI 全绿，墙钟 16m10s；第 2 批的 PR #415（`7a45450`）全绿，单次 PR 墙钟 13m55s；继续在该 PR 验证第 3 批的静态文档路由复用。本文是 CI 优化的唯一主记录，复用
 [集成测试分片设计](integration-sharding.md)和[部署控制器说明](deployment-controller.md)，不另建发布体系。
 
-## 2026-11-14 关键路径批次
+## 2026-11-14 第 3 批：静态文档路由复用与无依赖健康检查
+
+沿用未合并的 PR #415，直接对照成功提交 `7a45450` / PR CI
+[43575425865](https://github.com/LonelyFellas/tsz-rust/actions/runs/43575425865)，
+墙钟 13m55s，admin / identity / learning 的执行阶段各约 9 分钟。
+
+开源实现核对见 [Svix 的集成测试统一入口](https://github.com/svix/svix-webhooks/blob/bb44d9a55f2bd409cb502d8bdab6b2e28710846c/server/svix-server/tests/it/main.rs)
+与 [Kanidm 对独立测试二进制成本的说明](https://github.com/kanidm/kanidm/blob/e201a7240d2c5fbf6668336aa988c22d5c2681d5/server/testkit/tests/DO_NOT_ADD_MORE_TESTS_HERE)。
+本批先处理有直接测量的共性成本，暂不重组 103 个 target 或缩小 PR 用例范围。
+
+代码显示 `router(state)` 在 swagger feature 下每次调用 `ApiDoc::openapi()`，
+而多个 handler helper 每次请求都重建 Router。使用临时 manifest 注册探针，
+不连接数据库/Redis，debug/all-features 下连续构建 40 个 Router 用时 9.942s，
+单独构建 40 份 OpenAPI 用时 9.712s。该本地单次观测支持优化这个重复工作，
+不能作为 GitHub runner 墙钟的直接预测。复用后同一探针构建 40 个 Router 用时
+0.552s（包含首次文档初始化），同时独立生成 40 份 OpenAPI 仍为 9.695s；未通过
+跳过 schema 生成或更换输入来改变对照条件。
+
+方案：只将无 AppState 的 SwaggerUi 路由存入 `OnceLock<Router<AppState>>`。
+utoipa-swagger-ui 10.0.2 的 Axum 适配器已将文档放在 Arc 中，Router clone
+不会深拷贝 schema。业务路由、鉴权/本地化/请求 ID 中间件与每实例状态仍在缓存之外
+重新装配。发布默认 feature 不包含 swagger；独立 `ApiDoc::openapi()` 调用仍是新文档，
+用于快照/契约验证与导出。
+
+`healthz` 与 Swagger 静态资源测试改为 Tokio 测试，使用指向关闭端口的惰性依赖，
+验证这些公开静态端点无需活数据库/Redis；原响应、请求 ID、静态资源与完整 OpenAPI
+快照断言保留。新增两套不同语言 AppState 的交错请求，验证不同 Router 的状态和每请求
+request ID 隔离。就绪检查及所有业务数据库/并发用例继续按原路径运行。
+
+本地同环境对照（执行墙钟，不含编译）已通过：
+
+| target | 旧版 | 文档路由复用后 | 保留用例 |
+| --- | ---: | ---: | ---: |
+| account_security_handler | 13.02s | 6.91s | 25 |
+| admin_permissions_handler | 9.64s | 4.83s | 19 |
+| learning_runs_handler | 94.99s | 23.42s | 39 |
+
+原 83 个业务用例不变；all-features health 的 3 个用例（含文档快照与状态隔离）通过，
+默认 feature 的 2 个 health 用例也通过，分别执行 0.35s / 0.04s。
+完整 PR CI 的执行清单应保留历史 1372 个用例并增加 1 个隔离回归；所有分片、契约
+快照与原门禁均需通过。最终结果记录在 PR，避免仅为回填数据再触发一次全量 CI。
+
+## 2026-11-14 第 2 批：分片再平衡与登录 Router 复用
+
+基线为 #414 合并后的 main `8d60adf`，成功运行
+[43571328212](https://github.com/LonelyFellas/tsz-rust/actions/runs/43571328212)，
+墙钟 16m10s。紧邻的合并前 main 运行
+[43566354447](https://github.com/LonelyFellas/tsz-rust/actions/runs/43566354447)
+为 16m24s。首次 #414 PR 的 13m33s 不能作为稳定收益；累计生命周期计时包含并行
+等待，不能称作 CPU 时间，也不能直接相加推导墙钟。
+
+分页 job 本次编译 234s、执行 665s；identity 编译 166s、执行 634s。
+按完整执行报告中的 `target_timings`，两次相邻 main 的串行执行分布为：
+
+| target | #413 main | #414 main |
+| --- | ---: | ---: |
+| 分页用例（lexicon_handler 过滤） | 58.9s | 58.4s |
+| wordlists_handler | 233.2s | 236.5s |
+| question_bank_handler | 204.7s | 205.6s |
+| shared_sentences | 162.8s | 164.5s |
+| auth_login_handler（identity） | 108.0s | 148.6s |
+
+本批保持 8 个 matrix job，把完整 `question_bank_handler` target 从分页分片移到
+platform，把 `shared_sentences` 移到 lexicon-other；分页保留原用例与 wordlists。
+原逻辑模块归属仍是 lexicon，Cargo locked/all-features 配置和独立依赖服务一致。
+按 #414 的已有样本，新分页执行工作量为约 295s，而非原 665s；移入的两个分片需
+重新实测编译与执行，不能将历史 target 耗时直接等同新 job 耗时。
+
+identity 的两个 IP 预算用例包含 101/205 次请求，原 helper 每次重新构建完整 Router。
+复用本文件已有并发登录用例的做法，在每个测试中构建一次 Router，逐请求 clone，
+继续执行完整中间件、真实密码校验和真实 PostgreSQL/Redis。保留全部 14 个用例、
+请求参数、循环次数、限流阈值、错误与数据库断言，各用例独享 Router/AppState。
+
+执行审计已用 #414 的成功 main 报告重放新分片归属：103 targets / 1372 cases / 8 shards，
+执行结果（含忽略集合）多重集完全相同。增加原归属残留/双归属的拒绝验证；本地登录
+对照使用任务专属 PostgreSQL 16 / Redis 7 容器，连接全部显式指定，不使用共享实例。
+本地同命令 `cargo test --locked --all-features --test auth_login_handler -- --show-output`
+在修改前后均为 14 passed / 0 failed / 0 ignored，libtest 执行墙钟 55.53s → 8.47s
+（排除编译，非 GitHub runner 性能承诺）。受影响 Python 检查 70 项通过。
+本批未调整 timeout、编译缓存、模板克隆白名单或分支保护。
+
+首轮 PR CI [43573896120](https://github.com/LonelyFellas/tsz-rust/actions/runs/43573896120)
+在 handler-b 的模板准备阶段失败（job `132383899310`，`template connections remain open`），
+尚未开始执行用例。`source.close().await` 发送 Terminate 后，PostgreSQL 仍可能短暂保留
+backend；原 helper 立即读取 `pg_stat_activity` 并断言为零，存在退出竞态。
+改为最多等待 2s、每 20ms 检查一次，SQL 错误直接失败，超时仍拒绝使用模板，不终止
+任何会话。模板等价/隔离验证增加真实活动连接的拒绝、连接未被终止（ping）及关闭后
+排空验证，作为每次 prepare 的运行检查。本地通过临时 manifest 注册真实 helper binary，
+在隔离 PostgreSQL 16 下连续完成 3 次 prepare / live-session 拒绝 / drain / cleanup，
+每次模板等价、数据/DDL/序列隔离、dirty/checksum 拒绝及连接排空检查均通过。
+
+## 2026-11-14 第 1 批（已合并 #414）
 
 根因证据来自成功 main 运行 [43557475052](https://github.com/LonelyFellas/tsz-rust/actions/runs/43557475052)
 （`#410`，attempt 1，wall 22m18s）。该次 `lexicon-handler` job 独占 1303 s
 （编译 223 s、执行 1036 s），其余五个集成分片在 470–650 s 后空闲；`lexicon_handler`
-一片 194 个用例，按 SQLx 生命周期统计累计 4121 s CPU、migration 744 s（每用例 3.8 s）。
+一片 194 个用例，按 SQLx 生命周期统计累计 4121 s 用例耗时、migration 744 s（每用例 3.8 s）。
 同一批 job 各自冷编译（`cache-targets: false`），`Dependency audit` 的
 `cargo install cargo-audit` 占 198 s。
 
 | 批次 | 改动 | 目标 |
 | --- | --- | --- |
 | P0 | `lexicon-handler` 与 `lexicon-handler-b` 共享同一可执行文件，按用例名交替二分；`batch5` 固定在 profiling 片 | 关键路径约减半 |
-| P1 | 两个 lexicon 分片复用 identity 已验证的迁移模板克隆，无逐用例白名单，审计要求每个用例恰好克隆一次 | 再减 migration 累计 CPU |
+| P1 | 两个 lexicon 分片复用 identity 已验证的迁移模板克隆，无逐用例白名单，审计要求每个用例恰好克隆一次 | 再减 migration 累计耗时 |
 | P3 | 缓存 `cargo-audit` 二进制；`ci_run_summary` 报告 900 s 墙钟预算 | 省机时；超预算可见但不改门禁 |
 
 未实施：`cache-targets: true`。单个 debug/all-features target 通常 3–8 GiB，超过仓库

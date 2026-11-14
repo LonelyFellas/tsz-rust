@@ -4,6 +4,19 @@ use axum::http::{HeaderMap, Request, StatusCode, header::HeaderValue};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+// These routes must work without live infrastructure. Dead lazy connections
+// also make accidental database/Redis access fail instead of using a shared DB.
+fn state_without_dependencies() -> tsz_rust::state::AppState {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(100))
+        .connect_lazy("postgres://postgres@127.0.0.1:1/unused")
+        .unwrap();
+    let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1/0")
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .unwrap();
+    tsz_rust::state::AppState::for_test_with_redis(pool, redis)
+}
+
 fn assert_uuid_v7_request_id(headers: &HeaderMap) {
     let request_id = headers
         .get("x-request-id")
@@ -13,9 +26,9 @@ fn assert_uuid_v7_request_id(headers: &HeaderMap) {
     assert_eq!(request_id.get_version_num(), 7);
 }
 
-#[sqlx::test]
-async fn healthz_returns_ok(pool: sqlx::PgPool) {
-    let resp = tsz_rust::router(tsz_rust::state::AppState::for_test(pool))
+#[tokio::test]
+async fn healthz_returns_ok() {
+    let resp = tsz_rust::router(state_without_dependencies())
         .oneshot(
             Request::builder()
                 .uri("/healthz")
@@ -29,11 +42,11 @@ async fn healthz_returns_ok(pool: sqlx::PgPool) {
 }
 
 #[cfg(feature = "swagger")]
-#[sqlx::test]
-async fn swagger_routes_use_the_global_request_id_middleware(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn swagger_routes_use_the_global_request_id_middleware() {
     use http_body_util::BodyExt;
 
-    let app = tsz_rust::router(tsz_rust::state::AppState::for_test(pool));
+    let app = tsz_rust::router(state_without_dependencies());
     for (path, content_type) in [
         ("/api-docs/openapi.json", "application/json"),
         ("/swagger-ui/", "text/html"),
@@ -66,5 +79,49 @@ async fn swagger_routes_use_the_global_request_id_middleware(pool: sqlx::PgPool)
         if path == "/swagger-ui/swagger-initializer.js" {
             assert!(String::from_utf8_lossy(&body).contains("/api-docs/openapi.json"));
         }
+    }
+}
+
+#[tokio::test]
+async fn separately_built_routers_keep_state_and_request_ids_independent() {
+    use http_body_util::BodyExt;
+
+    let chinese = tsz_rust::router(state_without_dependencies());
+    let mut english_state = state_without_dependencies();
+    english_state.interface_languages = tsz_rust::i18n::InterfaceLanguages::from_pairs(&[
+        ("I18N_WEB_SUPPORTED_LOCALES".into(), "en-US".into()),
+        ("I18N_WEB_DEFAULT_LOCALE".into(), "en-US".into()),
+    ])
+    .unwrap();
+    let english = tsz_rust::router(english_state);
+    let mut request_ids = std::collections::HashSet::new();
+
+    for (app, locale) in [
+        (&chinese, "zh-Hans"),
+        (&english, "en-US"),
+        (&chinese, "zh-Hans"),
+        (&english, "en-US"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/i18n/capabilities?surface=web")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_uuid_v7_request_id(response.headers());
+        assert!(request_ids.insert(response.headers()["x-request-id"].clone()));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let capabilities: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(capabilities["default_locale"], locale);
+        assert_eq!(
+            capabilities["supported_locales"],
+            serde_json::json!([locale])
+        );
     }
 }
