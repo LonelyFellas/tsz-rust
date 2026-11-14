@@ -1,4 +1,5 @@
 //! Independent language-aware drafts; no legacy identities.
+mod audio;
 pub mod detection;
 pub mod entry_matches;
 mod forms;
@@ -92,6 +93,9 @@ pub async fn capabilities(
     }
     if supports_grammar(&headers) {
         capability.grammar_structures = Some(true);
+        if supports_grammar_audio(&headers) {
+            capability.grammar_audio = Some(true);
+        }
     }
     if supports_sense_groups(&headers) {
         capability.sense_groups = Some(true);
@@ -160,11 +164,24 @@ pub async fn save(
             "grammar structures require x-tsz-next-grammar: v1",
         ));
     }
+    if !supports_grammar_audio(&headers) && grammar::has_audio(&input.draft) {
+        return Err(AppError::unprocessable(
+            crate::error::ErrorCode::CapabilityUnavailable,
+            "grammar audio requires x-tsz-next-grammar-audio: v1",
+        ));
+    }
     permissions::load(&state, &auth)
         .await?
         .require("words.edit")?;
     Ok(Json(entry_for_client(
-        repository::save(&state.pool, &auth, id, input).await?,
+        repository::save(
+            &state.pool,
+            &auth,
+            id,
+            input,
+            supports_grammar_audio(&headers),
+        )
+        .await?,
         &headers,
     )))
 }
@@ -213,6 +230,9 @@ pub async fn view(
             }
         }
     }
+    if !supports_grammar_audio(&headers) {
+        grammar::strip_audio(view.grammar_structures.as_mut());
+    }
     if !supports_sense_groups(&headers) {
         view.sense_groups = None;
         for sense in &mut view.senses {
@@ -220,6 +240,13 @@ pub async fn view(
         }
     }
     Ok(Json(view))
+}
+
+fn supports_grammar_audio(headers: &axum::http::HeaderMap) -> bool {
+    supports_grammar(headers)
+        && headers
+            .get("x-tsz-next-grammar-audio")
+            .is_some_and(|value| value == "v1")
 }
 
 fn supports_grammar(headers: &axum::http::HeaderMap) -> bool {
@@ -249,6 +276,9 @@ fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> Ne
                 definition.grammar_structure_id = None;
             }
         }
+    }
+    if !supports_grammar_audio(headers) {
+        grammar::strip_audio(entry.draft.grammar_structures.as_mut());
     }
     if !supports_medium_ownership(headers) {
         entry.medium_locale = None;

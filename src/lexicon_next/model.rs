@@ -91,6 +91,16 @@ pub struct NextGrammarVariant {
     pub id: Uuid,
     pub locale: String,
     pub content: crate::lexicon::dto::RichTextV3,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_voice_profile"
+    )]
+    #[schema(nullable = false)]
+    pub voice_profile: Option<crate::lexicon::dto::VoiceProfileV3>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 8)]
+    pub audio_assets: Vec<crate::lexicon::audio_assets::dto::AudioAsset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -197,6 +207,9 @@ pub struct NextLanguageCapability {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub grammar_audio: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub grammar_structures: Option<bool>,
@@ -328,4 +341,10 @@ fn non_null_sub_pos<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
     String::deserialize(deserializer).map(Some)
+}
+
+fn non_null_voice_profile<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::lexicon::dto::VoiceProfileV3>, D::Error> {
+    crate::lexicon::dto::VoiceProfileV3::deserialize(deserializer).map(Some)
 }

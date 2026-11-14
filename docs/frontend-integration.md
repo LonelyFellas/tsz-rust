@@ -390,3 +390,10 @@ TASK#190 与后续 #402 的耦合：录音 `is_default` 保留 absent／true／f
 新增独立管理目录 API：`/api/v1/admin/lexicon/taxonomies/{kind}`，类别为 `registers` / `domains`；GET 分页搜索、POST 新建、PATCH `/{id}` 修改、DELETE `/{id}?base_revision=` 删除。修改也须发送 `base_revision`。读取沿用 `lexicon_settings.access`，新增/编辑使用 `lexicon_settings.edit_taxonomies`，删除沿用 `lexicon_settings.delete`；写入会在事务内重新核实授权。
 
 迁移 `20261113150000_lexicon_taxonomies` 仅新增目录表，尚未接入词条/译词/例句引用。配套前端任务主记录见 tsz 仓库 `docs/features/lexicon-taxonomies/README.md`，包含范围、错误契约、兼容顺序、验证与清理；不在此重复维护任务状态。
+
+
+### 新词库语法配音
+
+主记录在前端 `tsz` 仓库 `docs/features/lexicon-next-grammar-dubbing/README.md`。语法变体新增可选 `voice_profile`、`audio_assets`，复用现有音频生成、上传、资产所有权及引用保护，通过草稿 JSONB 持久化，无数据库迁移。
+
+客户端同时协商 `x-tsz-next-grammar: v1` 与 `x-tsz-next-grammar-audio: v1`，能力目录才返回 `grammar_audio: true` 并输出配音字段。旧客户端读取省略新增字段，旧写入按稳定变体 ID 保留已有配音；正文改变时清除旧音频引用。先发布后端再发布前端；已有配音数据后不能回退到不认识这些字段的后端。此任务不扩展新词库发布或后台自动更新队列。
