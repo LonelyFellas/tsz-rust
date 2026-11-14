@@ -286,7 +286,7 @@ pub(super) fn preserve_audio(draft: &mut NextDraft, previous: &NextDraft) {
     {
         if let Some(previous) = old.get(&variant.id) {
             variant.voice_profile = previous.voice_profile.clone();
-            if variant.content.text() == previous.content.text() {
+            if variant.content == previous.content {
                 variant.audio_assets = previous.audio_assets.clone();
             } else if let Some(profile) = &mut variant.voice_profile {
                 for voice in &mut profile.voices {
