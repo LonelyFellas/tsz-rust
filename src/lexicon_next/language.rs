@@ -166,7 +166,11 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
     Ok(())
 }
 
-pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView, AppError> {
+pub fn view(
+    entry: &NextEntry,
+    selection: NextViewQuery,
+    parents: &std::collections::HashMap<String, String>,
+) -> Result<NextEntryView, AppError> {
     require_language(&entry.target_language)?;
     if !matches!(selection.target_locale.as_str(), "en-GB" | "en-US")
         || !matches!(selection.medium_locale.as_str(), "zh-Hans" | "zh-Hant")
@@ -224,11 +228,7 @@ pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView
                         .iter()
                         .flatten()
                         .find(|g| g.id == id)
-                        .is_none_or(|g| {
-                            Some(g.part_of_speech.as_str()) != sense.part_of_speech.as_deref()
-                                || g.sub_pos.as_deref().unwrap_or("")
-                                    != sense.sub_pos.as_deref().unwrap_or("")
-                        })
+                        .is_none_or(|g| !super::grammar::matches_sense(g, sense, parents))
                 }) {
                     definition.grammar_structure_id = None;
                 }
@@ -254,6 +254,13 @@ pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView
     Ok(NextEntryView {
         grammar_structures: entry.draft.grammar_structures.as_ref().map(|rows| {
             rows.iter()
+                .filter(|g| {
+                    super::grammar::valid_subcategory(
+                        &g.part_of_speech,
+                        g.sub_pos.as_deref().unwrap_or(""),
+                        parents,
+                    )
+                })
                 .cloned()
                 .map(|mut grammar| {
                     let exact = grammar

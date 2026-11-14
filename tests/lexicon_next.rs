@@ -2721,6 +2721,52 @@ async fn grammar_rich_variants_bind_subcategories_and_protect_legacy_drafts(pool
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{collision}");
+    let mut restored = content.clone();
+    restored["grammar_structures"][0]["sub_pos"] = json!("N-COUNT");
+    let (status, _) = call_grammar(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":restored}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query(
+        "UPDATE catalog.sub_parts_of_speech SET code='N-COUNT-CHANGED' WHERE code='N-COUNT'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (_, stale_view) = call_grammar(&state, actor, "GET", &view_path, Value::Null).await;
+    assert_eq!(
+        stale_view["grammar_structures"],
+        json!([]),
+        "目录失效结构不能继续作为有效投影：{stale_view}"
+    );
+    assert!(
+        stale_view["senses"][0]["target_definitions"][0]
+            .get("grammar_structure_id")
+            .is_none()
+    );
+    for node in [
+        restored["grammar_structures"][0]["id"].clone(),
+        restored["senses"][0]["id"].clone(),
+    ] {
+        assert!(
+            stale_view["grammar_issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["node_id"] == node && issue["field"] == "sub_pos")
+        );
+    }
+    sqlx::query(
+        "UPDATE catalog.sub_parts_of_speech SET code='N-COUNT' WHERE code='N-COUNT-CHANGED'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     assert!(
         sqlx::raw_sql(include_str!(
             "../migrations/20261114130000_lexicon_next_grammar.down.sql"

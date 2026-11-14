@@ -89,6 +89,28 @@ pub(super) async fn validate_catalog(
     Ok(())
 }
 
+pub(super) fn valid_subcategory(pos: &str, sub: &str, parents: &HashMap<String, String>) -> bool {
+    if sub.is_empty() {
+        !parents.values().any(|parent| parent == pos)
+    } else {
+        parents.get(sub).is_some_and(|parent| parent == pos)
+    }
+}
+
+pub(super) fn matches_sense(
+    grammar: &NextGrammarStructure,
+    sense: &NextSense,
+    parents: &HashMap<String, String>,
+) -> bool {
+    Some(grammar.part_of_speech.as_str()) == sense.part_of_speech.as_deref()
+        && grammar.sub_pos.as_deref().unwrap_or("") == sense.sub_pos.as_deref().unwrap_or("")
+        && valid_subcategory(
+            &grammar.part_of_speech,
+            grammar.sub_pos.as_deref().unwrap_or(""),
+            parents,
+        )
+}
+
 /// Incomplete bindings may be saved; the language view reports what still needs repair.
 pub(super) fn issues(
     draft: &NextDraft,
@@ -106,12 +128,9 @@ pub(super) fn issues(
             message: message.into(),
         })
     };
-    let required = |pos: &str| parents.values().any(|p| p == pos);
     for grammar in grammars {
         let sub = grammar.sub_pos.as_deref().unwrap_or("");
-        if (required(&grammar.part_of_speech) && sub.is_empty())
-            || (!sub.is_empty() && parents.get(sub) != Some(&grammar.part_of_speech))
-        {
+        if !valid_subcategory(&grammar.part_of_speech, sub, parents) {
             add(
                 grammar.id,
                 "sub_pos",
@@ -130,17 +149,14 @@ pub(super) fn issues(
     }
     for sense in &draft.senses {
         let sub = sense.sub_pos.as_deref().unwrap_or("");
-        if sense.part_of_speech.as_deref().is_some_and(required) && sub.is_empty() {
+        if !valid_subcategory(sense.part_of_speech.as_deref().unwrap_or(""), sub, parents) {
             add(sense.id, "sub_pos", "请选择义项的细分词性");
         }
         for definition in &sense.definitions {
             if definition
                 .grammar_structure_id
                 .and_then(|id| by_id.get(&id))
-                .is_none_or(|g| {
-                    Some(g.part_of_speech.as_str()) != sense.part_of_speech.as_deref()
-                        || g.sub_pos.as_deref().unwrap_or("") != sub
-                })
+                .is_none_or(|g| !matches_sense(g, sense, parents))
             {
                 add(
                     definition.id,

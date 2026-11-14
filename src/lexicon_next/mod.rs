@@ -188,16 +188,19 @@ pub async fn view(
             "entry belongs to another medium locale",
         ));
     }
-    let mut view = language::view(&entry, query)?;
-    if supports_grammar(&headers) {
+    let parents = if supports_grammar(&headers) && entry.draft.grammar_structures.is_some() {
         let mut conn = state.pool.acquire().await.map_err(AppError::internal)?;
-        view.grammar_issues = entry.draft.grammar_structures.as_ref().map(|_| Vec::new());
-        if view.grammar_issues.is_some() {
-            view.grammar_issues = Some(grammar::issues(
-                &entry.draft,
-                &grammar::catalog(&mut conn).await?,
-            ));
-        }
+        grammar::catalog(&mut conn).await?
+    } else {
+        Default::default()
+    };
+    let mut view = language::view(&entry, query, &parents)?;
+    if supports_grammar(&headers) {
+        view.grammar_issues = entry
+            .draft
+            .grammar_structures
+            .as_ref()
+            .map(|_| grammar::issues(&entry.draft, &parents));
     } else {
         view.grammar_structures = None;
         for sense in &mut view.senses {
