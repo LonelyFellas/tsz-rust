@@ -65,6 +65,9 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
                 text: surface.into(),
             }],
             senses: vec![NextSense {
+                level: None,
+                frequency: None,
+                depends_on_context: None,
                 sub_pos: None,
                 sense_group_id: None,
                 id: Uuid::now_v7(),
@@ -202,4 +205,38 @@ fn legacy_grammar_annotation_edits_invalidate_audio_without_losing_voice_setting
             .get("audio_asset_id")
             .is_none()
     );
+}
+
+#[test]
+fn sense_metadata_uses_v1_numeric_rules_without_backfilling_legacy_drafts() {
+    let raw = json!({"schema_version":1,"headword":"job","forms":[],"senses":[{
+        "id":Uuid::now_v7(),"part_of_speech":"noun","definitions":[],"equivalents":[]
+    }]});
+    let legacy: NextDraft = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(legacy).unwrap(), raw);
+    for frequency in ["0", "100", "0.01", "95.50", "100.00"] {
+        let mut value = raw.clone();
+        value["senses"][0]["level"] = json!("A1");
+        value["senses"][0]["frequency"] = json!(frequency);
+        value["senses"][0]["depends_on_context"] = json!(false);
+        language::validate("en", &serde_json::from_value(value).unwrap()).unwrap();
+    }
+    for (field, invalid) in [
+        ("level", "A0"),
+        ("frequency", "100.01"),
+        ("frequency", "-1"),
+        ("frequency", "1.234"),
+        ("frequency", "NaN"),
+        ("frequency", "1e1"),
+        ("frequency", ""),
+    ] {
+        let mut value = raw.clone();
+        value["senses"][0][field] = json!(invalid);
+        assert!(language::validate("en", &serde_json::from_value(value).unwrap()).is_err());
+    }
+    for field in ["level", "frequency", "depends_on_context"] {
+        let mut value = raw.clone();
+        value["senses"][0][field] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<NextDraft>(value).is_err());
+    }
 }

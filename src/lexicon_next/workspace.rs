@@ -88,9 +88,9 @@ pub(super) fn filter(sql: &mut QueryBuilder<Postgres>, query: &NextWorkspaceQuer
     if let Some(pos) = &query.pos {
         sql.push(" AND (EXISTS(SELECT 1 FROM lexicon_next.senses s JOIN lexicon_next.nodes n ON n.id=s.id WHERE n.entry_id=e.id AND s.part_of_speech=").push_bind(pos).push(") OR EXISTS(SELECT 1 FROM lexicon_next.draft_revisions r, jsonb_array_elements(COALESCE(r.document->'form_editor'->'pos','[]'::jsonb)) p WHERE r.entry_id=e.id AND r.revision=e.revision AND p->>'pos'=").push_bind(pos).push("))");
     }
-    // Language foundation drafts have no CEFR classification yet. Never infer one.
-    if query.level.is_some() {
-        sql.push(" AND FALSE");
+    if let Some(level) = &query.level {
+        sql.push(" AND EXISTS(SELECT 1 FROM lexicon_next.draft_revisions r, jsonb_array_elements(r.document->'senses') s WHERE r.entry_id=e.id AND r.revision=e.revision AND s->>'level'=")
+            .push_bind(level).push(")");
     }
     if let Some(owner) = query.created_by {
         sql.push(" AND e.owner_id=").push_bind(owner);

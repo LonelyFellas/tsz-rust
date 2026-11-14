@@ -53,6 +53,27 @@ pub struct NextEquivalent {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextSense {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_sub_pos"
+    )]
+    #[schema(nullable = false)]
+    pub level: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_sub_pos"
+    )]
+    #[schema(nullable = false)]
+    pub frequency: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_bool"
+    )]
+    #[schema(nullable = false)]
+    pub depends_on_context: Option<bool>,
     pub id: Uuid,
     #[serde(
         default,
@@ -209,6 +230,9 @@ pub struct NextLanguageCapability {
 pub struct NextCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub sense_metadata: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub grammar_audio: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -277,6 +301,15 @@ pub struct NextEntryList {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextSenseView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub frequency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub depends_on_context: Option<bool>,
     pub id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -347,4 +380,10 @@ fn non_null_voice_profile<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<crate::lexicon::dto::VoiceProfileV3>, D::Error> {
     crate::lexicon::dto::VoiceProfileV3::deserialize(deserializer).map(Some)
+}
+
+fn non_null_bool<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    bool::deserialize(deserializer).map(Some)
 }

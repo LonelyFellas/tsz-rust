@@ -14,6 +14,7 @@ mod meanings;
 mod structure;
 
 use helpers::*;
+pub(crate) use helpers::{valid_level, valid_percent};
 
 pub use meanings::validate_meanings;
 pub use structure::MAX_STEP_CONTENT_BODY_BYTES;
