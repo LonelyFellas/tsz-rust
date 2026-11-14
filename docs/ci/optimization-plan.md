@@ -1,22 +1,61 @@
 # Rust 后端 CI/CD 对标评估与优化方案
 
 评估日期：2026-11-03（Asia/Singapore）。本项目基线：`4e13630c01aebc4833457e47605d5fe337c024e4`。
-当前阶段：PR #381、#384 和结果文档 #385 均已合并，后续 main CI 成功；2026-11-05 的本地工程治理补丁与验证见下节，待 PR CI 验证，稳定低于15分钟尚未证明。本文是 CI 优化的唯一主记录，复用
+当前阶段：第 1 批优化已随 #414 合并，main `8d60adf` CI 全绿，墙钟 16m10s；第 2 批按该版本的 target 明细调整调度与登录测试准备，远端收益待测。本文是 CI 优化的唯一主记录，复用
 [集成测试分片设计](integration-sharding.md)和[部署控制器说明](deployment-controller.md)，不另建发布体系。
 
-## 2026-11-14 关键路径批次
+## 2026-11-14 第 2 批：分片再平衡与登录 Router 复用
+
+基线为 #414 合并后的 main `8d60adf`，成功运行
+[43571328212](https://github.com/LonelyFellas/tsz-rust/actions/runs/43571328212)，
+墙钟 16m10s。紧邻的合并前 main 运行
+[43566354447](https://github.com/LonelyFellas/tsz-rust/actions/runs/43566354447)
+为 16m24s。首次 #414 PR 的 13m33s 不能作为稳定收益；累计生命周期计时包含并行
+等待，不能称作 CPU 时间，也不能直接相加推导墙钟。
+
+分页 job 本次编译 234s、执行 665s；identity 编译 166s、执行 634s。
+按完整执行报告中的 `target_timings`，两次相邻 main 的串行执行分布为：
+
+| target | #413 main | #414 main |
+| --- | ---: | ---: |
+| 分页用例（lexicon_handler 过滤） | 58.9s | 58.4s |
+| wordlists_handler | 233.2s | 236.5s |
+| question_bank_handler | 204.7s | 205.6s |
+| shared_sentences | 162.8s | 164.5s |
+| auth_login_handler（identity） | 108.0s | 148.6s |
+
+本批保持 8 个 matrix job，把完整 `question_bank_handler` target 从分页分片移到
+platform，把 `shared_sentences` 移到 lexicon-other；分页保留原用例与 wordlists。
+原逻辑模块归属仍是 lexicon，Cargo locked/all-features 配置和独立依赖服务一致。
+按 #414 的已有样本，新分页执行工作量为约 295s，而非原 665s；移入的两个分片需
+重新实测编译与执行，不能将历史 target 耗时直接等同新 job 耗时。
+
+identity 的两个 IP 预算用例包含 101/205 次请求，原 helper 每次重新构建完整 Router。
+复用本文件已有并发登录用例的做法，在每个测试中构建一次 Router，逐请求 clone，
+继续执行完整中间件、真实密码校验和真实 PostgreSQL/Redis。保留全部 14 个用例、
+请求参数、循环次数、限流阈值、错误与数据库断言，各用例独享 Router/AppState。
+
+执行审计已用 #414 的成功 main 报告重放新分片归属：103 targets / 1372 cases / 8 shards，
+执行结果（含忽略集合）多重集完全相同。增加原归属残留/双归属的拒绝验证；本地登录
+对照使用任务专属 PostgreSQL 16 / Redis 7 容器，连接全部显式指定，不使用共享实例。
+本地同命令 `cargo test --locked --all-features --test auth_login_handler -- --show-output`
+在修改前后均为 14 passed / 0 failed / 0 ignored，libtest 执行墙钟 55.53s → 8.47s
+（排除编译，非 GitHub runner 性能承诺）。受影响 Python 检查 70 项通过。
+本批未调整 timeout、编译缓存、模板克隆白名单或分支保护。
+
+## 2026-11-14 第 1 批（已合并 #414）
 
 根因证据来自成功 main 运行 [43557475052](https://github.com/LonelyFellas/tsz-rust/actions/runs/43557475052)
 （`#410`，attempt 1，wall 22m18s）。该次 `lexicon-handler` job 独占 1303 s
 （编译 223 s、执行 1036 s），其余五个集成分片在 470–650 s 后空闲；`lexicon_handler`
-一片 194 个用例，按 SQLx 生命周期统计累计 4121 s CPU、migration 744 s（每用例 3.8 s）。
+一片 194 个用例，按 SQLx 生命周期统计累计 4121 s 用例耗时、migration 744 s（每用例 3.8 s）。
 同一批 job 各自冷编译（`cache-targets: false`），`Dependency audit` 的
 `cargo install cargo-audit` 占 198 s。
 
 | 批次 | 改动 | 目标 |
 | --- | --- | --- |
 | P0 | `lexicon-handler` 与 `lexicon-handler-b` 共享同一可执行文件，按用例名交替二分；`batch5` 固定在 profiling 片 | 关键路径约减半 |
-| P1 | 两个 lexicon 分片复用 identity 已验证的迁移模板克隆，无逐用例白名单，审计要求每个用例恰好克隆一次 | 再减 migration 累计 CPU |
+| P1 | 两个 lexicon 分片复用 identity 已验证的迁移模板克隆，无逐用例白名单，审计要求每个用例恰好克隆一次 | 再减 migration 累计耗时 |
 | P3 | 缓存 `cargo-audit` 二进制；`ci_run_summary` 报告 900 s 墙钟预算 | 省机时；超预算可见但不改门禁 |
 
 未实施：`cache-targets: true`。单个 debug/all-features target 通常 3–8 GiB，超过仓库

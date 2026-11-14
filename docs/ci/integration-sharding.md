@@ -8,8 +8,8 @@ fail-closed aggregate, so branch protection does not need to change.
 ## Partition
 
 - `lexicon-pagination`: the existing 251-entry/2008-candidate pagination case,
-  selected by its complete libtest name with `--exact`, plus the complete `wordlists_handler`,
-  `question_bank_handler` and `shared_sentences` targets without that filter.
+  selected by its complete libtest name with `--exact`, plus the complete
+  `wordlists_handler` target without that filter.
 - `lexicon-learning`: all `learning_*` targets without the pagination filter.
 - `lexicon-handler`: the profiling shard. It keeps every `batch5::` case (the
   maximum-batch audit measures the same execution that contains the case) plus
@@ -17,20 +17,25 @@ fail-closed aggregate, so branch protection does not need to change.
 - `lexicon-handler-b`: the remaining `lexicon_handler` cases. The two shards skip
   each other's complete case names, so a name that is a substring of a case the
   other shard must run fails closed instead of silently dropping coverage.
-- `lexicon-other`: every other target in the original lexicon module, excluding
-  `lexicon_handler`, `learning_*` and the three pagination companion targets.
-- `admin`, `identity`, `platform`: their original complete target sets.
+- `lexicon-other`: every other target in the original lexicon module, including
+  `shared_sentences`, excluding `lexicon_handler`, `learning_*`, `wordlists_handler`
+  and `question_bank_handler`.
+- `admin`, `identity`: their original complete target sets.
+- `platform`: its original targets plus the complete `question_bank_handler`
+  target. This is a scheduling assignment; the module classifier still owns it
+  under lexicon. Every shard uses the same locked/all-features compilation and
+  isolated PostgreSQL/Redis services.
 
 The old module classifier still requires every repository integration target to
 belong to exactly one logical module. New cases in `lexicon_handler` automatically
 join one of the two handler shards, so neither shard needs an edited case list;
-removing or renaming the pagination case fails closed. Splitting the handler
-executable is the only lever that lowers its wall time: one shard already
-saturates every core of the 4-vCPU runner, so the two shards halve its critical
-path at the cost of one more compile and runner.
+removing or renaming the pagination case fails closed. The two handler shards
+run their separate case sets on independent runners, at the cost of another
+compilation. Cumulative case timings include overlapping waits and are not CPU
+measurements; elapsed-time gains must be measured on complete CI attempts.
 Each matrix job has its own PostgreSQL and Redis containers. No test result,
 database, publication, token or credential is cached or shared between jobs.
-There are three additional jobs compared with the original four modules, so reduced elapsed time may cost more aggregate
+There are four additional jobs compared with the original four modules, so reduced elapsed time may cost more aggregate
 runner minutes; compiler and cache changes are outside this optimization.
 
 ## Execution audit

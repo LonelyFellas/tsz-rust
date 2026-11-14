@@ -14,12 +14,15 @@ from ci_test_modules import ClassificationError, cargo_command, classify_targets
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGINATION = "component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_late_entry"
-PAGINATION_COMPANIONS = {"wordlists_handler", "question_bank_handler", "shared_sentences"}
+# Keep the pagination probe with wordlists; the other former companions ran
+# serially for another ~370 s. Schedule them on less loaded existing runners.
+PAGINATION_COMPANIONS = {"wordlists_handler"}
+PLATFORM_LEXICON_TARGETS = {"question_bank_handler"}
 HANDLER_SHARD, HANDLER_TAIL_SHARD = "lexicon-handler", "lexicon-handler-b"
-# 词形共享与批量用例都压在同一个可执行文件里，单片已占满 runner 的全部核心。
-# 这里按名称交替二分，让两片各拿约一半用例时间；新增用例自动落入其中一片，
-# 完整性仍由 verify 审计保证。batch5 固定留在 profiling 片：identity-profile
-# 的 maximum-batch 审计要求该用例与被测量的同一次执行。
+# Split the handler executable across two runners by alternating sorted names;
+# new cases join automatically and verify still audits complete execution.
+# Keep batch5 in the profiling shard because the maximum-batch audit measures
+# that same execution.
 HANDLER_ANCHOR_MODULES = ("batch5",)
 SHARD_MODULES = {
     "lexicon-pagination": "lexicon",
@@ -46,7 +49,9 @@ def targets_for(shard, grouped):
     if shard in (HANDLER_SHARD, HANDLER_TAIL_SHARD):
         return ("lexicon_handler",)
     if shard == "lexicon-other":
-        return tuple(target for target in targets if target != "lexicon_handler" and not target.startswith("learning_") and target not in PAGINATION_COMPANIONS)
+        return tuple(target for target in targets if target != "lexicon_handler" and not target.startswith("learning_") and target not in PAGINATION_COMPANIONS and target not in PLATFORM_LEXICON_TARGETS)
+    if shard == "platform":
+        return targets + tuple(target for target in grouped["lexicon"] if target in PLATFORM_LEXICON_TARGETS)
     return targets
 
 
