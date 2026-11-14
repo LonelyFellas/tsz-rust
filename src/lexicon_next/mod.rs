@@ -85,6 +85,9 @@ pub async fn capabilities(
         .await?
         .require("words.access")?;
     let mut capability = language::capabilities();
+    if supports_sense_metadata(&headers) {
+        capability.sense_metadata = Some(true);
+    }
     if headers
         .get("x-tsz-next-forms")
         .is_some_and(|value| value == "v1")
@@ -158,6 +161,16 @@ pub async fn save(
     headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<SaveNextDraft>,
 ) -> Result<Json<NextEntry>, AppError> {
+    if !supports_sense_metadata(&headers)
+        && input.draft.senses.iter().any(|sense| {
+            sense.level.is_some() || sense.frequency.is_some() || sense.depends_on_context.is_some()
+        })
+    {
+        return Err(AppError::unprocessable(
+            crate::error::ErrorCode::CapabilityUnavailable,
+            "sense metadata requires x-tsz-next-sense-metadata: v1",
+        ));
+    }
     if input.draft.grammar_structures.is_some() && !supports_grammar(&headers) {
         return Err(AppError::unprocessable(
             crate::error::ErrorCode::CapabilityUnavailable,
@@ -180,6 +193,7 @@ pub async fn save(
             id,
             input,
             supports_grammar_audio(&headers),
+            supports_sense_metadata(&headers),
         )
         .await?,
         &headers,
@@ -239,6 +253,13 @@ pub async fn view(
             sense.sense_group_id = None;
         }
     }
+    if !supports_sense_metadata(&headers) {
+        for sense in &mut view.senses {
+            sense.level = None;
+            sense.frequency = None;
+            sense.depends_on_context = None;
+        }
+    }
     Ok(Json(view))
 }
 
@@ -267,7 +288,20 @@ fn supports_sense_groups(headers: &axum::http::HeaderMap) -> bool {
         .is_some_and(|value| value == "v1")
 }
 
+fn supports_sense_metadata(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-tsz-next-sense-metadata")
+        .is_some_and(|value| value == "v1")
+}
+
 fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> NextEntry {
+    if !supports_sense_metadata(headers) {
+        for sense in &mut entry.draft.senses {
+            sense.level = None;
+            sense.frequency = None;
+            sense.depends_on_context = None;
+        }
+    }
     if !supports_grammar(headers) {
         entry.draft.grammar_structures = None;
         for sense in &mut entry.draft.senses {

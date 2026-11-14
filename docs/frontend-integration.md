@@ -397,3 +397,9 @@ TASK#190 与后续 #402 的耦合：录音 `is_default` 保留 absent／true／f
 主记录在前端 `tsz` 仓库 `docs/features/lexicon-next-grammar-dubbing/README.md`。语法变体新增可选 `voice_profile`、`audio_assets`，复用现有音频生成、上传、资产所有权及引用保护，通过草稿 JSONB 持久化，无数据库迁移。
 
 客户端同时协商 `x-tsz-next-grammar: v1` 与 `x-tsz-next-grammar-audio: v1`，能力目录才返回 `grammar_audio: true` 并输出配音字段。旧客户端读取省略新增字段，旧写入按稳定变体 ID 保留已有配音；正文改变时清除旧音频引用。先发布后端再发布前端；已有配音数据后不能回退到不认识这些字段的后端。此任务不扩展新词库发布或后台自动更新队列。
+
+## 新词库词义总体数据
+
+主记录与验收位于前端 `tsz/docs/features/lexicon-sense-metadata/README.md`。`NextSense` 和语言视图增加可选、非 null 的 `level`、`frequency`（十进制字符串）、`depends_on_context`，通过现有草稿 JSONB 保存，无迁移；等级及 0–100 / 最多两位小数的词频规则复用 V1 校验。
+
+协商 `x-tsz-next-sense-metadata: v1` 后能力目录返回 `sense_metadata: true`。旧客户端响应省略扩展，旧写入按稳定义项 ID 保留已保存总体数据；新客户端可清空词频。等级筛选使用当前保存版本。先发后端再发前端；出现新字段草稿后不可直接回退到不认识这些字段的旧后端二进制。AI 生成和审核不在本轮范围。

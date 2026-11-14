@@ -80,12 +80,36 @@ async fn call_audio_client(
     capabilities: (bool, bool, bool),
     audio: bool,
 ) -> (StatusCode, Value) {
+    call_editor_client(
+        state,
+        actor,
+        method,
+        path,
+        body,
+        capabilities,
+        (audio, false),
+    )
+    .await
+}
+async fn call_editor_client(
+    state: &AppState,
+    actor: Option<Uuid>,
+    method: &str,
+    path: &str,
+    body: Value,
+    capabilities: (bool, bool, bool),
+    extensions: (bool, bool),
+) -> (StatusCode, Value) {
+    let (audio, metadata) = extensions;
     let (groups, ownership, grammar) = capabilities;
     let mut req = Request::builder()
         .method(method)
         .uri(format!("{ROOT}{path}"))
         .header("content-type", "application/json")
         .header("x-tsz-next-forms", "v1");
+    if metadata {
+        req = req.header("x-tsz-next-sense-metadata", "v1");
+    }
     if audio {
         req = req.header("x-tsz-next-grammar-audio", "v1");
     }
@@ -3010,4 +3034,196 @@ async fn grammar_audio_round_trips_preserves_legacy_and_owns_assets_with_forms(p
         references,
         vec![Uuid::parse_str(assets[0]["id"].as_str().unwrap()).unwrap()]
     );
+}
+
+#[sqlx::test]
+async fn sense_metadata_roundtrips_and_legacy_edits_preserve_values(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let reader = admin(&pool, &["words.access"]).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut content = draft();
+    content["senses"][0]["level"] = json!("B2");
+    content["senses"][0]["frequency"] = json!("95.50");
+    content["senses"][0]["depends_on_context"] = json!(true);
+    let request = json!({"expected_revision":1,"draft":content});
+    assert_eq!(
+        call(&state, Some(actor), "PUT", &path, request.clone())
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        call_editor_client(
+            &state,
+            Some(reader),
+            "PUT",
+            &path,
+            request.clone(),
+            (false, false, false),
+            (false, true)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, saved) = call_editor_client(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        request.clone(),
+        (false, false, false),
+        (false, true),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["draft"], content);
+    assert_eq!(
+        call_editor_client(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            request,
+            (false, false, false),
+            (false, true)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let (status, read) = call_editor_client(
+        &state,
+        Some(actor),
+        "GET",
+        &path,
+        Value::Null,
+        (false, false, false),
+        (false, true),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["draft"], content);
+    let view_path = format!("{path}/view?target_locale=en-US&medium_locale=zh-Hans");
+    let (_, view) = call_editor_client(
+        &state,
+        Some(actor),
+        "GET",
+        &view_path,
+        Value::Null,
+        (false, false, false),
+        (false, true),
+    )
+    .await;
+    assert_eq!(view["senses"][0]["level"], "B2");
+    assert_eq!(view["senses"][0]["frequency"], "95.50");
+    assert_eq!(view["senses"][0]["depends_on_context"], true);
+    for endpoint in [&path, &view_path] {
+        let (_, legacy) = call(&state, Some(actor), "GET", endpoint, Value::Null).await;
+        let senses = if endpoint == &path {
+            &legacy["draft"]["senses"]
+        } else {
+            &legacy["senses"]
+        };
+        for field in ["level", "frequency", "depends_on_context"] {
+            assert!(senses[0].get(field).is_none());
+        }
+    }
+    let (_, legacy) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    let mut old_content = legacy["draft"].clone();
+    old_content["headword"] = json!("centre legacy edit");
+    assert_eq!(
+        call(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":2,"draft":old_content})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, read) = call_editor_client(
+        &state,
+        Some(actor),
+        "GET",
+        &path,
+        Value::Null,
+        (false, false, false),
+        (false, true),
+    )
+    .await;
+    assert_eq!(read["draft"]["senses"][0], content["senses"][0]);
+    // The list and counters use only the current saved revision, never historical classifications.
+    let (_, page) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/workspace/entries?level=B2",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(page["pagination"]["total"], 1);
+    let (_, stats) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/workspace/stats?level=B2",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(stats["total"], 1);
+    let mut updated = read["draft"].clone();
+    updated["senses"][0]["level"] = json!("C1");
+    updated["senses"][0]["depends_on_context"] = json!(false);
+    updated["senses"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("frequency");
+    let (_, saved) = call_editor_client(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":updated}),
+        (false, false, false),
+        (false, true),
+    )
+    .await;
+    assert_eq!(saved["draft"], updated);
+    assert!(saved["draft"]["senses"][0].get("frequency").is_none());
+    let (_, page) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/workspace/entries?level=B2",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(page["pagination"]["total"], 0);
+    let (_, page) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/workspace/entries?level=C1",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(page["pagination"]["total"], 1);
+    let (_, caps) = call(&state, Some(actor), "GET", "/capabilities", Value::Null).await;
+    assert!(caps.get("sense_metadata").is_none());
+    let (_, caps) = call_editor_client(
+        &state,
+        Some(actor),
+        "GET",
+        "/capabilities",
+        Value::Null,
+        (false, false, false),
+        (false, true),
+    )
+    .await;
+    assert_eq!(caps["sense_metadata"], true);
 }

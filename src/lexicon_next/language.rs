@@ -19,6 +19,7 @@ pub(super) const POS: &[&str] = &[
 ];
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
+        sense_metadata: None,
         grammar_audio: None,
         grammar_structures: None,
         medium_ownership: None,
@@ -131,6 +132,17 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
     for sense in &draft.senses {
         identity(&mut ids, sense.id)?;
         if sense
+            .level
+            .as_deref()
+            .is_some_and(|value| !crate::lexicon::validation::valid_level(value))
+            || sense
+                .frequency
+                .as_deref()
+                .is_some_and(|value| !crate::lexicon::validation::valid_percent(value))
+        {
+            return Err(invalid());
+        }
+        if sense
             .sense_group_id
             .is_some_and(|id| !group_ids.contains(&id))
         {
@@ -241,6 +253,9 @@ pub fn view(
                 .cloned()
                 .collect();
             NextSenseView {
+                level: sense.level.clone(),
+                frequency: sense.frequency.clone(),
+                depends_on_context: sense.depends_on_context,
                 id: sense.id,
                 sense_group_id: sense.sense_group_id,
                 missing_target_definitions: target_definitions.is_empty(),

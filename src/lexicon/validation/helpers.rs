@@ -54,7 +54,7 @@ pub(super) fn valid_rich_text(value: &RichTextV3) -> bool {
     crate::lexicon::rich_text::is_valid_native(value)
 }
 
-pub(super) fn valid_percent(value: &str) -> bool {
+pub(crate) fn valid_percent(value: &str) -> bool {
     let Some((whole, decimal)) = value.split_once('.').map_or_else(
         || Some((value, None)),
         |(whole, decimal)| Some((whole, Some(decimal))),
@@ -76,7 +76,7 @@ pub(super) fn valid_percent(value: &str) -> bool {
         .is_ok_and(|number| (0.0..=100.0).contains(&number))
 }
 
-pub(super) fn valid_level(value: &str) -> bool {
+pub(crate) fn valid_level(value: &str) -> bool {
     matches!(value, "A1" | "A2" | "B1" | "B2" | "C1" | "C2")
 }
 

@@ -177,6 +177,7 @@ pub async fn save(
     id: Uuid,
     mut input: SaveNextDraft,
     supports_audio: bool,
+    supports_sense_metadata: bool,
 ) -> Result<NextEntry, AppError> {
     if input.expected_revision < 1 {
         return Err(language::invalid());
@@ -219,6 +220,20 @@ pub async fn save(
         .await
         .map_err(AppError::internal)?
         .entry()?;
+    if !supports_sense_metadata {
+        for sense in &mut draft.senses {
+            if let Some(saved) = previous
+                .draft
+                .senses
+                .iter()
+                .find(|saved| saved.id == sense.id)
+            {
+                sense.level = saved.level.clone();
+                sense.frequency = saved.frequency.clone();
+                sense.depends_on_context = saved.depends_on_context;
+            }
+        }
+    }
     if previous.draft.grammar_structures.is_some() && draft.grammar_structures.is_none() {
         return Err(AppError::unprocessable(
             ErrorCode::InvalidRequestBody,
