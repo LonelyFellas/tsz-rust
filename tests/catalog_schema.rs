@@ -1841,6 +1841,15 @@ async fn form_sharing_seed_uses_real_catalog_ids_and_migration_roundtrip_preserv
             .await
             .unwrap();
     let mut tx = pool.begin().await.unwrap();
+    // Only an explicitly configuration-free fixture may exercise destructive down/up.
+    sqlx::query("DELETE FROM catalog.form_sharing_groups")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM catalog.form_sharing_settings")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20261114110000_form_sharing_templates.down.sql"
     ))
@@ -1884,6 +1893,15 @@ async fn form_sharing_seed_uses_real_catalog_ids_and_migration_roundtrip_preserv
 #[sqlx::test]
 async fn form_sharing_seed_skips_incomplete_pairs_without_inventing_types(pool: PgPool) {
     let mut tx = pool.begin().await.unwrap();
+    // Only an explicitly configuration-free fixture may exercise destructive down/up.
+    sqlx::query("DELETE FROM catalog.form_sharing_groups")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM catalog.form_sharing_settings")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20261114110000_form_sharing_templates.down.sql"
     ))

@@ -157,6 +157,15 @@ mod tests {
     async fn default_template_undo_refusal_preserves_catalog_schema_and_entire_ledger(
         pool: PgPool,
     ) {
+        // Reach the older #160 guard without the newer sharing configuration guard masking it.
+        sqlx::query("DELETE FROM catalog.form_sharing_groups")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM catalog.form_sharing_settings")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("UPDATE catalog.form_types SET is_default=false WHERE code='plural'")
             .execute(&pool)
             .await
@@ -179,6 +188,94 @@ mod tests {
             before, after,
             "a refused deployment undo must preserve data, indexes and every migration row"
         );
+    }
+
+    async fn form_sharing_recovery_snapshot(pool: &PgPool) -> serde_json::Value {
+        // VACUUM maintenance counters may change without changing schema or application data.
+        let schema: serde_json::Value = sqlx::query_scalar(r#"
+            WITH namespaces AS (
+                SELECT oid FROM pg_namespace
+                WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema'
+            ), relations AS (SELECT oid FROM pg_class WHERE relnamespace IN (SELECT oid FROM namespaces))
+            SELECT jsonb_build_object(
+                'namespaces', (SELECT jsonb_agg(to_jsonb(n) ORDER BY oid) FROM pg_namespace n WHERE oid IN (SELECT oid FROM namespaces)),
+                'relations', (SELECT jsonb_agg(to_jsonb(c) - ARRAY['relpages','reltuples','relallvisible','relallfrozen','relfrozenxid'] ORDER BY oid) FROM pg_class c WHERE oid IN (SELECT oid FROM relations)),
+                'columns', (SELECT jsonb_agg(to_jsonb(a) ORDER BY attrelid,attnum) FROM pg_attribute a WHERE attrelid IN (SELECT oid FROM relations)),
+                'defaults', (SELECT jsonb_agg(to_jsonb(d) ORDER BY oid) FROM pg_attrdef d WHERE adrelid IN (SELECT oid FROM relations)),
+                'constraints', (SELECT jsonb_agg(to_jsonb(c) ORDER BY oid) FROM pg_constraint c WHERE connamespace IN (SELECT oid FROM namespaces)),
+                'indexes', (SELECT jsonb_agg(to_jsonb(i) ORDER BY indexrelid) FROM pg_index i WHERE indrelid IN (SELECT oid FROM relations)),
+                'triggers', (SELECT jsonb_agg(to_jsonb(t) ORDER BY oid) FROM pg_trigger t WHERE tgrelid IN (SELECT oid FROM relations)),
+                'functions', (SELECT jsonb_agg(to_jsonb(p) ORDER BY oid) FROM pg_proc p WHERE pronamespace IN (SELECT oid FROM namespaces)),
+                'types', (SELECT jsonb_agg(to_jsonb(t) ORDER BY oid) FROM pg_type t WHERE typnamespace IN (SELECT oid FROM namespaces)),
+                'sequences', (SELECT jsonb_agg(to_jsonb(s) ORDER BY schemaname,sequencename) FROM pg_sequences s WHERE schemaname NOT LIKE 'pg_%' AND schemaname <> 'information_schema')
+            )
+        "#).fetch_one(pool).await.unwrap();
+        let tables: Vec<(String, String)> = sqlx::query_as(
+            "SELECT schemaname,tablename FROM pg_tables WHERE schemaname NOT LIKE 'pg_%' AND schemaname <> 'information_schema' ORDER BY 1,2",
+        ).fetch_all(pool).await.unwrap();
+        let mut data = std::collections::BTreeMap::new();
+        for (schema, table) in tables {
+            let qualified = format!(
+                "\"{}\".\"{}\"",
+                schema.replace('"', "\"\""),
+                table.replace('"', "\"\"")
+            );
+            let rows: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM {qualified} t"
+            ))).fetch_one(pool).await.unwrap();
+            data.insert(format!("{schema}.{table}"), rows);
+        }
+        serde_json::json!({"schema": schema, "data": data})
+    }
+
+    #[sqlx::test]
+    async fn form_sharing_undo_refusal_preserves_all_schema_data_and_ledger(pool: PgPool) {
+        for scenario in ["seed", "custom", "empty_template"] {
+            if scenario == "custom" {
+                sqlx::query("UPDATE catalog.form_sharing_groups SET sort_order=sort_order+10")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "UPDATE catalog.form_sharing_settings SET revision=revision+1,updated_at=now()",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+            } else if scenario == "empty_template" {
+                sqlx::query("DELETE FROM catalog.form_sharing_groups")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            let before = form_sharing_recovery_snapshot(&pool).await;
+            let current: i64 =
+                sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let result = undo(&pool, 20261114100000, current).await;
+            let tables_remain: bool = sqlx::query_scalar("SELECT to_regclass('catalog.form_sharing_settings') IS NOT NULL AND to_regclass('catalog.form_sharing_groups') IS NOT NULL AND to_regclass('catalog.form_sharing_members') IS NOT NULL AND to_regclass('catalog.form_sharing_template') IS NOT NULL")
+                .fetch_one(&pool).await.unwrap();
+            assert!(
+                result.is_err(),
+                "{scenario}: configured undo must refuse; got {result:?}; sharing tables/view remain={tables_remain}"
+            );
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(
+                error.contains("form sharing templates require manual recovery"),
+                "{error}"
+            );
+            let after = form_sharing_recovery_snapshot(&pool).await;
+            let changed: Vec<_> = ["schema", "data"]
+                .into_iter()
+                .filter(|section| before[section] != after[section])
+                .collect();
+            assert!(
+                before == after,
+                "{scenario}: refusal must preserve all schema, application data and the complete migration ledger; changed={changed:?}"
+            );
+        }
     }
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;

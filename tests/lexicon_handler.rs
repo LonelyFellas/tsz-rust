@@ -17846,6 +17846,15 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
+    // Reach the older form-template guard without the newer sharing guard masking it.
+    sqlx::query("DELETE FROM catalog.form_sharing_groups")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM catalog.form_sharing_settings")
+        .execute(&pool)
+        .await
+        .unwrap();
     let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, current_version)
         .await
         .unwrap_err();
