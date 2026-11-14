@@ -1,0 +1,196 @@
+use super::{language, model::*};
+use crate::error::{AppError, ErrorCode};
+use sqlx::PgConnection;
+use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
+
+pub(super) fn validate(draft: &NextDraft, ids: &mut HashSet<Uuid>) -> Result<(), AppError> {
+    let grammars = draft.grammar_structures.as_deref().unwrap_or_default();
+    for grammar in grammars {
+        language::identity(ids, grammar.id)?;
+        if !language::POS.contains(&grammar.part_of_speech.as_str()) {
+            return Err(language::invalid());
+        }
+        let mut locales = HashSet::new();
+        for variant in &grammar.variants {
+            language::identity(ids, variant.id)?;
+            if !matches!(variant.locale.as_str(), "en" | "en-GB" | "en-US")
+                || !locales.insert(variant.locale.as_str())
+                || !crate::lexicon::rich_text::is_valid_native(&variant.content)
+            {
+                return Err(language::invalid());
+            }
+        }
+        if locales.contains("en") && locales.len() > 1 {
+            return Err(language::invalid());
+        }
+    }
+    for sense in &draft.senses {
+        if draft.grammar_structures.is_none()
+            && (sense.sub_pos.is_some()
+                || sense
+                    .definitions
+                    .iter()
+                    .any(|d| d.grammar_structure_id.is_some()))
+        {
+            return Err(language::invalid());
+        }
+        for definition in &sense.definitions {
+            if definition
+                .grammar_structure_id
+                .is_some_and(|id| !grammars.iter().any(|g| g.id == id))
+            {
+                return Err(AppError::unprocessable(
+                    ErrorCode::InvalidRequestBody,
+                    "释义引用的语法结构不存在，请重新选择",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn catalog(conn: &mut PgConnection) -> Result<HashMap<String, String>, AppError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT s.code,p.code::text FROM catalog.sub_parts_of_speech s JOIN catalog.parts_of_speech p ON p.id=s.part_of_speech_id"
+    ).fetch_all(conn).await.map_err(AppError::internal)?;
+    Ok(rows.into_iter().collect())
+}
+
+pub(super) async fn validate_catalog(
+    conn: &mut PgConnection,
+    draft: &NextDraft,
+) -> Result<(), AppError> {
+    if draft.grammar_structures.is_none() {
+        return Ok(());
+    }
+    let parents = catalog(conn).await?;
+    for (pos, sub) in draft
+        .grammar_structures
+        .iter()
+        .flatten()
+        .map(|g| (Some(g.part_of_speech.as_str()), g.sub_pos.as_deref()))
+        .chain(
+            draft
+                .senses
+                .iter()
+                .map(|s| (s.part_of_speech.as_deref(), s.sub_pos.as_deref())),
+        )
+    {
+        if let Some(sub) = sub.filter(|s| !s.is_empty())
+            && parents.get(sub).map(String::as_str) != pos
+        {
+            return Err(AppError::unprocessable(
+                ErrorCode::InvalidRequestBody,
+                "细分词性不属于当前基本词性，请重新选择",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Incomplete bindings may be saved; the language view reports what still needs repair.
+pub(super) fn issues(
+    draft: &NextDraft,
+    parents: &HashMap<String, String>,
+) -> Vec<NextGrammarIssue> {
+    let Some(grammars) = &draft.grammar_structures else {
+        return vec![];
+    };
+    let by_id: HashMap<_, _> = grammars.iter().map(|g| (g.id, g)).collect();
+    let mut issues = Vec::new();
+    let mut add = |node_id, field: &str, message: &str| {
+        issues.push(NextGrammarIssue {
+            node_id,
+            field: field.into(),
+            message: message.into(),
+        })
+    };
+    let required = |pos: &str| parents.values().any(|p| p == pos);
+    for grammar in grammars {
+        let sub = grammar.sub_pos.as_deref().unwrap_or("");
+        if (required(&grammar.part_of_speech) && sub.is_empty())
+            || (!sub.is_empty() && parents.get(sub) != Some(&grammar.part_of_speech))
+        {
+            add(
+                grammar.id,
+                "sub_pos",
+                "语法结构需要绑定当前基本词性下有效的细分词性",
+            );
+        }
+        if grammar.variants.is_empty()
+            || grammar
+                .variants
+                .iter()
+                .any(|v| v.content.text().trim().is_empty())
+            || (grammar.variants.iter().any(|v| v.locale != "en") && grammar.variants.len() != 2)
+        {
+            add(grammar.id, "variants", "请完整填写语法结构的英美内容");
+        }
+    }
+    for sense in &draft.senses {
+        let sub = sense.sub_pos.as_deref().unwrap_or("");
+        if sense.part_of_speech.as_deref().is_some_and(required) && sub.is_empty() {
+            add(sense.id, "sub_pos", "请选择义项的细分词性");
+        }
+        for definition in &sense.definitions {
+            if definition
+                .grammar_structure_id
+                .and_then(|id| by_id.get(&id))
+                .is_none_or(|g| {
+                    Some(g.part_of_speech.as_str()) != sense.part_of_speech.as_deref()
+                        || g.sub_pos.as_deref().unwrap_or("") != sub
+                })
+            {
+                add(
+                    definition.id,
+                    "grammar_structure_id",
+                    "请选择与义项细分词性匹配的语法结构",
+                );
+            }
+        }
+    }
+    issues
+}
+
+pub(super) async fn persist(
+    conn: &mut PgConnection,
+    entry: Uuid,
+    draft: &NextDraft,
+) -> Result<(), AppError> {
+    let ids = draft
+        .grammar_structures
+        .iter()
+        .flatten()
+        .flat_map(|g| std::iter::once(g.id).chain(g.variants.iter().map(|v| v.id)))
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let claimed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=ANY($1))",
+    )
+    .bind(&ids)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(AppError::internal)?;
+    if claimed {
+        return Err(AppError::conflict(
+            ErrorCode::StableNodeIdChanged,
+            None,
+            "grammar identity already belongs to the forms editor",
+        ));
+    }
+    for grammar in draft.grammar_structures.iter().flatten() {
+        super::repository::node(conn, grammar.id, entry, "grammar", None).await?;
+        for variant in &grammar.variants {
+            let kind = match variant.locale.as_str() {
+                "en" => "grammar_en",
+                "en-GB" => "grammar_en_gb",
+                _ => "grammar_en_us",
+            };
+            super::repository::node(conn, variant.id, entry, kind, Some(grammar.id)).await?;
+        }
+    }
+    Ok(())
+}

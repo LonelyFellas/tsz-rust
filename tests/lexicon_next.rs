@@ -50,7 +50,7 @@ async fn call_with_groups(
     body: Value,
     groups: bool,
 ) -> (StatusCode, Value) {
-    call_client(state, actor, method, path, body, groups, false).await
+    call_client(state, actor, method, path, body, (groups, false, false)).await
 }
 async fn call_scoped(
     state: &AppState,
@@ -59,7 +59,7 @@ async fn call_scoped(
     path: &str,
     body: Value,
 ) -> (StatusCode, Value) {
-    call_client(state, Some(actor), method, path, body, true, true).await
+    call_client(state, Some(actor), method, path, body, (true, true, false)).await
 }
 async fn call_client(
     state: &AppState,
@@ -67,14 +67,17 @@ async fn call_client(
     method: &str,
     path: &str,
     body: Value,
-    groups: bool,
-    ownership: bool,
+    capabilities: (bool, bool, bool),
 ) -> (StatusCode, Value) {
+    let (groups, ownership, grammar) = capabilities;
     let mut req = Request::builder()
         .method(method)
         .uri(format!("{ROOT}{path}"))
         .header("content-type", "application/json")
         .header("x-tsz-next-forms", "v1");
+    if grammar {
+        req = req.header("x-tsz-next-grammar", "v1");
+    }
     if groups {
         req = req.header("x-tsz-next-sense-groups", "v1");
     }
@@ -2549,4 +2552,181 @@ async fn medium_ownership_migration_preserves_legacy_text_and_round_trips(pool: 
         assert_eq!(medium, expected);
         assert_eq!(&document, original);
     }
+}
+
+async fn call_grammar(
+    state: &AppState,
+    actor: Uuid,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    call_client(state, Some(actor), method, path, body, (true, true, true)).await
+}
+
+#[sqlx::test]
+async fn grammar_rich_variants_bind_subcategories_and_protect_legacy_drafts(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool, EDIT).await;
+    // Reversible before new-format snapshots exist; afterwards down must fail closed.
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114130000_lexicon_next_grammar.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114130000_lexicon_next_grammar.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (_, old_caps) = call(&state, Some(actor), "GET", "/capabilities", Value::Null).await;
+    assert!(old_caps.get("grammar_structures").is_none());
+    let (_, caps) = call_grammar(&state, actor, "GET", "/capabilities", Value::Null).await;
+    assert_eq!(caps["grammar_structures"], true);
+    assert_eq!(caps["publishing"], false);
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let grammar_id = Uuid::now_v7();
+    let mut content = draft();
+    content["grammar_structures"] = json!([{
+        "id":grammar_id,"part_of_speech":"noun","sub_pos":"N-COUNT",
+        "variants":[
+            {"id":Uuid::now_v7(),"locale":"en-GB","content":{"version":2,"text":"a job","annotations":[{"type":"emphasis","start":2,"end":5,"level":"core"}]}},
+            {"id":Uuid::now_v7(),"locale":"en-US","content":{"version":2,"text":"a role","annotations":[{"type":"italic","start":2,"end":6}]}}
+        ]
+    }]);
+    content["senses"][0]["sub_pos"] = json!("N-COUNT");
+    for definition in content["senses"][0]["definitions"].as_array_mut().unwrap() {
+        definition["grammar_structure_id"] = json!(grammar_id);
+    }
+    let (status, saved) = call_grammar(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, reopened) = call_grammar(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(reopened["draft"], content);
+    let (_, legacy) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert!(legacy["draft"].get("grammar_structures").is_none());
+    assert!(legacy["draft"]["senses"][0].get("sub_pos").is_none());
+    assert!(
+        legacy["draft"]["senses"][0]["definitions"][0]
+            .get("grammar_structure_id")
+            .is_none()
+    );
+    let (status, _) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":legacy["draft"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let view_path = format!("{path}/view?target_locale=en-US&medium_locale=zh-Hans");
+    let (_, view) = call_grammar(&state, actor, "GET", &view_path, Value::Null).await;
+    assert_eq!(view["grammar_issues"], json!([]));
+    assert_eq!(
+        view["grammar_structures"][0]["variants"][0]["content"]["text"],
+        "a role"
+    );
+    assert_eq!(
+        view["grammar_structures"][0]["variants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    content["grammar_structures"][0]["sub_pos"] = json!("N-UNCOUNT");
+    let (status, pending) = call_grammar(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":content}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    assert_eq!(
+        pending["draft"]["senses"][0]["definitions"][0]["grammar_structure_id"],
+        json!(grammar_id)
+    );
+    let (_, view) = call_grammar(&state, actor, "GET", &view_path, Value::Null).await;
+    assert!(
+        view["grammar_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["field"] == "grammar_structure_id")
+    );
+    assert!(
+        view["senses"][0]["target_definitions"][0]
+            .get("grammar_structure_id")
+            .is_none()
+    );
+    let mut wrong = content.clone();
+    wrong["grammar_structures"][0]["sub_pos"] = json!("V-T");
+    let (status, _) = call_grammar(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":wrong}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let mut wrong = content.clone();
+    wrong["grammar_structures"][0]["variants"][0]["content"]["annotations"][0]["end"] = json!(60);
+    let (status, _) = call_grammar(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":wrong}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let mut wrong = content.clone();
+    wrong["grammar_structures"][0]["variants"][0]["locale"] = json!("en-US");
+    wrong["grammar_structures"][0]["variants"][1]["locale"] = json!("en-GB");
+    let (status, _) = call_grammar(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":wrong}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (_, current) = call_grammar(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(current["revision"], 3);
+    let other = create(&state, actor).await;
+    let other_path = format!("/entries/{}", other["id"].as_str().unwrap());
+    let mut other_draft = draft();
+    other_draft["form_editor"] = form_editor();
+    other_draft["form_editor"]["contents"][0]["id"] = json!(grammar_id);
+    other_draft["form_editor"]["pos"][0]["forms"][0]["content_id"] = json!(grammar_id);
+    let (status, collision) = call_grammar(
+        &state,
+        actor,
+        "PUT",
+        &other_path,
+        json!({"expected_revision":1,"draft":other_draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{collision}");
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261114130000_lexicon_next_grammar.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .is_err()
+    );
 }

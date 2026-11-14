@@ -2,6 +2,7 @@
 pub mod detection;
 pub mod entry_matches;
 mod forms;
+mod grammar;
 pub mod language;
 pub mod list_model;
 pub mod model;
@@ -89,6 +90,9 @@ pub async fn capabilities(
     {
         capability.form_editor = Some(true);
     }
+    if supports_grammar(&headers) {
+        capability.grammar_structures = Some(true);
+    }
     if supports_sense_groups(&headers) {
         capability.sense_groups = Some(true);
     }
@@ -150,6 +154,12 @@ pub async fn save(
     headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<SaveNextDraft>,
 ) -> Result<Json<NextEntry>, AppError> {
+    if input.draft.grammar_structures.is_some() && !supports_grammar(&headers) {
+        return Err(AppError::unprocessable(
+            crate::error::ErrorCode::CapabilityUnavailable,
+            "grammar structures require x-tsz-next-grammar: v1",
+        ));
+    }
     permissions::load(&state, &auth)
         .await?
         .require("words.edit")?;
@@ -179,6 +189,27 @@ pub async fn view(
         ));
     }
     let mut view = language::view(&entry, query)?;
+    if supports_grammar(&headers) {
+        let mut conn = state.pool.acquire().await.map_err(AppError::internal)?;
+        view.grammar_issues = entry.draft.grammar_structures.as_ref().map(|_| Vec::new());
+        if view.grammar_issues.is_some() {
+            view.grammar_issues = Some(grammar::issues(
+                &entry.draft,
+                &grammar::catalog(&mut conn).await?,
+            ));
+        }
+    } else {
+        view.grammar_structures = None;
+        for sense in &mut view.senses {
+            for definition in sense
+                .target_definitions
+                .iter_mut()
+                .chain(sense.medium_definitions.iter_mut())
+            {
+                definition.grammar_structure_id = None;
+            }
+        }
+    }
     if !supports_sense_groups(&headers) {
         view.sense_groups = None;
         for sense in &mut view.senses {
@@ -186,6 +217,12 @@ pub async fn view(
         }
     }
     Ok(Json(view))
+}
+
+fn supports_grammar(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-tsz-next-grammar")
+        .is_some_and(|value| value == "v1")
 }
 
 fn supports_medium_ownership(headers: &axum::http::HeaderMap) -> bool {
@@ -201,6 +238,15 @@ fn supports_sense_groups(headers: &axum::http::HeaderMap) -> bool {
 }
 
 fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> NextEntry {
+    if !supports_grammar(headers) {
+        entry.draft.grammar_structures = None;
+        for sense in &mut entry.draft.senses {
+            sense.sub_pos = None;
+            for definition in &mut sense.definitions {
+                definition.grammar_structure_id = None;
+            }
+        }
+    }
     if !supports_medium_ownership(headers) {
         entry.medium_locale = None;
     }
