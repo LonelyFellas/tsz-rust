@@ -250,6 +250,7 @@ pub struct SubPartOfSpeechConfig {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogResponse {
+    pub form_sharing: super::form_sharing::FormSharingTemplate,
     pub form_types: Vec<super::form_types::FormTypeCatalogItem>,
     pub catalog_version: i64,
     pub items: Vec<CatalogPart>,
@@ -404,6 +405,7 @@ fn actor(id: Option<Uuid>, display_name: Option<String>) -> Option<Actor> {
 
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct CatalogFlatRecord {
+    pub form_sharing: sqlx::types::Json<super::form_sharing::FormSharingTemplate>,
     pub form_types: sqlx::types::Json<Vec<super::form_types::FormTypeCatalogItem>>,
     pub catalog_version: i64,
     pub part_id: Option<Uuid>,

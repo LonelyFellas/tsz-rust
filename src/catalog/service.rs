@@ -46,6 +46,8 @@ pub enum CatalogServiceError {
     SubPartConflict(&'static str),
     #[error("part of speech is in use")]
     PartInUse { usage_count: Option<i64> },
+    #[error("part of speech is referenced by the form sharing template")]
+    PartInSharingTemplate,
     #[error("sub part of speech is in use")]
     SubPartInUse { usage_count: Option<i64> },
     #[error("part of speech still has sub parts")]
@@ -207,6 +209,7 @@ fn map_repository_error(error: CatalogRepositoryError) -> CatalogServiceError {
             CatalogServiceError::SubPartConflict(field)
         }
         CatalogRepositoryError::PartInUse => CatalogServiceError::PartInUse { usage_count: None },
+        CatalogRepositoryError::PartInSharingTemplate => CatalogServiceError::PartInSharingTemplate,
         CatalogRepositoryError::PartHasSubParts => CatalogServiceError::PartHasSubParts,
         CatalogRepositoryError::PartHasFormTypes => CatalogServiceError::PartHasFormTypes,
         CatalogRepositoryError::SubPartInUse => {

@@ -173,6 +173,13 @@ fn database_error(error: sqlx::Error) -> AppError {
                 "base form type must not belong to a part of speech",
             );
         }
+        if db.constraint() == Some("form_sharing_members_form_type_id_fkey") {
+            return AppError::conflict(
+                ErrorCode::FormTypeInUse,
+                Some("form_sharing"),
+                "remove form type from sharing template before deleting",
+            );
+        }
         if matches!(db.code().as_deref(), Some("23503" | "23001")) {
             // 父词性被并发删掉时撞的是归属外键，语义是「父级不存在」而不是「词形在用」。
             if db.constraint() == Some("catalog_form_types_part_of_speech_fkey") {
@@ -432,6 +439,21 @@ pub async fn update(
         require_part(&mut tx, target).await?;
         Some(target)
     };
+    if part_of_speech_id != current.part_of_speech_id
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM catalog.form_sharing_members WHERE form_type_id=$1)",
+        )
+        .bind(path.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database_error)?
+    {
+        return Err(AppError::conflict(
+            ErrorCode::FormTypeInUse,
+            Some("part_of_speech_id"),
+            "remove form type from sharing template before reparenting",
+        ));
+    }
     sqlx::query("UPDATE catalog.form_types SET is_default=$10,part_of_speech_id=$9,name_zh=$2,name_en=$3,short_name_zh=$4,abbreviation=$5,full_name_en=$6,sort_order=$7,updated_by_admin_id=$8,updated_at=now(),revision=revision+1 WHERE id=$1")
         .bind(path.id).bind(text(request.name_zh,"name_zh",64)?).bind(text(request.name_en,"name_en",64)?)
         .bind(text(request.short_name_zh,"short_name_zh",16)?).bind(text(request.abbreviation,"abbreviation",16)?)

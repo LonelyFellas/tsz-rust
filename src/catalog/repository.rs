@@ -163,6 +163,8 @@ pub enum CatalogRepositoryError {
     SubPartConflict(&'static str),
     #[error("part of speech is in use")]
     PartInUse,
+    #[error("part of speech is referenced by the form sharing template")]
+    PartInSharingTemplate,
     #[error("part of speech still has sub parts")]
     PartHasSubParts,
     #[error("part of speech still has form types")]
@@ -233,6 +235,9 @@ fn map_sub_part_write_error(error: sqlx::Error) -> CatalogRepositoryError {
 }
 
 fn map_part_delete_error(error: sqlx::Error) -> CatalogRepositoryError {
+    if is_foreign_key_violation(&error, "form_sharing_members_part_of_speech_id_fkey") {
+        return CatalogRepositoryError::PartInSharingTemplate;
+    }
     // 细分词性外键已改为 RESTRICT：服务层预检之外的兜底，映射成同一个业务错误。
     if is_foreign_key_violation(&error, "catalog_sub_parts_parent_fkey") {
         return CatalogRepositoryError::PartHasSubParts;

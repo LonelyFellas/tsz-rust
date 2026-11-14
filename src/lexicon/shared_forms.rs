@@ -1263,6 +1263,14 @@ pub(crate) async fn preflight_identities(
         IdentityCheck::Draft => &active_contents,
         IdentityCheck::PublicationRestore => &known_contents,
     };
+    // A detached label receives fresh content/slot IDs while retaining its own
+    // regional and pronunciation references. Slot ownership was checked above;
+    // the caller has already verified every reference's parent and role.
+    let new_contents: HashSet<_> = content_ids
+        .iter()
+        .copied()
+        .filter(|id| matches!(check, IdentityCheck::Draft) && !known_contents.contains(id))
+        .collect();
     let variants: HashSet<_> = shared
         .pos
         .iter()
@@ -1280,8 +1288,18 @@ pub(crate) async fn preflight_identities(
         .into_iter()
         .map(|(id, entry, content, slot)| (id, (entry, content, slot)))
         .collect();
+    let active_bindings: HashSet<Uuid> = sqlx::query_scalar(
+        "SELECT form_id FROM lexicon.v3_form_content_bindings WHERE entry_id=$1",
+    )
+    .bind(entry_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db)?
+    .into_iter()
+    .collect();
     for binding in shared.pos.iter().flat_map(|pos| &pos.forms) {
         if allowed_contents.contains(&binding.content_id)
+            || (new_contents.contains(&binding.content_id) && active_bindings.contains(&binding.id))
             || (!identities.contains_key(&binding.id)
                 && !known_contents.contains(&binding.content_id))
         {
@@ -1307,12 +1325,13 @@ pub(crate) async fn preflight_identities(
             continue;
         }
         let (_, target_content, _) = nodes[&id];
-        // Slot IDs inside one content and pronunciation identities remain immutable.
-        // Only a form's own regional node may move between known contents.
+        // Existing content keeps its pronunciation slots immutable. Detaching to
+        // fresh content may also move the label's own pronunciation references.
         if entry != entry_id
             || content == target_content
-            || !variants.contains(&id)
-            || !allowed_contents.contains(&target_content)
+            || (!variants.contains(&id) && !new_contents.contains(&target_content))
+            || (!allowed_contents.contains(&target_content)
+                && !new_contents.contains(&target_content))
         {
             return Err(LexiconServiceError::StableNodeIdChanged);
         }

@@ -409,6 +409,14 @@ pub const CATALOG: &[PermissionDefinition] = &[
         "high"
     ),
     permission!(
+        "lexicon_settings.edit_form_sharing",
+        "lexicon_settings",
+        "编辑默认词形共享模板",
+        "action",
+        ["lexicon_settings.access"],
+        "high"
+    ),
+    permission!(
         "lexicon_settings.edit_forms",
         "lexicon_settings",
         "编辑词形变化配置",
@@ -639,6 +647,27 @@ mod tests {
             vec!["users.read_registration_region"]
         );
         assert!(preview.after.is_empty());
+    }
+
+    #[test]
+    fn form_sharing_edit_is_an_independent_settings_action() {
+        let permission = definition("lexicon_settings.edit_form_sharing").unwrap();
+        assert_eq!(permission.requires, &["lexicon_settings.access"]);
+        let forms_only = effective_keys([
+            "lexicon_settings.access".to_owned(),
+            "lexicon_settings.edit_forms".to_owned(),
+        ]);
+        assert!(!forms_only.contains(permission.key));
+        assert!(effective_keys([permission.key.to_owned()]).is_empty());
+        let mut sharing = BTreeSet::from([permission.key.to_owned()]);
+        expand_grants(&mut sharing);
+        assert_eq!(
+            sharing,
+            BTreeSet::from([
+                "lexicon_settings.access".to_owned(),
+                permission.key.to_owned(),
+            ])
+        );
     }
 
     #[test]

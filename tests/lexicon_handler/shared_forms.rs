@@ -694,7 +694,99 @@ async fn shared_forms_reassignment_preserves_form_identity_and_round_trips(pool:
 }
 
 #[sqlx::test]
-async fn shared_forms_reassignment_rejects_stolen_nodes_and_new_content(pool: PgPool) {
+async fn shared_forms_detach_preserves_references_and_other_bindings(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = fixture_state(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let id = legacy["word"]["id"].as_str().unwrap();
+    let (_, read) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    let mut forms = read["word"]["forms"].clone();
+    add_verb_binding(&mut forms);
+    let saved = save_shared(
+        &state,
+        &bearer,
+        id,
+        legacy["word"]["revision"].as_i64().unwrap(),
+        forms,
+    )
+    .await;
+    let original = saved["word"]["forms"].clone();
+    let mut detached = original.clone();
+    let mut copied = original["contents"][0].clone();
+    copied["id"] = json!(Uuid::now_v7());
+    detached["pos"][0]["forms"][0]["content_id"] = copied["id"].clone();
+    for side in ["uk", "us"] {
+        let variant = &mut copied["regional_variants"][side];
+        variant["id"] = json!(Uuid::now_v7());
+        let binding = &mut detached["pos"][0]["forms"][0]["regional_bindings"][side];
+        binding["content_slot_id"] = variant["id"].clone();
+        for (row, reference) in variant["pronunciations"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(binding["pronunciations"].as_array_mut().unwrap())
+        {
+            row["id"] = json!(Uuid::now_v7());
+            reference["content_slot_id"] = row["id"].clone();
+        }
+        // Editing the independent content before saving must not affect its old peers.
+        variant["spelling"] = json!("detached");
+    }
+    detached["contents"].as_array_mut().unwrap().push(copied);
+    let saved = save_shared(
+        &state,
+        &bearer,
+        id,
+        saved["word"]["revision"].as_i64().unwrap(),
+        detached.clone(),
+    )
+    .await;
+    let (_, fresh) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(fresh["word"]["forms"], saved["word"]["forms"]);
+    assert_eq!(fresh["word"]["forms"]["pos"], detached["pos"]);
+    assert_eq!(fresh["word"]["forms"]["pos"][1], original["pos"][1]);
+    assert_eq!(
+        fresh["word"]["forms"]["contents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|content| content["id"] == original["contents"][0]["id"])
+            .unwrap(),
+        &original["contents"][0]
+    );
+    for side in ["uk", "us"] {
+        let before = &original["pos"][0]["forms"][0]["regional_bindings"][side];
+        let after = &fresh["word"]["forms"]["pos"][0]["forms"][0]["regional_bindings"][side];
+        assert_eq!(after["id"], before["id"]);
+        for (a, b) in after["pronunciations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(before["pronunciations"].as_array().unwrap())
+        {
+            assert_eq!(a["id"], b["id"]);
+        }
+    }
+}
+
+#[sqlx::test]
+async fn shared_forms_reassignment_rejects_stolen_nodes_and_reused_slots(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = fixture_state(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -784,18 +876,9 @@ async fn shared_forms_reassignment_rejects_stolen_nodes_and_new_content(pool: Pg
     let mut new_content = forms.clone();
     let mut target = forms["contents"][1].clone();
     target["id"] = json!(Uuid::now_v7());
-    for side in ["uk", "us"] {
-        target["regional_variants"][side]["id"] = json!(Uuid::now_v7());
-        for row in target["regional_variants"][side]["pronunciations"]
-            .as_array_mut()
-            .unwrap()
-        {
-            row["id"] = json!(Uuid::now_v7());
-        }
-    }
     new_content["contents"].as_array_mut().unwrap().push(target);
     reassign_form_content(&mut new_content, 0, 0, 2);
-    invalids.push(("切换至本次新造内容", new_content, "stable_node_id_changed"));
+    invalids.push(("新内容挪用旧内容槽位", new_content, "validation_failed"));
     for (case, invalid, code) in invalids {
         for (method, suffix) in [(Method::POST, "/impact"), (Method::PUT, "")] {
             let mut body = json!({"schema_version":3,"base_revision":revision,"content":invalid});

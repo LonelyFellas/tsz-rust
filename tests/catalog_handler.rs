@@ -489,7 +489,7 @@ async fn catalog_read_allows_word_access_but_management_requires_settings_access
     )
     .await;
     assert_eq!(status, StatusCode::OK, "普通管理员应能读 catalog：{body}");
-    assert_eq!(body["catalog_version"], 8);
+    assert_eq!(body["catalog_version"], 9);
     // 词形候选按所属词性收窄：种子把动词的四个时态、名词的复数、形容词的两级各归其主，
     // 原形对所有词性通用所以不进候选。
     let form_types_by_pos = json!({
@@ -981,8 +981,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    // 自建词性挂细分词性、再删除；kind 与默认模版迁移各让基线加一。
-    assert_eq!(catalog["catalog_version"], 16);
+    // 自建词性挂细分词性、再删除；共享模板迁移让基线再加一。
+    assert_eq!(catalog["catalog_version"], 17);
     assert!(
         catalog["items"]
             .as_array()
@@ -1252,6 +1252,19 @@ async fn usage_counts_merge_active_drafts_and_all_publications_before_delete(poo
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "part_of_speech_has_form_types");
+    // 共享模板现在也保护目录引用，先通过配置接口移除测试词性的默认组合。
+    assert_eq!(
+        call(
+            &state,
+            Method::PUT,
+            "/api/v1/admin/settings/parts-of-speech/form-sharing",
+            Some(&bearer),
+            Some(json!({"base_revision":1,"groups":[]}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
     sqlx::query("DELETE FROM catalog.form_types WHERE part_of_speech_id = $1")
         .bind(part_id)
         .execute(&pool)
@@ -2381,3 +2394,6 @@ async fn form_type_default_template_controls_catalog_without_disabling_type(pool
         Some("catalog_form_types_base_default")
     );
 }
+
+#[path = "catalog_handler/form_sharing.rs"]
+mod form_sharing;
