@@ -1,58 +1,44 @@
 ---
 name: contract-sync
-description: 对齐 tsz 与 tsz-rust 的 OpenAPI、wire 类型、端点快照和严格运行时契约，验证接口变化及混合版本兼容。用于跨仓接口新增、变更、契约漂移或配套发布准备；不用于无 API 变化的页面调整。
+description: 协调 tsz-rust 与实际前端/Agent 消费者的契约版本、同步顺序和兼容验证；维护 Rust OpenAPI 导出，消费者生成由各自仓库负责。
 ---
 
-# TSZ 前后端契约同步
+# 契约同步与跨仓顺序
 
-通用授权与任务记录遵循 [AGENTS.md](../../../AGENTS.md)。契约核对、生成与兼容证据记入主任务，各阶段复用；不为两仓分别重做设计、确认或最终门。
+通用授权与主记录遵循 [AGENTS.md](../../../AGENTS.md)。本文件维护跨仓顺序与 Rust 导出；前端快照/wire 操作读取选定 tsz 的同名技能，Agent schema/协议读取选定 tsz-agent 的 test 技能及 `docs/integration.md`。
+只要求核对时保持只读，不运行生成器；同步/修复请求完成必要本地改动与验证，不自动提交或部署。
 
-目标是让后端实现、生成契约和实际前端消费者一致。只要求核对时保持只读；要求同步/修复时完成本地改动与验证，不自动提交或部署。
+## 1. 固定实际参与者
 
-## 1. 固定本次输入
+从用户目标、Git 根目录和 remotes 核实各任务 checkout，必要时用 `git worktree list` 定位；主仓、相邻目录、端口及历史文档都只是候选。
+记录本次涉及的仓库路径、分支、HEAD/脏差异、端点及实际消费者。未提交源码生成的结果归为「SHA + 工作区差异」，不冒充纯提交产物。
+只加载受影响消费者；没有前端变化的服务间协议不强行加入 UI 流程。缺少配套版本时完成本仓检查，标记兼容性未验证，不默读别的主仓或用旧快照补证。
 
-- 从用户目标、当前 git 根目录、remotes 和项目文件识别 tsz / tsz-rust 的实际 checkout。相邻目录只是候选；worktree 场景不沿用默认主 checkout。
-- 记录两仓绝对路径、分支、HEAD、相关未提交差异和端点范围。未提交源码生成的结果标为「SHA + 工作区差异」，不能归属于纯提交。
-- 先读取相关 handler/DTO、`docs/openapi.json`、前端请求方法、`packages/types` 和直接消费者。`docs/frontend-integration.md` 帮助定位背景，其中历史部署 SHA/端口不代表当前环境。
-- 有现成完整证据就复用；仅核对时比较现有产物及源码，不运行写文件的导出/同步。生成目标已有用户改动时先保留原内容并检查归属，不能用生成器覆盖未理解的改动。
+沿 handler/DTO → `docs/openapi.json` → 消费者运行时模型/快照 → 实际调用点核对。`docs/frontend-integration.md` 和 Agent 对接文档帮助定位，历史 SHA/端口不是当前值。
 
-## 2. 按仓库生成链同步
+## 2. 按所属仓库生成
 
-在选定的后端根目录运行：
+在选定 Rust checkout 中导出：
 
 ```bash
 SQLX_OFFLINE=true cargo run --locked --all-features --bin export_openapi
 ```
 
-该二进制生成 `docs/openapi.json`，不启动服务。SQLx 离线编译依赖当前 `.sqlx`；缓存缺失时定位 SQL/schema 变化，按已确认隔离数据库准备缓存，不能随手连接共享库或改用裸 `cargo run`。
-build/bugfix 已完成同输入导出且实现、配置、依赖未变时复用该产物与证据，不再重复导出；同步也只在输入或生成物需要变化时执行。
+该二进制只生成 `docs/openapi.json`，不启动服务；编译依赖当前 `.sqlx`。缓存缺失先查 SQL/schema 变化，并按 [dev-env](../dev-env/SKILL.md) 核实隔离库，不改用裸服务启动或随意连接共享库。
+已有相同实现、配置、依赖输入的导出证据就复用；生成目标有用户改动时先核实归属，不能覆盖未知差异。
 
-在选定的前端根目录运行；`tsz_backend_root` 必须是上一步核实的绝对路径：
+实际涉及前端时，在所选 tsz 读取 `.agents/skills/contract-sync/SKILL.md` 的前端生成步骤，传入本次 Rust spec 的绝对路径；该步骤不重新启动本节流程。
+涉及 Agent 时按其导出检查与实际校验模型对账，不能让 Agent 改写 Rust OpenAPI。发现文档/实现不一致先查清正确行为，不用生成结果为错误实现背书。
 
-```bash
-env -u SYNC_OPENAPI_RUNTIME_ONLY OPENAPI_SOURCE="$tsz_backend_root/docs/openapi.json" pnpm --filter @tsz/api-client sync:openapi
-```
+## 3. 证明行为和兼容性
 
-- 显式指定 `OPENAPI_SOURCE`，避免 worktree 默读另一个后端。普通同步清除继承的 `SYNC_OPENAPI_RUNTIME_ONLY`，防止只更新 runtime bundle、遗漏 endpoint 快照。
-- 审查后端 spec、前端 `src/openapi.snapshot.json` 与 `src/admin-word-v3.runtime-schema.json` 的实际 diff（后两者在 `packages/api-client`）。复用原生生成器，不手工修生成字段。
-- 核实生成物的 `_source` 指向所选输入，runtime bundle 的 `_source_sha256` 匹配原始 spec 内容；路径元数据变化与契约变化分开判断。
-- 按变化更新 `@tsz/types` 的 snake_case wire 镜像、`@tsz/api-client` 请求与相关消费者；不增加命名转换层。实现与文档不一致时查清正确行为，不让生成快照为错误实现背书。
+选择本次 method/path、状态码、Problem Details、字段必填/可选/nullable、枚举和权限分支。
+严格 runtime validator 可能拒绝新增字段；不能默认响应新增字段安全，也不能一律前端先发。核实「已部署消费者 + 候选服务」「候选消费者 + 已部署服务」「目标组合」，迁移另核实回退二进制与新数据。
+前端 `PENDING` 只用于后端确实未实现且有原因的端点，不能掩盖已实现接口不一致。
 
-## 3. 证明契约与兼容性
+运行受影响 Rust handler/序列化测试及各消费者自己的契约检查；Rust 测试与隔离遵循 [test](../test/SKILL.md)。各仓最终门在主任务统一安排，同状态结果复用，不重复全量验证。
+需要真实业务链路时组合读取参与服务的 dev-env/test；页面验收使用所选 tsz 的 `.agents/skills/test/references/real-backend-acceptance.md`。mock 和各仓测试通过不等于真实联调。
 
-选择本次命中的 method/path、状态码、Problem Details、必填/可选/nullable、枚举及权限分支。
-重点看 `endpoints.contract.test.ts`、`runtime-schema.test.ts` 和相关业务契约测试；按现有测试位置补必要断言。
-`PENDING` 仅用于后端确实未实现且有原因的端点；已实现接口不准靠扩大白名单通过。
+## 4. 交接和发布
 
-V3 runtime validator 会拒绝未声明字段。新增响应字段也可能让旧前端报错；同时检查新前端访问旧 API 的缺字段/新枚举行为。
-兼容性必须基于实际 schema 与消费者，不能默认「新增字段安全」或「一律前端先发」。
-
-迭代运行受影响契约文件及 Rust handler/序列化测试；完成同步须有当前输入的 `pnpm --filter @tsz/api-client test` 和受影响类型检查通过证据，可复用同状态已完成结果，紧接 ship 时由原生 hooks 承接其覆盖项。
-数据库集成测试先核实依赖隔离。最终全量质量门复用项目 test/ship 的安排，不在这里再叠一轮。
-需要证明浏览器连到真实后端时，读取选定前端 checkout 的 `.agents/skills/test/references/real-backend-acceptance.md`。
-
-## 4. 交接与配套发布
-
-报告端点变化、两仓版本/脏状态、spec 来源与哈希、生成物、消费者、验证结果和剩余兼容风险。
-涉及两个仓库的发布准备或执行时，读取 [配套发布清单](references/paired-release.md)，把经过验证的发布顺序交给各仓 ship/deploy。
-配套清单只协调依赖，不替代原生发布门禁，也不扩大原请求的提交、合并或部署范围。
+报告端点变化、各仓版本/脏状态、spec 来源与哈希、消费者、验证及剩余兼容风险。配套发布按 [配套发布清单](references/paired-release.md) 交给各仓 ship/deploy，不扩大原授权。
