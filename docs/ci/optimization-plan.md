@@ -1,8 +1,50 @@
 # Rust 后端 CI/CD 对标评估与优化方案
 
 评估日期：2026-11-03（Asia/Singapore）。本项目基线：`4e13630c01aebc4833457e47605d5fe337c024e4`。
-当前阶段：第 1 批优化已随 #414 合并，main `8d60adf` CI 全绿，墙钟 16m10s；第 2 批按该版本的 target 明细调整调度与登录测试准备，远端收益待测。本文是 CI 优化的唯一主记录，复用
+当前阶段：第 1 批优化已随 #414 合并，main `8d60adf` CI 全绿，墙钟 16m10s；第 2 批的 PR #415（`7a45450`）全绿，单次 PR 墙钟 13m55s；继续在该 PR 验证第 3 批的静态文档路由复用。本文是 CI 优化的唯一主记录，复用
 [集成测试分片设计](integration-sharding.md)和[部署控制器说明](deployment-controller.md)，不另建发布体系。
+
+## 2026-11-14 第 3 批：静态文档路由复用与无依赖健康检查
+
+沿用未合并的 PR #415，直接对照成功提交 `7a45450` / PR CI
+[43575425865](https://github.com/LonelyFellas/tsz-rust/actions/runs/43575425865)，
+墙钟 13m55s，admin / identity / learning 的执行阶段各约 9 分钟。
+
+开源实现核对见 [Svix 的集成测试统一入口](https://github.com/svix/svix-webhooks/blob/bb44d9a55f2bd409cb502d8bdab6b2e28710846c/server/svix-server/tests/it/main.rs)
+与 [Kanidm 对独立测试二进制成本的说明](https://github.com/kanidm/kanidm/blob/e201a7240d2c5fbf6668336aa988c22d5c2681d5/server/testkit/tests/DO_NOT_ADD_MORE_TESTS_HERE)。
+本批先处理有直接测量的共性成本，暂不重组 103 个 target 或缩小 PR 用例范围。
+
+代码显示 `router(state)` 在 swagger feature 下每次调用 `ApiDoc::openapi()`，
+而多个 handler helper 每次请求都重建 Router。使用临时 manifest 注册探针，
+不连接数据库/Redis，debug/all-features 下连续构建 40 个 Router 用时 9.942s，
+单独构建 40 份 OpenAPI 用时 9.712s。该本地单次观测支持优化这个重复工作，
+不能作为 GitHub runner 墙钟的直接预测。复用后同一探针构建 40 个 Router 用时
+0.552s（包含首次文档初始化），同时独立生成 40 份 OpenAPI 仍为 9.695s；未通过
+跳过 schema 生成或更换输入来改变对照条件。
+
+方案：只将无 AppState 的 SwaggerUi 路由存入 `OnceLock<Router<AppState>>`。
+utoipa-swagger-ui 10.0.2 的 Axum 适配器已将文档放在 Arc 中，Router clone
+不会深拷贝 schema。业务路由、鉴权/本地化/请求 ID 中间件与每实例状态仍在缓存之外
+重新装配。发布默认 feature 不包含 swagger；独立 `ApiDoc::openapi()` 调用仍是新文档，
+用于快照/契约验证与导出。
+
+`healthz` 与 Swagger 静态资源测试改为 Tokio 测试，使用指向关闭端口的惰性依赖，
+验证这些公开静态端点无需活数据库/Redis；原响应、请求 ID、静态资源与完整 OpenAPI
+快照断言保留。新增两套不同语言 AppState 的交错请求，验证不同 Router 的状态和每请求
+request ID 隔离。就绪检查及所有业务数据库/并发用例继续按原路径运行。
+
+本地同环境对照（执行墙钟，不含编译）已通过：
+
+| target | 旧版 | 文档路由复用后 | 保留用例 |
+| --- | ---: | ---: | ---: |
+| account_security_handler | 13.02s | 6.91s | 25 |
+| admin_permissions_handler | 9.64s | 4.83s | 19 |
+| learning_runs_handler | 94.99s | 23.42s | 39 |
+
+原 83 个业务用例不变；all-features health 的 3 个用例（含文档快照与状态隔离）通过，
+默认 feature 的 2 个 health 用例也通过，分别执行 0.35s / 0.04s。
+完整 PR CI 的执行清单应保留历史 1372 个用例并增加 1 个隔离回归；所有分片、契约
+快照与原门禁均需通过。最终结果记录在 PR，避免仅为回填数据再触发一次全量 CI。
 
 ## 2026-11-14 第 2 批：分片再平衡与登录 Router 复用
 

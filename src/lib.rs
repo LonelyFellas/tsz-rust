@@ -57,8 +57,8 @@ use crate::{
     state::AppState,
 };
 
-/// 构建路由。** 纯函数，不绑定端口 ** -- 这是可测的接缝
-/// 集成测试能拿它做oneshot, 不必真起服务器
+/// 构建实例路由，不绑定端口。业务状态独立装配，静态文档路由只初始化一次。
+/// 集成测试能拿它做 oneshot，不必真起服务器。
 pub fn router(state: AppState) -> Router {
     let router = Router::new()
         .route("/api/v1/i18n/capabilities", get(i18n::capabilities))
@@ -164,14 +164,7 @@ pub fn router(state: AppState) -> Router {
     // Swagger UI 仅在 `swagger` feature 开启时挂载：/swagger-ui 页面，spec 在 /api-docs/openapi.json。
     // release 默认不带此 feature —— 不暴露接口清单、二进制也不含 UI 资源。
     #[cfg(feature = "swagger")]
-    let router = {
-        use utoipa::OpenApi;
-        use utoipa_swagger_ui::SwaggerUi;
-        router.merge(
-            SwaggerUi::new("/swagger-ui")
-                .url("/api-docs/openapi.json", crate::openapi::ApiDoc::openapi()),
-        )
-    };
+    let router = router.merge(swagger_routes());
 
     // 全部路由（包括可选的 Swagger UI）组装完成后，再统一挂载观测中间件。
     // Axum 的 layer 后添加者先执行：Request ID 必须先写入 Extensions，
@@ -208,6 +201,26 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(request_id_middleware));
 
     router.with_state(state)
+}
+
+// Cache only state-free documentation routes. SwaggerUi puts the immutable
+// OpenAPI document behind an Arc, so cloning the Router shares the document
+// without rebuilding or deep-cloning its schema. AppState and all middleware
+// are attached afterwards by router(), independently for each application.
+#[cfg(feature = "swagger")]
+fn swagger_routes() -> Router<AppState> {
+    use std::sync::OnceLock;
+    use utoipa::OpenApi;
+    use utoipa_swagger_ui::SwaggerUi;
+
+    static ROUTES: OnceLock<Router<AppState>> = OnceLock::new();
+    ROUTES
+        .get_or_init(|| {
+            SwaggerUi::new("/swagger-ui")
+                .url("/api-docs/openapi.json", crate::openapi::ApiDoc::openapi())
+                .into()
+        })
+        .clone()
 }
 
 // 存活：纯进程检查，不碰DB
