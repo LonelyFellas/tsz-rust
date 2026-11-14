@@ -23,7 +23,19 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = {"sqlx-core", "sqlx-postgres"}
 PREFIX = "SQLX_CI_PHASE "
 # 这些分片会在一次性工作区里运行，并可以用预先迁移好的模板库克隆测试库。
-TEMPLATE_SHARDS = ("identity", "lexicon-handler", "lexicon-handler-b")
+TEMPLATE_SHARDS = ("identity", "admin", "lexicon-handler", "lexicon-handler-b")
+# Opt in known business targets only. Schema and migration/rollback-heavy
+# modules stay fresh; new targets require an explicit review before opting in.
+ADMIN_TEMPLATE_TARGETS = frozenset({
+    "admin_accounts_create_handler", "admin_accounts_list_handler",
+    "admin_accounts_repository", "admin_accounts_reset_password_handler",
+    "admin_accounts_status_handler", "admin_ai_ledger_handler",
+    "admin_dashboard_handler", "admin_login_code_handler", "admin_login_handler",
+    "admin_logout_all_handler", "admin_opencode_handler", "admin_profile_handler",
+    "admin_refresh_handler", "admin_repository", "admin_seed_service",
+    "admin_session_repository", "admin_session_reuse_detection",
+    "admin_session_service", "admin_user_detail_handler", "admin_user_list_handler",
+})
 # lexicon 分片没有按用例维护的白名单：模板由同一 migrator 建立并校验，
 # 克隆与“新建库 + 全量迁移”等价，因此全片启用比逐条列举更容易保持完整。
 CLONE_ALL_SHARDS = ("lexicon-handler", "lexicon-handler-b")
@@ -113,13 +125,22 @@ def template_cases(root):
     return cases
 
 
-def instrument_postgres(source, cases=(), fingerprint="", clone_all=False):
-    if cases or clone_all:
+def admin_template_targets(root):
+    targets = set(classify_targets(discover_targets(root))["admin"])
+    if not ADMIN_TEMPLATE_TARGETS <= targets:
+        raise ValueError("admin template target disappeared or changed module")
+    return sorted(ADMIN_TEMPLATE_TARGETS)
+
+
+def instrument_postgres(source, cases=(), fingerprint="", clone_all=False, targets=()):
+    if cases or clone_all or targets:
         helper = fingerprint.replace("sqlx::migrate::", "sqlx_core::migrate::")
         helper += '\nconst CI_TEMPLATE_CASES: &[&str] = &[\n' + ",\n".join(json.dumps(c) for c in cases) + '\n];\n'
+        helper += '\nconst CI_TEMPLATE_TARGETS: &[&str] = &[\n' + ",\n".join(json.dumps(t) for t in targets) + '\n];\n'
         helper += "\nconst CI_TEMPLATE_ALL: bool = %s;\n" % ("true" if clone_all else "false")
         source = replace_once(source, "static MASTER_POOL:", helper + "\nstatic MASTER_POOL:")
-        source = replace_once(source, '    let create_command = format!("create database {db_name:?}");', '''    let create_command = if CI_TEMPLATE_ALL || CI_TEMPLATE_CASES.contains(&args.test_path) {
+        source = replace_once(source, '    let create_command = format!("create database {db_name:?}");', '''    let create_command = if CI_TEMPLATE_ALL || CI_TEMPLATE_CASES.contains(&args.test_path)
+        || (args.migrator.is_some() && CI_TEMPLATE_TARGETS.contains(&args.test_path.split("::").next().unwrap_or_default())) {
         let template = std::env::var("SQLX_CI_TEMPLATE").expect("missing job-owned template");
         let suffix = template.strip_prefix("_tsz_ci_tpl_").expect("invalid template prefix");
         assert!(suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -190,10 +211,10 @@ def profile_manifest(text, patches, helper_bin):
     return text + helper_bin
 
 
-def instrument_units(snapshot):
+def instrument_units(snapshot, module="identity"):
     units = []
     pattern = re.compile(r"(?m)^#\[(?:test|tokio::test(?:\([^\n]*\))?)\]\s*(?:async\s+)?fn\s+(\w+)\s*\(\s*\)\s*\{")
-    for target in classify_targets(discover_targets(snapshot))["identity"]:
+    for target in classify_targets(discover_targets(snapshot))[module]:
         path = snapshot / "tests" / f"{target}.rs"
         source = path.read_text()
         matches = list(pattern.finditer(source))
@@ -329,7 +350,7 @@ def prepare(root, state, shard="identity"):
         if shard in TEMPLATE_SHARDS:
             helper_source = (root / "ops/ci_identity_template.rs").read_text()
             fingerprint = helper_source.split("// BEGIN MIGRATION FINGERPRINT\n")[1].split("// END MIGRATION FINGERPRINT")[0]
-        patched = instrument_core(upstream.decode()) if name == "sqlx-core" else instrument_postgres(upstream.decode(), template_cases(root) if shard == "identity" else (), fingerprint, shard in CLONE_ALL_SHARDS)
+        patched = instrument_core(upstream.decode()) if name == "sqlx-core" else instrument_postgres(upstream.decode(), template_cases(root) if shard == "identity" else (), fingerprint, shard in CLONE_ALL_SHARDS, admin_template_targets(root) if shard == "admin" else ())
         (copy / relative).write_text(patched)
         evidence[name] = {"version": "0.9.0", "upstream_sha256": hashlib.sha256(upstream).hexdigest(), "timed_sha256": hashlib.sha256(patched.encode()).hexdigest()}
         patches[name] = str(copy)
@@ -340,7 +361,7 @@ def prepare(root, state, shard="identity"):
     (snapshot / "Cargo.lock").write_text(profile_lock((root / "Cargo.lock").read_text()))
     subprocess.run(["cargo", "metadata", "--locked", "--offline", "--all-features", "--format-version=1"], cwd=snapshot, check=True, stdout=subprocess.DEVNULL)
     validate_profile_lock(original, locked_packages(snapshot / "Cargo.lock"))
-    evidence["unit_cases"] = instrument_units(snapshot) if shard == "identity" else []
+    evidence["unit_cases"] = instrument_units(snapshot, shard) if shard in ("identity", "admin") else []
     if shard == "lexicon-handler":
         evidence["maximum_batch"] = instrument_maximum_batch(snapshot)
     (state / "source-evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
@@ -404,6 +425,21 @@ def audit_cloned_cases(report, template):
     return {"cloned_cases": len(uses), "fresh_sqlx_cases": 0}
 
 
+def audit_target_template_uses(report, targets, template):
+    """Only opted-in cases with an automatic migrator may use the template."""
+    executed = {f"{row['target']}::{row['name']}": row["status"] for row in report["executed"]}
+    sqlx_cases = {row["test"] for row in report["timings"] if row["phase"] == "db_create"}
+    migrated = {row["test"] for row in report["timings"] if row["phase"] == "migration"}
+    if not migrated <= sqlx_cases or any(executed.get(case) != "ok" for case in sqlx_cases):
+        raise ValueError("template route has an absent or unsuccessful database case")
+    expected = {case for case in migrated if case.partition("::")[0] in targets}
+    uses = report.get("template_uses", [])
+    if Counter(row["test"] for row in uses) != Counter(expected) or any(row["template"] != template for row in uses):
+        raise ValueError("missing, duplicate, ineligible or foreign target template use")
+    return {"cloned_cases": len(uses), "fresh_sqlx_cases": len(sqlx_cases) - len(uses),
+            "eligible_targets": sorted(targets)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["build", "run"])
@@ -461,6 +497,9 @@ def main():
     if args.shard == "identity":
         summary["template_pilot"] = {**checks, **audit_template_uses(report, template_cases(ROOT), template)}
         output = args.report.parent / "identity-phases.json"
+    elif args.shard == "admin":
+        summary["template_pilot"] = {**checks, **audit_target_template_uses(report, admin_template_targets(ROOT), template)}
+        output = args.report.parent / "admin-phases.json"
     else:
         summary["template"] = {"template": template, "migration_fingerprint": checks["migration_fingerprint"], **audit_cloned_cases(report, template)}
         if args.shard == "lexicon-handler":

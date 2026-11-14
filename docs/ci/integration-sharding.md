@@ -10,7 +10,8 @@ fail-closed aggregate, so branch protection does not need to change.
 - `lexicon-pagination`: the existing 251-entry/2008-candidate pagination case,
   selected by its complete libtest name with `--exact`, plus the complete
   `wordlists_handler` target without that filter.
-- `lexicon-learning`: all `learning_*` targets without the pagination filter.
+- `lexicon-learning`: all `learning_*` targets plus `question_bank_handler`,
+  without the pagination filter.
 - `lexicon-handler`: the profiling shard. It keeps every `batch5::` case (the
   maximum-batch audit measures the same execution that contains the case) plus
   every other `lexicon_handler` case at an even index after sorting by name.
@@ -21,9 +22,8 @@ fail-closed aggregate, so branch protection does not need to change.
   `shared_sentences`, excluding `lexicon_handler`, `learning_*`, `wordlists_handler`
   and `question_bank_handler`.
 - `admin`, `identity`: their original complete target sets.
-- `platform`: its original targets plus the complete `question_bank_handler`
-  target. This is a scheduling assignment; the module classifier still owns it
-  under lexicon. Every shard uses the same locked/all-features compilation and
+- `platform`: its original target set. Question-bank coverage remains in the
+  learning shard. Every shard uses the same locked/all-features compilation and
   isolated PostgreSQL/Redis services.
 
 The old module classifier still requires every repository integration target to
@@ -150,6 +150,23 @@ cumulative concurrent phase savings as wall-time savings. The lexicon shards now
 use the same template route without a per-case whitelist: the template is built
 and verified by the identical migrator, so cloning is equivalent to a fresh
 database plus full migration, and the audit requires one clone per executed case.
+
+## Admin lifecycle and selective templates
+
+Admin uses the same checksum-verified, disposable SQLx instrumentation and the
+job-owned template equivalence/isolation probes. Only the explicit
+`ADMIN_TEMPLATE_TARGETS` business target set is eligible for cloning, and a case
+must have an automatic migrator. Its migration fingerprint must exactly match
+the helper's complete root migrator before cloning. The idempotent migrator
+still runs on the cloned database and checks the ledger.
+
+`admin_schema`, `admin_permissions_handler`, `admin_preferences_handler` and
+`admin_coins_handler` remain fresh, as do `migrations = false` cases inside opted-in
+targets. New targets default to fresh. `admin-phase-measurements` records lifecycle
+phases and clone/fresh counts. The audit derives eligible cases from actual
+migration events plus the explicit target set; a missing, duplicate, foreign or
+ineligible clone marker fails the job. Existing full execution auditing remains
+unchanged.
 
 ## Lexicon handler lifecycle and maximum-batch measurements
 

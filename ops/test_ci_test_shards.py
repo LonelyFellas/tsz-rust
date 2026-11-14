@@ -42,7 +42,7 @@ class IntegrationShardsTests(unittest.TestCase):
                 self.assertEqual(covered, set(discovered))
 
     def test_rebalanced_companions_run_whole_targets_once_with_ignored_preserved(self):
-        companions = {"wordlists_handler": "lexicon-pagination", "question_bank_handler": "platform", "shared_sentences": "lexicon-other"}
+        companions = {"wordlists_handler": "lexicon-pagination", "question_bank_handler": "lexicon-learning", "shared_sentences": "lexicon-other"}
         self.grouped["lexicon"] += tuple(companions)
         for target, shard in companions.items():
             owner = next(r for r in self.reports if r["shard"] == shard)
@@ -56,16 +56,16 @@ class IntegrationShardsTests(unittest.TestCase):
 
     def test_target_relocation_cannot_keep_an_old_or_duplicate_owner(self):
         self.grouped["lexicon"] += ("question_bank_handler",)
-        platform = next(r for r in self.reports if r["shard"] == "platform")
-        platform["inventory"]["question_bank_handler"] = {"names": ["ordinary"], "ignored": []}
+        learning = next(r for r in self.reports if r["shard"] == "lexicon-learning")
+        learning["inventory"]["question_bank_handler"] = {"names": ["ordinary"], "ignored": []}
         row = {"target": "question_bank_handler", "name": "ordinary", "status": "ok"}
-        platform["executed"].append(row)
+        learning["executed"].append(row)
         self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha")["cases"], 9)
-        for owner in ("lexicon-pagination", "lexicon-other"):
+        for owner in ("lexicon-pagination", "lexicon-other", "platform"):
             for keep_new_owner in (False, True):
                 reports = copy.deepcopy(self.reports)
                 if not keep_new_owner:
-                    new = next(r for r in reports if r["shard"] == "platform")
+                    new = next(r for r in reports if r["shard"] == "lexicon-learning")
                     del new["inventory"]["question_bank_handler"]
                     new["executed"].remove(row)
                 old = next(r for r in reports if r["shard"] == owner)

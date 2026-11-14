@@ -3,11 +3,12 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 import tempfile
 import tomllib
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ci_identity_profile import BATCH_COUNTS, BATCH_FIXTURES, BATCH_HTTP_REQUESTS, BATCH_TEST, PACKAGES, audit_cloned_cases, audit_router_pilot, audit_template_uses, instrument_core, instrument_maximum_batch, instrument_postgres, profile_lock, profile_manifest, replace_once, summarize, summarize_maximum_batch, template_cases, validate_profile_lock
+from ci_identity_profile import BATCH_COUNTS, BATCH_FIXTURES, BATCH_HTTP_REQUESTS, BATCH_TEST, PACKAGES, admin_template_targets, audit_cloned_cases, audit_router_pilot, audit_target_template_uses, audit_template_uses, instrument_core, instrument_maximum_batch, instrument_postgres, instrument_units, profile_lock, profile_manifest, replace_once, summarize, summarize_maximum_batch, template_cases, validate_profile_lock
 
 
 class IdentityProfileTests(unittest.TestCase):
@@ -133,6 +134,64 @@ class IdentityProfileTests(unittest.TestCase):
             mutation(changed)
             with self.assertRaises(ValueError):
                 audit_cloned_cases(changed, "owned-template")
+
+    def test_admin_scope_keeps_schema_and_migration_modules_fresh(self):
+        root = Path(__file__).resolve().parents[1]
+        targets = admin_template_targets(root)
+        self.assertIn("admin_accounts_reset_password_handler", targets)
+        for target in ("admin_schema", "admin_permissions_handler", "admin_preferences_handler", "admin_coins_handler"):
+            self.assertNotIn(target, targets)
+        with mock.patch("ci_identity_profile.classify_targets", return_value={"admin": []}):
+            with self.assertRaises(ValueError):
+                admin_template_targets(root)
+
+    def test_target_route_requires_automatic_migrations(self):
+        source = (
+            "static MASTER_POOL: i32 = 1;\n"
+            '    let create_command = format!("create database {db_name:?}");\n'
+            "    conn.execute(AssertSqlSafe(create_command)).await?;\n"
+        )
+        patched = instrument_postgres(source, (), "fn migration_fingerprint() {}", targets=["admin_accounts_reset_password_handler"])
+        self.assertIn("args.migrator.is_some() && CI_TEMPLATE_TARGETS.contains", patched)
+        self.assertIn('"admin_accounts_reset_password_handler"', patched)
+        self.assertIn("const CI_TEMPLATE_ALL: bool = false;", patched)
+        self.assertIn("migration_fingerprint(args.migrator.expect", patched)
+
+    def test_target_route_audit_keeps_manual_and_nonwhitelisted_cases_fresh(self):
+        report = self.fixture()
+        # Same target, but migrations=false: it has a database lifecycle without
+        # an automatic migration event. A schema target has migrations but is
+        # deliberately outside the approved target set.
+        original = [t for t in report["timings"] if t["test"] == "identity_test::case"]
+        for target, name, automatic in [("identity_test", "manual", False), ("schema_test", "case", True)]:
+            report["executed"].append({"target": target, "name": name, "status": "ok"})
+            report["timings"] += [{**t, "test": f"{target}::{name}"} for t in original if automatic or t["phase"] != "migration"]
+        report["template_uses"] = [{"test": "identity_test::case", "template": "owned"}]
+        result = audit_target_template_uses(report, {"identity_test"}, "owned")
+        self.assertEqual((result["cloned_cases"], result["fresh_sqlx_cases"]), (1, 2))
+        mutations = [lambda r: r.update(template_uses=[]),
+                     lambda r: r["template_uses"].append(r["template_uses"][0]),
+                     lambda r: r["template_uses"][0].update(template="foreign")]
+        for case in ("identity_test::manual", "schema_test::case", "pure::unit"):
+            mutations.append(lambda r, case=case: r["template_uses"].append({"test": case, "template": "owned"}))
+        for mutate in mutations:
+            changed = copy.deepcopy(report)
+            mutate(changed)
+            with self.assertRaises(ValueError):
+                audit_target_template_uses(changed, {"identity_test"}, "owned")
+
+    def test_unit_timing_uses_the_selected_module(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests").mkdir()
+            source = "#[tokio::test]\nasync fn unit_case() {}\n"
+            for name in ("admin_case", "identity_case"):
+                (root / "tests" / f"{name}.rs").write_text(source)
+            with mock.patch("ci_identity_profile.classify_targets", return_value={"admin": ("admin_case",), "identity": ("identity_case",)}):
+                units = instrument_units(root, "admin")
+            self.assertEqual(units, [{"target": "admin_case", "name": "unit_case"}])
+            self.assertIn("CiPhaseTimer", (root / "tests/admin_case.rs").read_text())
+            self.assertEqual((root / "tests/identity_case.rs").read_text(), source)
 
     def test_whitelist_cannot_silently_expand_to_migration_tests(self):
         with tempfile.TemporaryDirectory() as directory:
