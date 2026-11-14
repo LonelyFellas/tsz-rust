@@ -2316,6 +2316,34 @@ async fn shared_forms_publication_freezes_graph_and_restore_recovers_sharing(poo
     let mut edited = snapshot["forms"].clone();
     edited["contents"][0]["regional_variants"]["uk"]["pronunciations"][0]["actual_pron"] =
         json!("draft only");
+    // Detach while retaining public references, then restore the pre-detach publication.
+    let mut detached = edited["contents"][0].clone();
+    detached["id"] = json!(Uuid::now_v7());
+    edited["pos"][0]["forms"][0]["content_id"] = detached["id"].clone();
+    for side in ["uk", "us"] {
+        let variant = &mut detached["regional_variants"][side];
+        variant["id"] = json!(Uuid::now_v7());
+        let binding = &mut edited["pos"][0]["forms"][0]["regional_bindings"][side];
+        binding["content_slot_id"] = variant["id"].clone();
+        for (slot, reference) in variant["pronunciations"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(binding["pronunciations"].as_array_mut().unwrap())
+        {
+            slot["id"] = json!(Uuid::now_v7());
+            reference["content_slot_id"] = slot["id"].clone();
+        }
+    }
+    let variants = detached["regional_variants"].clone();
+    for mapping in detached["pronunciation_slots"].as_array_mut().unwrap() {
+        mapping["id"] = json!(Uuid::now_v7());
+        for side in ["uk", "us"] {
+            mapping[side]["id"] = variants[side]["pronunciations"][0]["id"].clone();
+            mapping[side]["variant_slot_id"] = variants[side]["id"].clone();
+        }
+    }
+    edited["contents"].as_array_mut().unwrap().push(detached);
     let edited = save_shared(
         &state,
         &bearer,

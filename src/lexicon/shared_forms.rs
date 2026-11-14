@@ -1325,11 +1325,14 @@ pub(crate) async fn preflight_identities(
             continue;
         }
         let (_, target_content, _) = nodes[&id];
-        // Existing content keeps its pronunciation slots immutable. Detaching to
-        // fresh content may also move the label's own pronunciation references.
+        // Draft edits keep existing content's pronunciation slots immutable.
+        // Detaching to fresh content may move the label's own references; internal
+        // publication restores may return them to the snapshot's known content.
         if entry != entry_id
             || content == target_content
-            || (!variants.contains(&id) && !new_contents.contains(&target_content))
+            || (!variants.contains(&id)
+                && !new_contents.contains(&target_content)
+                && !matches!(check, IdentityCheck::PublicationRestore))
             || (!allowed_contents.contains(&target_content)
                 && !new_contents.contains(&target_content))
         {
