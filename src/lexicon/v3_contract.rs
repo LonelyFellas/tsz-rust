@@ -981,7 +981,7 @@ const MAX_VOICE_ID_CODEPOINTS: usize = 64;
 ///
 /// **刻意不校验 alias 是否还在 `speech.voices` 里**——发音人会随供应商下线，
 /// 拿存量配置去撞当下的清单只会把老词条卡成不可保存；失效由前端在界面上提示。
-fn validate_voice_profile(
+pub(crate) fn validate_voice_profile(
     profile: Option<&VoiceProfileV3>,
     node_id: Uuid,
     issues: &mut Vec<DraftValidationIssue>,

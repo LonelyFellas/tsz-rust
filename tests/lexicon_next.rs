@@ -69,12 +69,26 @@ async fn call_client(
     body: Value,
     capabilities: (bool, bool, bool),
 ) -> (StatusCode, Value) {
+    call_audio_client(state, actor, method, path, body, capabilities, false).await
+}
+async fn call_audio_client(
+    state: &AppState,
+    actor: Option<Uuid>,
+    method: &str,
+    path: &str,
+    body: Value,
+    capabilities: (bool, bool, bool),
+    audio: bool,
+) -> (StatusCode, Value) {
     let (groups, ownership, grammar) = capabilities;
     let mut req = Request::builder()
         .method(method)
         .uri(format!("{ROOT}{path}"))
         .header("content-type", "application/json")
         .header("x-tsz-next-forms", "v1");
+    if audio {
+        req = req.header("x-tsz-next-grammar-audio", "v1");
+    }
     if grammar {
         req = req.header("x-tsz-next-grammar", "v1");
     }
@@ -2774,5 +2788,226 @@ async fn grammar_rich_variants_bind_subcategories_and_protect_legacy_drafts(pool
         .execute(&pool)
         .await
         .is_err()
+    );
+}
+
+async fn call_grammar_audio(
+    state: &AppState,
+    actor: Uuid,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    call_audio_client(
+        state,
+        Some(actor),
+        method,
+        path,
+        body,
+        (true, true, true),
+        true,
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn grammar_audio_round_trips_preserves_legacy_and_owns_assets_with_forms(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let other_actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let (_, old_caps) = call_grammar(&state, actor, "GET", "/capabilities", Value::Null).await;
+    assert!(old_caps.get("grammar_audio").is_none());
+    let (_, caps) = call_grammar_audio(&state, actor, "GET", "/capabilities", Value::Null).await;
+    assert_eq!(caps["grammar_audio"], true);
+    let mut assets = Vec::new();
+    for owner in [actor, actor, other_actor] {
+        let asset = Uuid::now_v7();
+        sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,'audio/mpeg',3,'en-GB','female','fixture.mp3',$4)")
+            .bind(asset).bind(format!("local-fixture/{asset}")).bind(format!("local-fixture/source/{asset}")).bind(owner).execute(&pool).await.unwrap();
+        let metadata: Value = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'locale',locale,'gender',gender,'content_type',content_type,'size_bytes',size_bytes,'duration_ms',duration_ms,'original_name',original_name,'created_at',created_at,'is_default',true) FROM lexicon.audio_assets WHERE id=$1")
+            .bind(asset).fetch_one(&pool).await.unwrap();
+        assets.push(
+            serde_json::to_value(
+                serde_json::from_value::<tsz_rust::lexicon::audio_assets::dto::AudioAsset>(
+                    metadata,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+    }
+    let mut content = entry["draft"].clone();
+    let mut editor = form_editor();
+    editor["contents"][0]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"] =
+        json!([assets[0]]);
+    content["form_editor"] = editor;
+    let mut forged = assets[1].clone();
+    forged["original_name"] = json!("forged.mp3");
+    content["grammar_structures"] = json!([{"id":Uuid::now_v7(),"part_of_speech":"noun","sub_pos":"N-COUNT","variants":[{
+        "id":Uuid::now_v7(),"locale":"en-GB","content":{"version":2,"text":"a job","annotations":[]},
+        "voice_profile":{"voices":[{"voice_id":"saved-voice","enabled":false,"rate_percent":25}]},
+        "audio_assets":[forged]
+    }]}]);
+    let (status, saved) = call_grammar_audio(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["draft"]["grammar_structures"][0]["variants"][0]["audio_assets"][0],
+        assets[1]
+    );
+    let (_, reopened) = call_grammar_audio(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(reopened["draft"], saved["draft"]);
+    let (_, projected) = call_grammar_audio(
+        &state,
+        actor,
+        "GET",
+        &format!("{path}/view?target_locale=en-GB&medium_locale=zh-Hans"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        projected["grammar_structures"],
+        saved["draft"]["grammar_structures"]
+    );
+    let (_, old) = call_grammar(&state, actor, "GET", &path, Value::Null).await;
+    assert!(
+        old["draft"]["grammar_structures"][0]["variants"][0]
+            .get("voice_profile")
+            .is_none()
+    );
+    let (status, _) = call_grammar(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":old["draft"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, retained) = call_grammar_audio(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(retained["draft"], saved["draft"]);
+    for invalid_asset in [assets[2].clone(), {
+        let mut value = assets[1].clone();
+        value["id"] = json!(Uuid::now_v7());
+        value
+    }] {
+        let mut invalid = retained["draft"].clone();
+        invalid["grammar_structures"][0]["variants"][0]["audio_assets"] = json!([invalid_asset]);
+        let (status, _) = call_grammar_audio(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":3,"draft":invalid}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let mut invalid = retained["draft"].clone();
+    invalid["grammar_structures"][0]["variants"][0]["voice_profile"]["voices"][0]["rate_percent"] =
+        json!(101);
+    assert_eq!(
+        call_grammar_audio(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":3,"draft":invalid})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut forged_generation = retained["draft"].clone();
+    forged_generation["grammar_structures"][0]["variants"][0]["voice_profile"]["voices"] = json!([{
+        "voice_id":"saved-voice", "enabled":false, "rate_percent":0,
+        "version_id":Uuid::now_v7(), "version_name":"未生成的版本", "locale":"en-GB", "audio_asset_id":assets[1]["id"]
+    }]);
+    assert_eq!(
+        call_grammar_audio(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":3,"draft":forged_generation})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut wrong_accent = retained["draft"].clone();
+    wrong_accent["grammar_structures"][0]["variants"][0]["locale"] = json!("en-US");
+    wrong_accent["grammar_structures"][0]["variants"][0]["id"] = json!(Uuid::now_v7());
+    assert_eq!(
+        call_grammar_audio(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":3,"draft":wrong_accent})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let another = create(&state, actor).await;
+    let mut cloned = another["draft"].clone();
+    cloned["grammar_structures"] = content["grammar_structures"].clone();
+    cloned["grammar_structures"][0]["id"] = json!(Uuid::now_v7());
+    cloned["grammar_structures"][0]["variants"][0]["id"] = json!(Uuid::now_v7());
+    assert_eq!(
+        call_grammar_audio(
+            &state,
+            actor,
+            "PUT",
+            &format!("/entries/{}", another["id"].as_str().unwrap()),
+            json!({"expected_revision":1,"draft":cloned})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut changed = old["draft"].clone();
+    changed["grammar_structures"][0]["variants"][0]["content"]["text"] = json!("a new job");
+    assert_eq!(
+        call_grammar(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":3,"draft":changed})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, changed) = call_grammar_audio(&state, actor, "GET", &path, Value::Null).await;
+    assert!(
+        changed["draft"]["grammar_structures"][0]["variants"][0]
+            .get("audio_assets")
+            .is_none()
+    );
+    assert_eq!(
+        changed["draft"]["grammar_structures"][0]["variants"][0]["voice_profile"]["voices"][0]["rate_percent"],
+        25
+    );
+    let references: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT asset_id FROM lexicon_next.audio_asset_references WHERE entry_id=$1",
+    )
+    .bind(Uuid::parse_str(entry["id"].as_str().unwrap()).unwrap())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        references,
+        vec![Uuid::parse_str(assets[0]["id"].as_str().unwrap()).unwrap()]
     );
 }

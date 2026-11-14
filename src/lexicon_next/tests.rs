@@ -161,3 +161,45 @@ fn sense_groups_keep_draft_names_and_validate_identity_membership_and_closed_wir
         assert!(language::validate("en", &serde_json::from_value(invalid).unwrap()).is_err());
     }
 }
+
+#[test]
+fn legacy_grammar_annotation_edits_invalidate_audio_without_losing_voice_settings() {
+    let asset = Uuid::now_v7();
+    let previous: NextDraft = serde_json::from_value(json!({
+        "schema_version":1,"headword":"job","forms":[],"senses":[],
+        "grammar_structures":[{"id":Uuid::now_v7(),"part_of_speech":"noun","variants":[{
+            "id":Uuid::now_v7(),"locale":"en-GB","content":{"version":2,"text":"a job","annotations":[]},
+            "voice_profile":{"voices":[{"voice_id":"saved-voice","enabled":true,"rate_percent":15,
+                "version_id":Uuid::now_v7(),"version_name":"原配音","locale":"en-GB","audio_asset_id":asset}]}
+        }]}]
+    })).unwrap();
+    let mut unchanged = previous.clone();
+    super::grammar::strip_audio(unchanged.grammar_structures.as_mut());
+    super::grammar::preserve_audio(&mut unchanged, &previous);
+    assert_eq!(
+        serde_json::to_value(&unchanged).unwrap(),
+        serde_json::to_value(&previous).unwrap()
+    );
+    let mut changed = unchanged;
+    super::grammar::strip_audio(changed.grammar_structures.as_mut());
+    let variant = &mut changed.grammar_structures.as_mut().unwrap()[0].variants[0];
+    if let crate::lexicon::dto::RichTextV3::V2(content) = &mut variant.content {
+        content
+            .annotations
+            .push(crate::lexicon::dto::RichTextAnnotationV3::Pause {
+                at: 2,
+                duration_ms: 500,
+            });
+    }
+    super::grammar::preserve_audio(&mut changed, &previous);
+    let saved = serde_json::to_value(changed).unwrap();
+    let variant = &saved["grammar_structures"][0]["variants"][0];
+    assert_eq!(variant["content"]["text"], "a job");
+    assert_eq!(variant["content"]["annotations"][0]["type"], "pause");
+    assert_eq!(variant["voice_profile"]["voices"][0]["rate_percent"], 15);
+    assert!(
+        variant["voice_profile"]["voices"][0]
+            .get("audio_asset_id")
+            .is_none()
+    );
+}

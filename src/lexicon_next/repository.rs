@@ -176,6 +176,7 @@ pub async fn save(
     auth: &AdminAuth,
     id: Uuid,
     mut input: SaveNextDraft,
+    supports_audio: bool,
 ) -> Result<NextEntry, AppError> {
     if input.expected_revision < 1 {
         return Err(language::invalid());
@@ -224,6 +225,9 @@ pub async fn save(
             "grammar structures require an updated client; reopen before saving",
         ));
     }
+    if !supports_audio {
+        super::grammar::preserve_audio(draft, &previous.draft);
+    }
     super::grammar::validate_catalog(&mut tx, draft).await?;
     if previous.draft.sense_groups.is_some() && draft.sense_groups.is_none() {
         return Err(AppError::unprocessable(
@@ -248,8 +252,9 @@ pub async fn save(
             .map_err(crate::lexicon::handler::map_error)?;
     }
     let conn = &mut *tx;
-    super::forms::persist(conn, auth.subject, id, draft).await?;
+    super::forms::persist(conn, id, draft).await?;
     super::grammar::persist(conn, id, draft).await?;
+    super::audio::persist(conn, auth.subject, id, draft).await?;
     // Only current content is replaced. Nodes and previous revision snapshots remain intact.
     for sql in [
         "DELETE FROM lexicon_next.equivalents WHERE id IN (SELECT id FROM lexicon_next.nodes WHERE entry_id=$1)",

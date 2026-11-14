@@ -19,6 +19,7 @@ pub(super) const POS: &[&str] = &[
 ];
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
+        grammar_audio: None,
         grammar_structures: None,
         medium_ownership: None,
         schema_version: 1,
