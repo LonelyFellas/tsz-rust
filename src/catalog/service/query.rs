@@ -16,6 +16,12 @@ impl CatalogService {
                 ))
             })?;
 
+        let form_sharing = records
+            .first()
+            .expect("metadata checked")
+            .form_sharing
+            .0
+            .clone();
         let form_types = records
             .first()
             .map(|r| r.form_types.0.clone())
@@ -95,6 +101,7 @@ impl CatalogService {
             item.sub_pos_required = !item.sub_parts.is_empty();
         }
         Ok(CatalogResponse {
+            form_sharing,
             form_types,
             catalog_version,
             items,

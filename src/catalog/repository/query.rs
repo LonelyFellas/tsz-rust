@@ -6,6 +6,7 @@ impl CatalogRepository {
         sqlx::query_as::<_, CatalogFlatRecord>(
             r#"
             SELECT m.version AS catalog_version,
+                   (SELECT to_jsonb(t) FROM catalog.form_sharing_template t) AS form_sharing,
                    (SELECT coalesce(jsonb_agg(to_jsonb(f) ORDER BY f.sort_order,f.created_at,f.id),'[]') FROM catalog.form_types f) AS form_types,
                    p.id AS part_id, p.code AS part_code, p.kind AS part_kind,
                    p.name_zh AS part_name_zh,

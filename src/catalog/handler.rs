@@ -383,6 +383,11 @@ fn map_error(error: CatalogServiceError) -> AppError {
             );
             with_usage(error, usage_count)
         }
+        CatalogServiceError::PartInSharingTemplate => AppError::conflict(
+            ErrorCode::PartOfSpeechInUse,
+            Some("form_sharing"),
+            "remove part of speech from sharing template before deleting",
+        ),
         CatalogServiceError::PartHasSubParts => AppError::conflict(
             ErrorCode::PartOfSpeechHasSubParts,
             None,

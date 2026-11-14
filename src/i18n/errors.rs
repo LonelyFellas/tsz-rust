@@ -1249,6 +1249,36 @@ fn english_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'sta
                 "基本詞形類型不能屬於某個詞性",
             ))
         }
+        (
+            ErrorCode::PartOfSpeechInUse,
+            "remove part of speech from sharing template before deleting",
+        ) => Some((
+            "请先从默认共享模板移除此词性，再删除",
+            "請先從預設共用範本移除此詞性，再刪除",
+        )),
+        (ErrorCode::FormTypeInUse, "remove form type from sharing template before deleting") => {
+            Some((
+                "请先从默认共享模板移除此词形类型，再删除",
+                "請先從預設共用範本移除此詞形類型，再刪除",
+            ))
+        }
+        (ErrorCode::FormTypeInUse, "remove form type from sharing template before reparenting") => {
+            Some((
+                "请先从默认共享模板移除此词形类型，再修改所属词性",
+                "請先從預設共用範本移除此詞形類型，再修改所屬詞性",
+            ))
+        }
+        (ErrorCode::InvalidFormType, "invalid or overlapping form sharing groups") => Some((
+            "共享组合无效：每组至少两个成员，标签不能重复，词形须属于所选单词词性",
+            "共用組合無效：每組至少兩個成員，標籤不能重複，詞形須屬於所選單字詞性",
+        )),
+        (ErrorCode::InvalidFormType, "revision must be positive") => {
+            Some(("revision 必须为正数", "revision 必須為正數"))
+        }
+        (ErrorCode::RevisionConflict, "template changed; reload before retrying") => Some((
+            "默认共享模板已被修改，请保留当前输入，重新加载后核对并重试",
+            "預設共用範本已被修改，請保留目前輸入，重新載入後核對並重試",
+        )),
         (ErrorCode::FormTypeInUse, "form type is in use") => {
             Some(("词形类型正在使用", "詞形類型正在使用"))
         }

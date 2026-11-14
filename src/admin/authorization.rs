@@ -478,6 +478,16 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "GET",
+        "/settings/parts-of-speech/form-sharing",
+        RoutePolicy::All(&["lexicon_settings.access"]),
+    ),
+    (
+        "PUT",
+        "/settings/parts-of-speech/form-sharing",
+        RoutePolicy::All(&["lexicon_settings.edit_form_sharing"]),
+    ),
+    (
+        "GET",
         "/settings/parts-of-speech/catalog",
         RoutePolicy::Any(&[
             "lexicon_settings.access",

@@ -10,6 +10,10 @@ pub fn router() -> Router<AppState> {
         .route("/", get(handler::list_parts).post(handler::create_part))
         .route("/catalog", get(handler::catalog))
         .route(
+            "/form-sharing",
+            get(crate::catalog::form_sharing::get).put(crate::catalog::form_sharing::update),
+        )
+        .route(
             "/{id}",
             patch(handler::update_part).delete(handler::delete_part),
         )

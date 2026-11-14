@@ -7,3 +7,5 @@ pub mod service;
 pub mod form_types;
 
 pub mod taxonomies;
+
+pub mod form_sharing;

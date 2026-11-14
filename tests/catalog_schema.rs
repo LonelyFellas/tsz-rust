@@ -188,8 +188,8 @@ async fn catalog_schema_and_metadata_seed_are_present(pool: PgPool) {
     .expect("查询 catalog.metadata 应成功");
     assert_eq!(
         rows,
-        vec![(true, 8, true)],
-        "默认模版迁移后 metadata 应为唯一一行 version=8"
+        vec![(true, 9, true)],
+        "共享模板迁移后 metadata 应为唯一一行 version=9"
     );
 }
 
@@ -1808,4 +1808,112 @@ async fn form_type_default_template_down_requires_manual_recovery_without_data_c
         .await
         .unwrap()
     );
+}
+
+#[sqlx::test]
+async fn form_sharing_seed_uses_real_catalog_ids_and_migration_roundtrip_preserves_entries(
+    pool: PgPool,
+) {
+    let rows: Vec<(i32, String, String)> = sqlx::query_as(
+        "SELECT g.sort_order,p.code,f.code FROM catalog.form_sharing_groups g JOIN catalog.form_sharing_members m ON m.group_id=g.id JOIN catalog.parts_of_speech p ON p.id=m.part_of_speech_id JOIN catalog.form_types f ON f.id=m.form_type_id ORDER BY g.sort_order,m.sort_order"
+    ).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (0, "noun".into(), "base".into()),
+            (0, "pronoun".into(), "base".into()),
+            (0, "verb".into(), "base".into()),
+            (0, "adjective".into(), "base".into()),
+            (0, "adverb".into(), "base".into()),
+            (1, "noun".into(), "plural".into()),
+            (1, "verb".into(), "third_person_singular".into()),
+        ]
+    );
+    let admin = insert_admin(&pool).await;
+    let entry = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word','{\"task165\":true}',$2,$2)")
+        .bind(entry).bind(admin).execute(&pool).await.unwrap();
+    let snapshot = "SELECT jsonb_build_object('entries',(SELECT jsonb_agg(to_jsonb(e) ORDER BY id) FROM lexicon.entries e),'forms',(SELECT jsonb_agg(to_jsonb(f) ORDER BY id) FROM catalog.form_types f),'parts',(SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM catalog.parts_of_speech p),'grants',(SELECT jsonb_agg(to_jsonb(g)) FROM admin_permission_grants g))";
+    let before: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
+    let seed: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(t) FROM catalog.form_sharing_template t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114110000_form_sharing_templates.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let absent: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('catalog.form_sharing_members')::text")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert!(absent.is_none());
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114110000_form_sharing_templates.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let after: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        before, after,
+        "模板迁移不能回写词条、改变目录身份或授予普通管理员权限"
+    );
+    let restored: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(t) FROM catalog.form_sharing_template t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(restored, seed);
+    let version: i64 = sqlx::query_scalar("SELECT version FROM catalog.metadata")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        version, 11,
+        "up/down 都递增 catalog epoch，避免重复使用旧版本"
+    );
+}
+
+#[sqlx::test]
+async fn form_sharing_seed_skips_incomplete_pairs_without_inventing_types(pool: PgPool) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114110000_form_sharing_templates.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM catalog.form_types WHERE code='third_person_singular'")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114110000_form_sharing_templates.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let groups: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.form_sharing_groups")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(groups, 1);
+    let members: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.form_sharing_members")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(members, 5, "单成员的复数/三单组须连同成员删除");
+    let types: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.form_types")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(types, 7, "不能创建缺失类型");
+    tx.rollback().await.unwrap();
 }

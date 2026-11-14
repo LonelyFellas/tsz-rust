@@ -273,6 +273,8 @@ use utoipa::{
         crate::catalog::taxonomies::create,
         crate::catalog::taxonomies::update,
         crate::catalog::taxonomies::remove,
+        crate::catalog::form_sharing::get,
+        crate::catalog::form_sharing::update,
         crate::catalog::handler::catalog,
         crate::catalog::form_types::list,
         crate::catalog::form_types::create,
@@ -1893,6 +1895,54 @@ mod tests {
                 error_variants.iter().any(|value| value == code),
                 "ErrorCode schema 缺少 {code}"
             );
+        }
+    }
+
+    #[test]
+    fn form_sharing_contract_is_documented() {
+        let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let path = "/api/v1/admin/settings/parts-of-speech/form-sharing";
+        for method in ["get", "put"] {
+            let operation = &spec["paths"][path][method];
+            assert_eq!(
+                operation["security"][0]["bearer_auth"],
+                serde_json::json!([])
+            );
+            assert_eq!(
+                operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/FormSharingTemplate"
+            );
+        }
+        let schemas = &spec["components"]["schemas"];
+        assert_eq!(
+            schemas["CatalogResponse"]["properties"]["form_sharing"]["$ref"],
+            "#/components/schemas/FormSharingTemplate"
+        );
+        assert_eq!(
+            schemas["FormSharingGroup"]["properties"]["members"]["minItems"],
+            2
+        );
+        assert_eq!(
+            schemas["FormSharingGroup"]["properties"]["members"]["maxItems"],
+            100
+        );
+        assert_eq!(
+            schemas["UpdateFormSharingTemplate"]["properties"]["groups"]["maxItems"],
+            100
+        );
+        assert_eq!(
+            schemas["UpdateFormSharingTemplate"]["properties"]["base_revision"]["minimum"],
+            1
+        );
+        for name in [
+            "UpdateFormSharingTemplate",
+            "FormSharingGroup",
+            "FormSharingMember",
+        ] {
+            assert_eq!(schemas[name]["additionalProperties"], false);
+        }
+        for status in ["400", "401", "403", "409", "422", "500"] {
+            assert!(spec["paths"][path]["put"]["responses"][status].is_object());
         }
     }
 
