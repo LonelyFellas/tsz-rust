@@ -50,6 +50,26 @@ async fn call_with_groups(
     body: Value,
     groups: bool,
 ) -> (StatusCode, Value) {
+    call_client(state, actor, method, path, body, groups, false).await
+}
+async fn call_scoped(
+    state: &AppState,
+    actor: Uuid,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    call_client(state, Some(actor), method, path, body, true, true).await
+}
+async fn call_client(
+    state: &AppState,
+    actor: Option<Uuid>,
+    method: &str,
+    path: &str,
+    body: Value,
+    groups: bool,
+    ownership: bool,
+) -> (StatusCode, Value) {
     let mut req = Request::builder()
         .method(method)
         .uri(format!("{ROOT}{path}"))
@@ -57,6 +77,9 @@ async fn call_with_groups(
         .header("x-tsz-next-forms", "v1");
     if groups {
         req = req.header("x-tsz-next-sense-groups", "v1");
+    }
+    if ownership {
+        req = req.header("x-tsz-next-medium-ownership", "v1");
     }
     if let Some(actor) = actor {
         req = req.header(
@@ -962,11 +985,9 @@ async fn workspace_filters_stats_and_language_drafts_stay_separate(pool: PgPool)
         Value::Null,
     )
     .await;
-    assert_eq!(traditional["pagination"]["total"], 1);
-    assert_eq!(
-        traditional["items"][0]["gloss"],
-        "某物的中心位置（繁體說明）"
-    );
+    // Historical Traditional text does not change this draft's Simplified ownership.
+    assert_eq!(traditional["pagination"]["total"], 0);
+    assert_eq!(traditional["items"], json!([]));
     let (_, target_only_text) = call(
         &state,
         Some(owner),
@@ -1071,10 +1092,11 @@ async fn language_scope_matches_list_search_trash_stats_and_creators(pool: PgPoo
             assert_eq!(status, StatusCode::OK, "{saved}");
         }
         // Simulate historical content in a language not currently open for creation.
-        sqlx::query("UPDATE lexicon_next.entries SET target_language=$2,status=$3 WHERE id=$1")
+        sqlx::query("UPDATE lexicon_next.entries SET target_language=$2,status=$3,medium_locale=$4 WHERE id=$1")
             .bind(id.parse::<Uuid>().unwrap())
             .bind(target)
             .bind(if archived { "archived" } else { "draft" })
+            .bind(locale.unwrap_or("zh-Hans"))
             .execute(&pool)
             .await
             .unwrap();
@@ -1084,7 +1106,7 @@ async fn language_scope_matches_list_search_trash_stats_and_creators(pool: PgPoo
         ("", 5),
         ("target_language=en", 4),
         ("target_language=fr&medium_locale=zh-Hans", 1),
-        ("target_language=en&medium_locale=zh-Hans", 2),
+        ("target_language=en&medium_locale=zh-Hans", 3),
         ("target_language=en&medium_locale=zh-Hant", 1),
         (
             "target_language=en&medium_locale=zh-Hans&gloss=traditional",
@@ -1140,12 +1162,12 @@ async fn language_scope_matches_list_search_trash_stats_and_creators(pool: PgPoo
         &state,
         Some(owner),
         "GET",
-        "/workspace/entries?target_language=en&medium_locale=zh-Hans&page_size=1&page=2",
+        "/workspace/entries?target_language=en&medium_locale=zh-Hans&page_size=1&page=3",
         Value::Null,
     )
     .await;
-    assert_eq!(list["pagination"]["total"], 2);
-    assert_eq!(list["pagination"]["total_pages"], 2);
+    assert_eq!(list["pagination"]["total"], 3);
+    assert_eq!(list["pagination"]["total_pages"], 3);
     assert_eq!(list["items"][0]["gloss"], "simplified");
     let (_, equivalents) = call(
         &state,
@@ -1164,7 +1186,7 @@ async fn language_scope_matches_list_search_trash_stats_and_creators(pool: PgPoo
         Value::Null,
     )
     .await;
-    assert_eq!(basic["pagination"]["total"], 2);
+    assert_eq!(basic["pagination"]["total"], 3);
     let (_, creators) = call(
         &state,
         Some(owner),
@@ -2284,4 +2306,247 @@ async fn sense_groups_migration_reverses_legacy_data_and_refuses_extended_snapsh
     )
     .await;
     assert_eq!(read["draft"], content);
+}
+
+#[sqlx::test]
+async fn medium_ownership_keeps_empty_drafts_isolated_across_workspace_and_matches(pool: PgPool) {
+    let grants = &[
+        "words.access",
+        "words.create",
+        "words.edit",
+        "words.archive",
+        "words.restore",
+    ];
+    let hans_actor = admin(&pool, grants).await;
+    let hant_actor = admin(&pool, grants).await;
+    let state = AppState::for_test(pool.clone());
+    let mut entries = Vec::new();
+    for (actor, medium) in [(hans_actor, "zh-Hans"), (hant_actor, "zh-Hant")] {
+        let (status, value) = call_scoped(&state, actor, "POST", "/entries", json!({"target_language":"en", "medium_locale":medium, "kind":"word", "headword":"centre"})).await;
+        assert_eq!(status, StatusCode::CREATED, "{value}");
+        assert_eq!(value["medium_locale"], medium);
+        entries.push(value);
+    }
+    for (index, medium) in ["zh-Hans", "zh-Hant"].iter().enumerate() {
+        let (_, list) = call_scoped(
+            &state,
+            hans_actor,
+            "GET",
+            &format!("/workspace/entries?target_language=en&medium_locale={medium}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(list["pagination"]["total"], 1);
+        assert_eq!(list["items"][0]["id"], entries[index]["id"]);
+        assert_eq!(
+            list["items"][0]["annotation_visible"], false,
+            "another medium does not create a same-name conflict"
+        );
+        let (_, stats) = call_scoped(
+            &state,
+            hans_actor,
+            "GET",
+            &format!("/workspace/stats?medium_locale={medium}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(stats["total"], 1);
+        let (_, creators) = call_scoped(
+            &state,
+            hans_actor,
+            "GET",
+            &format!("/workspace/creators?medium_locale={medium}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(creators.as_array().unwrap().len(), 1);
+        assert_eq!(
+            creators[0]["id"],
+            if index == 0 {
+                hans_actor.to_string()
+            } else {
+                hant_actor.to_string()
+            }
+        );
+        let (_, matches) = call_scoped(
+            &state,
+            hans_actor,
+            "POST",
+            "/entry-matches",
+            json!({"target_language":"en","medium_locale":medium,"surface":"centre"}),
+        )
+        .await;
+        assert_eq!(matches["pagination"]["total"], 1);
+        assert_eq!(matches["items"][0]["id"], entries[index]["id"]);
+    }
+    let id = entries[0]["id"].as_str().unwrap();
+    let (status, saved) = call_scoped(
+        &state,
+        hans_actor,
+        "PUT",
+        &format!("/entries/{id}"),
+        json!({"expected_revision":1,"draft":draft()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["medium_locale"], "zh-Hans");
+    let mut blank = saved["draft"].clone();
+    blank["senses"] = json!([]);
+    let (status, _) = call_scoped(
+        &state,
+        hans_actor,
+        "PUT",
+        &format!("/entries/{id}"),
+        json!({"expected_revision":2,"draft":blank}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, reopened) = call_scoped(
+        &state,
+        hans_actor,
+        "GET",
+        &format!("/entries/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(reopened["medium_locale"], "zh-Hans");
+    assert_eq!(reopened["draft"]["senses"], json!([]));
+    let (_, list) = call_scoped(
+        &state,
+        hans_actor,
+        "GET",
+        "/workspace/entries?medium_locale=zh-Hans",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(list["pagination"]["total"], 1);
+    assert_eq!(list["items"][0]["id"], entries[0]["id"]);
+    assert_eq!(
+        call_scoped(
+            &state,
+            hans_actor,
+            "GET",
+            &format!("/entries/{id}/view?target_locale=en-GB&medium_locale=zh-Hant"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let id = entries[1]["id"].as_str().unwrap();
+    let (_, row) = call_scoped(
+        &state,
+        hant_actor,
+        "GET",
+        &format!("/workspace/entries/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(call_scoped(&state, hant_actor, "POST", "/workspace/commands", json!({"request_id":Uuid::now_v7(),"action":"archive","items":[{"entry_id":id,"base_revision":row["revision"],"base_lifecycle_revision":row["lifecycle_revision"]}]})).await.0, StatusCode::OK);
+    for (medium, total) in [("zh-Hans", 0), ("zh-Hant", 1)] {
+        let (_, trash) = call_scoped(
+            &state,
+            hans_actor,
+            "GET",
+            &format!("/workspace/entries?status=archived&medium_locale={medium}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(trash["pagination"]["total"], total);
+    }
+    let (_, old) = call(
+        &state,
+        Some(hans_actor),
+        "GET",
+        &format!("/entries/{}", entries[0]["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert!(
+        old.get("medium_locale").is_none(),
+        "old strict clients keep the old response shape"
+    );
+    let (_, caps) = call_scoped(&state, hans_actor, "GET", "/capabilities", Value::Null).await;
+    assert_eq!(caps["medium_ownership"], true);
+    let (_, old_caps) = call(
+        &state,
+        Some(hans_actor),
+        "GET",
+        "/capabilities",
+        Value::Null,
+    )
+    .await;
+    assert!(old_caps.get("medium_ownership").is_none());
+    assert_eq!(
+        call_scoped(
+            &state,
+            hans_actor,
+            "POST",
+            "/entries",
+            json!({"target_language":"en","medium_locale":"fr","kind":"word","headword":"test"})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+#[sqlx::test]
+async fn medium_ownership_migration_preserves_legacy_text_and_round_trips(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let mut documents = Vec::new();
+    for locales in [
+        vec![],
+        vec!["zh-Hans"],
+        vec!["zh-Hant"],
+        vec!["zh-Hans", "zh-Hant"],
+    ] {
+        let value = create(&state, actor).await;
+        let id = value["id"].as_str().unwrap();
+        let mut content = draft();
+        content["senses"][0]["definitions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|row| {
+                row["locale"]
+                    .as_str()
+                    .is_some_and(|locale| locale.starts_with("en") || locales.contains(&locale))
+            });
+        content["senses"][0]["equivalents"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|row| locales.contains(&row["locale"].as_str().unwrap()));
+        let (status, saved) = call(
+            &state,
+            Some(actor),
+            "PUT",
+            &format!("/entries/{id}"),
+            json!({"expected_revision":1,"draft":content}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        documents.push((Uuid::parse_str(id).unwrap(), saved["draft"].clone()));
+    }
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114100000_lexicon_next_medium_ownership.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(!sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='lexicon_next' AND table_name='entries' AND column_name='medium_locale')").fetch_one(&pool).await.unwrap());
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114100000_lexicon_next_medium_ownership.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    for ((id, original), expected) in documents
+        .iter()
+        .zip(["zh-Hans", "zh-Hans", "zh-Hant", "zh-Hans"])
+    {
+        let (medium, document): (String, Value) = sqlx::query_as("SELECT e.medium_locale,r.document FROM lexicon_next.entries e JOIN lexicon_next.draft_revisions r ON r.entry_id=e.id AND r.revision=e.revision WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(medium, expected);
+        assert_eq!(&document, original);
+    }
 }

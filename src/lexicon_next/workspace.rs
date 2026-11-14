@@ -7,7 +7,7 @@ use crate::{
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-const SAME_NAME: &str = r#"e.status<>'archived' AND other.status<>'archived' AND other.target_language=e.target_language AND other.kind=e.kind AND other.id<>e.id
+const SAME_NAME: &str = r#"e.status<>'archived' AND other.status<>'archived' AND other.target_language=e.target_language AND other.medium_locale=e.medium_locale AND other.kind=e.kind AND other.id<>e.id
  AND EXISTS (
  WITH current_forms AS NOT MATERIALIZED (
    SELECT n.entry_id,f.locale,f.text FROM lexicon_next.nodes n JOIN lexicon_next.forms f ON f.id=n.id
@@ -54,10 +54,7 @@ pub(super) fn filter(sql: &mut QueryBuilder<Postgres>, query: &NextWorkspaceQuer
         sql.push(" AND e.target_language=").push_bind(language);
     }
     if let Some(locale) = &query.medium_locale {
-        sql.push(" AND (EXISTS(SELECT 1 FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id WHERE n.entry_id=e.id AND d.locale=")
-            .push_bind(locale)
-            .push(") OR EXISTS(SELECT 1 FROM lexicon_next.equivalents q JOIN lexicon_next.nodes n ON n.id=q.id WHERE n.entry_id=e.id AND q.locale=")
-            .push_bind(locale).push("))");
+        sql.push(" AND e.medium_locale=").push_bind(locale);
     }
     if let Some(word) = query
         .headword

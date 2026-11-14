@@ -100,6 +100,10 @@ pub struct NextDraft {
 #[serde(deny_unknown_fields)]
 pub struct NextEntry {
     pub id: Uuid,
+    /// Immutable draft ownership, negotiated by x-tsz-next-medium-ownership: v1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub medium_locale: Option<String>,
     pub target_language: String,
     pub kind: NextEntryKind,
     pub owner_id: Uuid,
@@ -112,6 +116,9 @@ pub struct NextEntry {
 #[serde(deny_unknown_fields)]
 pub struct CreateNextEntry {
     pub target_language: String,
+    /// Old clients default to Simplified Chinese; ownership does not change on save.
+    #[serde(default = "default_medium_locale")]
+    pub medium_locale: String,
     pub kind: NextEntryKind,
     pub headword: String,
 }
@@ -138,6 +145,9 @@ pub struct NextLanguageCapability {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub medium_ownership: Option<bool>,
     #[schema(minimum = 1, maximum = 1)]
     pub schema_version: i32,
     pub language_rules_version: String,
@@ -241,4 +251,8 @@ fn non_null_sense_groups<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Vec<NextSenseGroup>>, D::Error> {
     Vec::<NextSenseGroup>::deserialize(deserializer).map(Some)
+}
+
+fn default_medium_locale() -> String {
+    "zh-Hans".into()
 }

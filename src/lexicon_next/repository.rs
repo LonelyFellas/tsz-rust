@@ -10,6 +10,7 @@ use uuid::Uuid;
 struct EntryRow {
     id: Uuid,
     target_language: String,
+    medium_locale: String,
     kind: String,
     owner_id: Uuid,
     revision: i64,
@@ -21,6 +22,7 @@ impl EntryRow {
         Ok(NextEntry {
             id: self.id,
             target_language: self.target_language,
+            medium_locale: Some(self.medium_locale),
             kind: serde_json::from_value(serde_json::Value::String(self.kind))
                 .map_err(AppError::internal)?,
             owner_id: self.owner_id,
@@ -30,7 +32,7 @@ impl EntryRow {
         })
     }
 }
-const SELECT_ENTRY: &str = "SELECT e.id,e.target_language,e.kind,e.owner_id,e.revision,e.updated_at,r.document FROM lexicon_next.entries e JOIN lexicon_next.draft_revisions r ON r.entry_id=e.id AND r.revision=e.revision WHERE e.id=$1";
+const SELECT_ENTRY: &str = "SELECT e.id,e.target_language,e.medium_locale,e.kind,e.owner_id,e.revision,e.updated_at,r.document FROM lexicon_next.entries e JOIN lexicon_next.draft_revisions r ON r.entry_id=e.id AND r.revision=e.revision WHERE e.id=$1";
 
 pub(super) async fn lock_list_writers(conn: &mut PgConnection) -> Result<(), AppError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('lexicon_next.list-writer',0))")
@@ -101,6 +103,7 @@ pub async fn create(
     input: CreateNextEntry,
 ) -> Result<NextEntry, AppError> {
     language::require_language(&input.target_language)?;
+    language::require_medium(&input.medium_locale)?;
     language::text(&input.headword, 200)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     permissions::lock_session(&mut tx, auth, "words.create").await?;
@@ -110,8 +113,8 @@ pub async fn create(
         NextEntryKind::Word => "word",
         NextEntryKind::Phrase => "phrase",
     };
-    sqlx::query("INSERT INTO lexicon_next.entries(id,target_language,kind,headword,owner_id,revision) VALUES($1,$2,$3,$4,$5,1)")
-        .bind(id).bind(&input.target_language).bind(kind).bind(&input.headword).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO lexicon_next.entries(id,target_language,medium_locale,kind,headword,owner_id,revision) VALUES($1,$2,$3,$4,$5,$6,1)")
+        .bind(id).bind(&input.target_language).bind(&input.medium_locale).bind(kind).bind(&input.headword).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?;
     let draft = NextDraft {
         sense_groups: None,
         schema_version: 1,
