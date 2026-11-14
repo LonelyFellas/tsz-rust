@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, phone, display_name, password_hash, security_version, role as \"role: AdminRole\", status as \"status: AdminStatus\", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as \"dialect_preference: AdminDialectPreference\", interface_locale as \"interface_locale: InterfaceLocaleV1\", created_at, updated_at\n            FROM admins\n            WHERE id = $1\n            ",
+  "query": "\n            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            RETURNING id, phone, display_name, password_hash, security_version,\n                      role as \"role: AdminRole\",\n                      status as \"status: AdminStatus\",\n                      must_change_password, failed_login_count, locked_until,\n                      created_by_admin_id,\n                      dialect_preference as \"dialect_preference: AdminDialectPreference\",\n                      interface_locale as \"interface_locale: InterfaceLocaleV1\",\n                      lexicon_languages as \"lexicon_languages: Json<AdminLexiconLanguages>\",\n                      created_at, updated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -148,6 +148,17 @@
       },
       {
         "ordinal": 13,
+        "name": "lexicon_languages: Json<AdminLexiconLanguages>",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "lexicon_languages"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -171,6 +182,12 @@
     ],
     "parameters": {
       "Left": [
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
         "Uuid"
       ]
     },
@@ -188,9 +205,10 @@
       true,
       false,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "db48aedba8c290fc3d56263877eb71a6c008abfcb3effb30f59c9ec49b341c18"
+  "hash": "955b0be59efb4dd75b71b801f29d72119564894a8d03291f4f5a51254fda0865"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            RETURNING id, phone, display_name, password_hash, security_version,\n                      role as \"role: AdminRole\",\n                      status as \"status: AdminStatus\",\n                      must_change_password, failed_login_count, locked_until,\n                      created_by_admin_id,\n                      dialect_preference as \"dialect_preference: AdminDialectPreference\",\n                      interface_locale as \"interface_locale: InterfaceLocaleV1\",\n                      created_at, updated_at\n            ",
+  "query": "\n            SELECT id, phone, display_name, password_hash, security_version, role as \"role: AdminRole\", status as \"status: AdminStatus\", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as \"dialect_preference: AdminDialectPreference\", interface_locale as \"interface_locale: InterfaceLocaleV1\", lexicon_languages as \"lexicon_languages: Json<AdminLexiconLanguages>\", created_at, updated_at\n            FROM admins\n            WHERE id = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -148,6 +148,17 @@
       },
       {
         "ordinal": 13,
+        "name": "lexicon_languages: Json<AdminLexiconLanguages>",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "lexicon_languages"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -171,12 +182,6 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Varchar",
-        "Text",
-        "Text",
-        "Text",
-        "Bool",
         "Uuid"
       ]
     },
@@ -194,9 +199,10 @@
       true,
       false,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "605e9229cac07ac1f9526d845ac359314795af231f4e7bc02ce701403b2a9108"
+  "hash": "014bb09608ceeacc77ae96e293222b6f91bff6023c9c8e5ffdffef83d57c3bcf"
 }

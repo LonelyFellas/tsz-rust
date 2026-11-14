@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     admin::{
-        AdminDialectPreference, AdminRole, authorization::require_active_admin, extract::AdminAuth,
+        AdminDialectPreference, AdminLexiconLanguages, AdminRole,
+        authorization::require_active_admin, extract::AdminAuth,
     },
     api::ApiJson,
     error::{AppError, ErrorCode},
@@ -35,6 +36,10 @@ pub struct AdminPreferences {
     pub dialect: AdminDialectPreference,
     #[schema(required = true)]
     pub interface_locale: Option<InterfaceLocaleV1>,
+    /// null 表示账号尚未设置；旧后端不提供该字段。
+    #[schema(required = true)]
+    #[sqlx(json(nullable))]
+    pub lexicon_languages: Option<AdminLexiconLanguages>,
 }
 
 /// PATCH /profile/preferences 的请求体。只带要改的偏好，改的恒是自己的。
@@ -48,6 +53,37 @@ pub struct UpdateAdminPreferencesRequest {
     #[serde(default, deserialize_with = "present_nullable")]
     #[schema(value_type = Option<InterfaceLocaleV1>)]
     pub interface_locale: Option<Option<InterfaceLocaleV1>>,
+    #[serde(default, deserialize_with = "optional_lexicon_languages")]
+    #[schema(nullable = false)]
+    pub lexicon_languages: Option<AdminLexiconLanguages>,
+    /// 仅旧浏览器偏好首次导入时使用，不覆盖账号中已有的选择。
+    #[serde(default)]
+    pub lexicon_languages_if_unset: bool,
+}
+
+fn optional_lexicon_languages<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<AdminLexiconLanguages>, D::Error> {
+    AdminLexiconLanguages::deserialize(deserializer).map(Some)
+}
+
+fn validate_lexicon_languages(value: &AdminLexiconLanguages) -> Result<(), AppError> {
+    let supported = crate::lexicon_next::language::capabilities()
+        .languages
+        .into_iter()
+        .any(|language| {
+            language.target_language == value.target_language
+                && language.target_locales.contains(&value.target_locale)
+                && language.medium_locales.contains(&value.medium_locale)
+        });
+    if supported {
+        Ok(())
+    } else {
+        Err(AppError::unprocessable(
+            ErrorCode::InvalidRequestBody,
+            "unsupported lexicon language selection",
+        ))
+    }
 }
 
 fn optional_dialect<'de, D: serde::Deserializer<'de>>(
@@ -105,6 +141,7 @@ pub async fn admin_profile(
             preferences: AdminPreferences {
                 dialect: admin.dialect_preference,
                 interface_locale: admin.interface_locale,
+                lexicon_languages: admin.lexicon_languages.map(|value| value.0),
             },
         }),
     ))
@@ -134,18 +171,30 @@ pub async fn update_admin_preferences(
     ApiJson(request): ApiJson<UpdateAdminPreferencesRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
-    if request.dialect.is_none() && request.interface_locale.is_none() {
+    if request.dialect.is_none()
+        && request.interface_locale.is_none()
+        && request.lexicon_languages.is_none()
+    {
         return Err(AppError::unprocessable(
             ErrorCode::InvalidRequestBody,
             "at least one preference is required",
         ));
     }
+    if request.lexicon_languages_if_unset && request.lexicon_languages.is_none() {
+        return Err(AppError::unprocessable(
+            ErrorCode::InvalidRequestBody,
+            "lexicon language selection is required for initialization",
+        ));
+    }
+    if let Some(value) = &request.lexicon_languages {
+        validate_lexicon_languages(value)?;
+    }
     state
         .interface_languages
         .require_supported(InterfaceSurface::Admin, request.interface_locale.flatten())?;
     let preferences = sqlx::query_as::<_, AdminPreferences>(
-        "UPDATE admins SET dialect_preference=COALESCE($3,dialect_preference),interface_locale=CASE WHEN $4 THEN $5 ELSE interface_locale END,updated_at=NOW() WHERE id=$1 AND security_version=$2 AND status='active' AND NOT must_change_password RETURNING dialect_preference AS dialect,interface_locale")
-        .bind(admin.id).bind(auth.security_version).bind(request.dialect).bind(request.interface_locale.is_some()).bind(request.interface_locale.flatten())
+        "UPDATE admins SET dialect_preference=COALESCE($3,dialect_preference),interface_locale=CASE WHEN $4 THEN $5 ELSE interface_locale END,lexicon_languages=CASE WHEN $7 THEN COALESCE(lexicon_languages,$6) ELSE COALESCE($6,lexicon_languages) END,updated_at=NOW() WHERE id=$1 AND security_version=$2 AND status='active' AND NOT must_change_password RETURNING dialect_preference AS dialect,interface_locale,lexicon_languages")
+        .bind(admin.id).bind(auth.security_version).bind(request.dialect).bind(request.interface_locale.is_some()).bind(request.interface_locale.flatten()).bind(request.lexicon_languages.map(sqlx::types::Json)).bind(request.lexicon_languages_if_unset)
         .fetch_optional(&state.pool).await.map_err(AppError::internal)?
         .ok_or_else(|| AppError::unauthorized(ErrorCode::InvalidToken,"invalid token"))?;
 

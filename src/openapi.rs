@@ -470,6 +470,7 @@ use utoipa::{
             crate::admin::auth::handler::AdminProfile,
             crate::admin::profile::handler::AdminProfileResponse,
             crate::admin::profile::handler::AdminPreferences,
+            crate::admin::AdminLexiconLanguages,
             crate::admin::profile::handler::UpdateAdminPreferencesRequest,
             crate::admin::profile::handler::UpdateAdminPreferencesResponse,
             crate::admin::auth::handler::AdminToken,
