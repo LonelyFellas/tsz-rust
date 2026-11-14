@@ -6,7 +6,7 @@
 
 - **小改动**：明确结果 → 最小修改 → 定向验证 → 按授权交付。不强制评估、写 spec 或新增测试。
 - **Bug**：固定版本与现场 → 复现失败 → 最小修复 → 原路径回归；使用 [bugfix](.agents/skills/bugfix/SKILL.md)，不重走新功能评估。
-- **新功能/跨仓改动**：查已有能力与依赖 → 确定契约和必要设计 → 实现 → 风险验证与真实联调 → 按授权交付/发布。使用 [assess](.agents/skills/assess/SKILL.md) / [build](.agents/skills/build/SKILL.md)；已有明确方案直接实施，不重复评估。接口变化按需使用 [contract-sync](.agents/skills/contract-sync/SKILL.md)。
+- **新功能/跨仓改动**：查已有能力与依赖 → 确定契约和必要设计 → 实现 → 风险验证与真实联调 → 按授权交付/发布。使用 [feature](.agents/skills/feature/SKILL.md)；仅评估交付方案，已有明确方案直接实施。旧 assess/build 仅作兼容入口。接口变化按需使用 [contract-sync](.agents/skills/contract-sync/SKILL.md)。
 
 新任务先 `git fetch origin`，从最新 `origin/main` 创建独立任务分支和 worktree，默认 `codex/<slug>`；已有本任务 worktree/PR 必须复用。通过 PR 进入 main，不在 main 或 dev 直接开发、提交、推送。保留用户改动，每个 checkout/index 保持一个写入者。
 
@@ -39,6 +39,8 @@
 
 ## 后端验证
 
+测试层选择、隔离与结果复用见 [test](.agents/skills/test/SKILL.md)；生成与兼容见 [contract-sync](.agents/skills/contract-sync/SKILL.md)。项目约定已覆盖的通用编码原则不重复加载全局技能。
+
 - 本地 pre-commit 按变更范围执行 SQLx/Clippy；pre-push 仅执行 `cargo fmt --all -- --check`，不依赖 PostgreSQL/Redis。开发时按风险运行定向测试，全量测试保留在 PR/main CI。
 - 验收写明可执行命令与预期；只能人工验收时给步骤与判据。按实际 Cargo、CI 与 `.githooks` 选择检查，不套前端命令。
 - 迁移 up/down 成对，在隔离库验证并说明数据损失与回退限制；SQL/API 变化同步 `.sqlx` / OpenAPI，新增测试 target 纳入 CI 分区清单。
@@ -54,3 +56,7 @@
 - 仅讨论、询问、评估或准备部署不构成执行授权；提交、推送、合并与部署是独立授权边界。
 - 部署 skill 是来源、配置、备份、恢复、验收和清理门禁的统一入口。真实正常发布已经验收，
   真实回退尚未演练；不自动故障注入、数据库恢复或启用自动 CD。
+
+## 技能维护
+
+`.agents/skills` 是流程维护位置，`.claude/skills` 只保留入口及宿主适配。词条入库使用 [publish-word](.agents/skills/publish-word/SKILL.md)，讨论或修改该流程不构成发布词条授权。
