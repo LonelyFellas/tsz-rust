@@ -4,7 +4,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from ci_run_summary import summarize, markdown
+from ci_run_summary import WALL_CLOCK_BUDGET_SECONDS, budget, summarize, markdown
 
 
 class SummaryTests(unittest.TestCase):
@@ -45,6 +45,19 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(len(report["jobs"]), 1)
         self.assertEqual(report["completed_runner_minutes"], 2)
         self.assertEqual(report["measured_latency_seconds"], 130)
+
+    def test_wall_clock_budget_is_reported_without_changing_gates(self):
+        under = summarize(self.run, [self.job])
+        self.assertLess(under["measured_latency_seconds"], WALL_CLOCK_BUDGET_SECONDS)
+        self.assertFalse(budget(under)["over_budget"])
+        self.assertIn(f"Wall-clock budget: {WALL_CLOCK_BUDGET_SECONDS} s (within", markdown(under))
+        slow = dict(self.job, completed_at="2026-11-03T00:30:00Z")
+        over = summarize(self.run, [slow])
+        self.assertTrue(budget(over)["over_budget"])
+        self.assertIn("(over the measured latency)", markdown(over))
+        no_latency = summarize(self.run, [dict(self.job, completed_at=None, status="in_progress", conclusion=None)])
+        self.assertIsNone(budget(no_latency))
+        self.assertNotIn("Wall-clock budget", markdown(no_latency))
 
     def test_reused_attempt_and_duplicate_job_are_rejected(self):
         for change in ({"run_attempt": 1}, {"run_id": 11}):

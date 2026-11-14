@@ -4,6 +4,30 @@
 当前阶段：PR #381、#384 和结果文档 #385 均已合并，后续 main CI 成功；2026-11-05 的本地工程治理补丁与验证见下节，待 PR CI 验证，稳定低于15分钟尚未证明。本文是 CI 优化的唯一主记录，复用
 [集成测试分片设计](integration-sharding.md)和[部署控制器说明](deployment-controller.md)，不另建发布体系。
 
+## 2026-11-14 关键路径批次
+
+根因证据来自成功 main 运行 [43557475052](https://github.com/LonelyFellas/tsz-rust/actions/runs/43557475052)
+（`#410`，attempt 1，wall 22m18s）。该次 `lexicon-handler` job 独占 1303 s
+（编译 223 s、执行 1036 s），其余五个集成分片在 470–650 s 后空闲；`lexicon_handler`
+一片 194 个用例，按 SQLx 生命周期统计累计 4121 s CPU、migration 744 s（每用例 3.8 s）。
+同一批 job 各自冷编译（`cache-targets: false`），`Dependency audit` 的
+`cargo install cargo-audit` 占 198 s。
+
+| 批次 | 改动 | 目标 |
+| --- | --- | --- |
+| P0 | `lexicon-handler` 与 `lexicon-handler-b` 共享同一可执行文件，按用例名交替二分；`batch5` 固定在 profiling 片 | 关键路径约减半 |
+| P1 | 两个 lexicon 分片复用 identity 已验证的迁移模板克隆，无逐用例白名单，审计要求每个用例恰好克隆一次 | 再减 migration 累计 CPU |
+| P3 | 缓存 `cargo-audit` 二进制；`ci_run_summary` 报告 900 s 墙钟预算 | 省机时；超预算可见但不改门禁 |
+
+未实施：`cache-targets: true`。单个 debug/all-features target 通常 3–8 GiB，超过仓库
+10 GiB Actions 缓存额度，且会淘汰现有 registry 缓存，恢复/解压成本也落在关键路径上。
+需要进一步压缩墙钟时，先看本批实测的分片与 phase 列，再在「更大 runner」与「再拆一片」
+之间按真实成本选择，不用未验证的缓存替换已验证的机制。
+
+验收：PR CI 必须自证每个集成用例恰好执行一次、克隆审计完整、两个 handler 分片都通过；
+实测的分片墙钟、编译与 phase 统计记录到 PR，不预先宣称达到 15 分钟。本批未测量远端
+结果前，不修改既有 timeout，也不放宽任何门禁。
+
 ## 2026-11-05 工程治理第 2 批
 
 本批属于[同一工程治理任务](engineering-governance.md)。基线 `fb0575d019e6eb98d722ee85279805deeb034a56`，
