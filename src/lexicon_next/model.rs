@@ -30,6 +30,13 @@ pub enum NextDefinitionStyle {
 #[serde(deny_unknown_fields)]
 pub struct NextDefinition {
     pub id: Uuid,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_group_id"
+    )]
+    #[schema(nullable = false)]
+    pub grammar_structure_id: Option<Uuid>,
     pub locale: String,
     pub text: String,
     pub style: NextDefinitionStyle,
@@ -47,6 +54,13 @@ pub struct NextEquivalent {
 #[serde(deny_unknown_fields)]
 pub struct NextSense {
     pub id: Uuid,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_sub_pos"
+    )]
+    #[schema(nullable = false)]
+    pub sub_pos: Option<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -73,7 +87,45 @@ pub struct NextSenseGroup {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct NextGrammarVariant {
+    pub id: Uuid,
+    pub locale: String,
+    pub content: crate::lexicon::dto::RichTextV3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextGrammarStructure {
+    pub id: Uuid,
+    pub part_of_speech: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_sub_pos"
+    )]
+    #[schema(nullable = false)]
+    pub sub_pos: Option<String>,
+    pub variants: Vec<NextGrammarVariant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextGrammarIssue {
+    pub node_id: Uuid,
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NextDraft {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_grammars"
+    )]
+    #[schema(nullable = false)]
+    pub grammar_structures: Option<Vec<NextGrammarStructure>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -145,6 +197,9 @@ pub struct NextLanguageCapability {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub grammar_structures: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub medium_ownership: Option<bool>,
@@ -226,6 +281,12 @@ pub struct NextSenseView {
 pub struct NextEntryView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub grammar_structures: Option<Vec<NextGrammarStructure>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub grammar_issues: Option<Vec<NextGrammarIssue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub sense_groups: Option<Vec<NextSenseGroup>>,
     pub entry_id: Uuid,
     pub revision: i64,
@@ -255,4 +316,16 @@ fn non_null_sense_groups<'de, D: serde::Deserializer<'de>>(
 
 fn default_medium_locale() -> String {
     "zh-Hans".into()
+}
+
+fn non_null_grammars<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<NextGrammarStructure>>, D::Error> {
+    Vec::<NextGrammarStructure>::deserialize(deserializer).map(Some)
+}
+
+fn non_null_sub_pos<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }

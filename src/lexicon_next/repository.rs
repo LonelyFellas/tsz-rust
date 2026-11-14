@@ -116,6 +116,7 @@ pub async fn create(
     sqlx::query("INSERT INTO lexicon_next.entries(id,target_language,medium_locale,kind,headword,owner_id,revision) VALUES($1,$2,$3,$4,$5,$6,1)")
         .bind(id).bind(&input.target_language).bind(&input.medium_locale).bind(kind).bind(&input.headword).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?;
     let draft = NextDraft {
+        grammar_structures: None,
         sense_groups: None,
         schema_version: 1,
         headword: input.headword,
@@ -145,7 +146,7 @@ async fn snapshot(
         .execute(conn).await.map_err(AppError::internal)?;
     Ok(())
 }
-async fn node(
+pub(super) async fn node(
     conn: &mut PgConnection,
     id: Uuid,
     entry: Uuid,
@@ -217,6 +218,13 @@ pub async fn save(
         .await
         .map_err(AppError::internal)?
         .entry()?;
+    if previous.draft.grammar_structures.is_some() && draft.grammar_structures.is_none() {
+        return Err(AppError::unprocessable(
+            ErrorCode::InvalidRequestBody,
+            "grammar structures require an updated client; reopen before saving",
+        ));
+    }
+    super::grammar::validate_catalog(&mut tx, draft).await?;
     if previous.draft.sense_groups.is_some() && draft.sense_groups.is_none() {
         return Err(AppError::unprocessable(
             ErrorCode::InvalidRequestBody,
@@ -241,6 +249,7 @@ pub async fn save(
     }
     let conn = &mut *tx;
     super::forms::persist(conn, auth.subject, id, draft).await?;
+    super::grammar::persist(conn, id, draft).await?;
     // Only current content is replaced. Nodes and previous revision snapshots remain intact.
     for sql in [
         "DELETE FROM lexicon_next.equivalents WHERE id IN (SELECT id FROM lexicon_next.nodes WHERE entry_id=$1)",

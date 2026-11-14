@@ -140,7 +140,21 @@ pub(super) async fn persist(
         None,
     )
     .await?;
-    for (id, role, parent) in nodes(editor) {
+    let editor_nodes = nodes(editor);
+    let node_ids = editor_nodes
+        .iter()
+        .map(|(id, _, _)| *id)
+        .collect::<Vec<_>>();
+    let grammar_claimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.nodes WHERE id=ANY($1) AND kind IN ('grammar','grammar_en','grammar_en_gb','grammar_en_us'))")
+        .bind(&node_ids).fetch_one(&mut *conn).await.map_err(AppError::internal)?;
+    if grammar_claimed {
+        return Err(AppError::conflict(
+            ErrorCode::StableNodeIdChanged,
+            None,
+            "forms identity already belongs to grammar",
+        ));
+    }
+    for (id, role, parent) in editor_nodes {
         identity(conn, entry, id, role, parent).await?;
     }
     let mut serialized = serde_json::to_value(&*editor).map_err(AppError::internal)?;

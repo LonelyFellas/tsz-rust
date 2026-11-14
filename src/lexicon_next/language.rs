@@ -19,6 +19,7 @@ pub(super) const POS: &[&str] = &[
 ];
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
+        grammar_structures: None,
         medium_ownership: None,
         schema_version: 1,
         language_rules_version: "lexicon-next-en-zh-1".into(),
@@ -92,7 +93,11 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
     }
     text(&draft.headword, 200)?;
     // A bounded initial editing contract, not a content production quota.
-    let count = draft.sense_groups.as_ref().map_or(0, Vec::len)
+    let count = draft
+        .grammar_structures
+        .as_ref()
+        .map_or(0, |rows| rows.iter().map(|g| 1 + g.variants.len()).sum())
+        + draft.sense_groups.as_ref().map_or(0, Vec::len)
         + draft.forms.len()
         + draft.senses.len()
         + draft
@@ -114,6 +119,7 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
             }
         }
     }
+    super::grammar::validate(draft, &mut ids)?;
     for form in &draft.forms {
         identity(&mut ids, form.id)?;
         if !matches!(form.locale.as_str(), "en" | "en-GB" | "en-US") {
@@ -160,7 +166,11 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
     Ok(())
 }
 
-pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView, AppError> {
+pub fn view(
+    entry: &NextEntry,
+    selection: NextViewQuery,
+    parents: &std::collections::HashMap<String, String>,
+) -> Result<NextEntryView, AppError> {
     require_language(&entry.target_language)?;
     if !matches!(selection.target_locale.as_str(), "en-GB" | "en-US")
         || !matches!(selection.medium_locale.as_str(), "zh-Hans" | "zh-Hant")
@@ -195,18 +205,34 @@ pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView
             } else {
                 &entry.target_language
             };
-            let target_definitions: Vec<_> = sense
+            let mut target_definitions: Vec<_> = sense
                 .definitions
                 .iter()
                 .filter(|d| &d.locale == target)
                 .cloned()
                 .collect();
-            let medium_definitions: Vec<_> = sense
+            let mut medium_definitions: Vec<_> = sense
                 .definitions
                 .iter()
                 .filter(|d| d.locale == selection.medium_locale)
                 .cloned()
                 .collect();
+            for definition in target_definitions
+                .iter_mut()
+                .chain(medium_definitions.iter_mut())
+            {
+                if definition.grammar_structure_id.is_some_and(|id| {
+                    entry
+                        .draft
+                        .grammar_structures
+                        .iter()
+                        .flatten()
+                        .find(|g| g.id == id)
+                        .is_none_or(|g| !super::grammar::matches_sense(g, sense, parents))
+                }) {
+                    definition.grammar_structure_id = None;
+                }
+            }
             let equivalents: Vec<_> = sense
                 .equivalents
                 .iter()
@@ -226,6 +252,33 @@ pub fn view(entry: &NextEntry, selection: NextViewQuery) -> Result<NextEntryView
         })
         .collect();
     Ok(NextEntryView {
+        grammar_structures: entry.draft.grammar_structures.as_ref().map(|rows| {
+            rows.iter()
+                .filter(|g| {
+                    super::grammar::valid_subcategory(
+                        &g.part_of_speech,
+                        g.sub_pos.as_deref().unwrap_or(""),
+                        parents,
+                    )
+                })
+                .cloned()
+                .map(|mut grammar| {
+                    let exact = grammar
+                        .variants
+                        .iter()
+                        .any(|v| v.locale == selection.target_locale);
+                    grammar.variants.retain(|v| {
+                        if exact {
+                            v.locale == selection.target_locale
+                        } else {
+                            v.locale == "en"
+                        }
+                    });
+                    grammar
+                })
+                .collect()
+        }),
+        grammar_issues: None,
         sense_groups: entry.draft.sense_groups.clone(),
         entry_id: entry.id,
         revision: entry.revision,

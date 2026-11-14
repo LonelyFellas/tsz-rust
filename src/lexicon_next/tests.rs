@@ -54,6 +54,7 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
         let typed: FutureFormRules = serde_json::from_value(extension.clone()).unwrap();
         assert_eq!(serde_json::to_value(typed).unwrap(), extension);
         let core = NextDraft {
+            grammar_structures: None,
             sense_groups: None,
             form_editor: None,
             schema_version: 1,
@@ -64,10 +65,12 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
                 text: surface.into(),
             }],
             senses: vec![NextSense {
+                sub_pos: None,
                 sense_group_id: None,
                 id: Uuid::now_v7(),
                 part_of_speech: None,
                 definitions: vec![NextDefinition {
+                    grammar_structure_id: None,
                     id: Uuid::now_v7(),
                     locale: "zh-Hant".into(),
                     text: "結構樣例，非已開放內容".into(),
