@@ -92,6 +92,9 @@ pub async fn capabilities(
     if supports_sense_groups(&headers) {
         capability.sense_groups = Some(true);
     }
+    if supports_medium_ownership(&headers) {
+        capability.medium_ownership = Some(true);
+    }
     Ok(Json(capability))
 }
 
@@ -110,6 +113,7 @@ pub async fn list(
 pub async fn create(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<CreateNextEntry>,
 ) -> Result<(StatusCode, Json<NextEntry>), AppError> {
     permissions::load(&state, &auth)
@@ -117,7 +121,10 @@ pub async fn create(
         .require("words.create")?;
     Ok((
         StatusCode::CREATED,
-        Json(repository::create(&state.pool, &auth, input).await?),
+        Json(entry_for_client(
+            repository::create(&state.pool, &auth, input).await?,
+            &headers,
+        )),
     ))
 }
 #[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("id"=Uuid, Path)), responses((status=200, body=NextEntry), (status=401), (status=403), (status=404)))]
@@ -162,7 +169,16 @@ pub async fn view(
     permissions::load(&state, &auth)
         .await?
         .require("words.access")?;
-    let mut view = language::view(&repository::get(&state.pool, id).await?, query)?;
+    language::require_medium(&query.medium_locale)?;
+    let entry = repository::get(&state.pool, id).await?;
+    if supports_medium_ownership(&headers)
+        && entry.medium_locale.as_deref() != Some(query.medium_locale.as_str())
+    {
+        return Err(AppError::not_found(
+            "entry belongs to another medium locale",
+        ));
+    }
+    let mut view = language::view(&entry, query)?;
     if !supports_sense_groups(&headers) {
         view.sense_groups = None;
         for sense in &mut view.senses {
@@ -172,6 +188,12 @@ pub async fn view(
     Ok(Json(view))
 }
 
+fn supports_medium_ownership(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-tsz-next-medium-ownership")
+        .is_some_and(|value| value == "v1")
+}
+
 fn supports_sense_groups(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("x-tsz-next-sense-groups")
@@ -179,6 +201,9 @@ fn supports_sense_groups(headers: &axum::http::HeaderMap) -> bool {
 }
 
 fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> NextEntry {
+    if !supports_medium_ownership(headers) {
+        entry.medium_locale = None;
+    }
     if !supports_sense_groups(headers) {
         entry.draft.sense_groups = None;
         for sense in &mut entry.draft.senses {

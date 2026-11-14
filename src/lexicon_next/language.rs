@@ -19,6 +19,7 @@ pub(super) const POS: &[&str] = &[
 ];
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
+        medium_ownership: None,
         schema_version: 1,
         language_rules_version: "lexicon-next-en-zh-1".into(),
         languages: vec![NextLanguageCapability {
@@ -46,6 +47,13 @@ pub fn invalid() -> AppError {
 }
 pub fn require_language(language: &str) -> Result<(), AppError> {
     if language == "en" {
+        Ok(())
+    } else {
+        Err(unavailable())
+    }
+}
+pub fn require_medium(locale: &str) -> Result<(), AppError> {
+    if matches!(locale, "zh-Hans" | "zh-Hant") {
         Ok(())
     } else {
         Err(unavailable())
