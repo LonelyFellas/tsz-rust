@@ -51,6 +51,15 @@ pub enum AdminDialectPreference {
     Us,
 }
 
+/// 智能词库账号级工作语言，与界面语言及独立朗读偏好分开保存。
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminLexiconLanguages {
+    pub target_language: String,
+    pub target_locale: String,
+    pub medium_locale: String,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Admin {
     pub security_version: i64,
@@ -66,6 +75,7 @@ pub struct Admin {
     pub created_by_admin_id: Option<Uuid>,
     pub dialect_preference: AdminDialectPreference,
     pub interface_locale: Option<crate::i18n::InterfaceLocaleV1>,
+    pub lexicon_languages: Option<sqlx::types::Json<AdminLexiconLanguages>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -127,6 +137,7 @@ mod tests {
             created_by_admin_id: None,
             dialect_preference: AdminDialectPreference::Uk,
             interface_locale: None,
+            lexicon_languages: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

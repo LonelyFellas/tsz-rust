@@ -16,7 +16,10 @@ mod service;
 mod session;
 
 pub use extract::AdminAuth;
-pub use model::{Admin, AdminDialectPreference, AdminRole, AdminStatus, NewAdmin, SeedOutcome};
+pub use model::{
+    Admin, AdminDialectPreference, AdminLexiconLanguages, AdminRole, AdminStatus, NewAdmin,
+    SeedOutcome,
+};
 pub use repository::{AdminRepository, AdminRepositoryError};
 pub use router::router;
 pub use service::{AdminSeedError, AdminService};

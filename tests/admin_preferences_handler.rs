@@ -229,19 +229,19 @@ async fn locale_and_dialect_are_independent_partial_updates(pool: PgPool) {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         b["preferences"],
-        json!({"dialect":"us","interface_locale":"zh-Hans"})
+        json!({"dialect":"us","interface_locale":"zh-Hans","lexicon_languages":null})
     );
     let (s, b) =
         patch_preferences(&state, Some(&token), Some(json!({"interface_locale":null}))).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         b["preferences"],
-        json!({"dialect":"us","interface_locale":null})
+        json!({"dialect":"us","interface_locale":null,"lexicon_languages":null})
     );
     let (_, b) = call(&state, "GET", "/api/v1/admin/profile", Some(&token), None).await;
     assert_eq!(
         b["preferences"],
-        json!({"dialect":"us","interface_locale":null})
+        json!({"dialect":"us","interface_locale":null,"lexicon_languages":null})
     );
 }
 
@@ -289,6 +289,168 @@ async fn concurrent_different_fields_survive_both_commits(pool: PgPool) {
     let (_, read) = call(&state, "GET", "/api/v1/admin/profile", Some(&token), None).await;
     assert_eq!(
         read["preferences"],
-        json!({"dialect":"us","interface_locale":"zh-Hans"})
+        json!({"dialect":"us","interface_locale":"zh-Hans","lexicon_languages":null})
+    );
+}
+
+fn languages(target: &str, medium: &str) -> Value {
+    json!({"target_language":"en","target_locale":target,"medium_locale":medium})
+}
+
+#[sqlx::test]
+async fn account_lexicon_languages_persist_across_sessions_and_preserve_other_preferences(
+    pool: PgPool,
+) {
+    let state = AppState::for_test(pool.clone());
+    let a = seed_admin(&pool, false).await;
+    let b = seed_admin(&pool, false).await;
+    let token = admin_token(&state, a);
+    let choice = languages("en-US", "zh-Hant");
+    let (status, saved) = patch_preferences(
+        &state,
+        Some(&token),
+        Some(json!({"lexicon_languages":choice})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["preferences"]["lexicon_languages"], choice);
+    let fresh = AppState::for_test(pool.clone());
+    let new_session = admin_token(&fresh, a);
+    let (_, profile) = call(
+        &fresh,
+        "GET",
+        "/api/v1/admin/profile",
+        Some(&new_session),
+        None,
+    )
+    .await;
+    assert_eq!(profile["preferences"]["lexicon_languages"], choice);
+    let (_, other) = call(
+        &fresh,
+        "GET",
+        "/api/v1/admin/profile",
+        Some(&admin_token(&fresh, b)),
+        None,
+    )
+    .await;
+    assert_eq!(other["preferences"]["lexicon_languages"], Value::Null);
+    let (one, two) = tokio::join!(
+        patch_preferences(
+            &state,
+            Some(&token),
+            Some(json!({"dialect":"us","interface_locale":"zh-Hans"}))
+        ),
+        patch_preferences(
+            &state,
+            Some(&token),
+            Some(json!({"lexicon_languages":languages("en-GB","zh-Hans")}))
+        )
+    );
+    assert_eq!(one.0, StatusCode::OK);
+    assert_eq!(two.0, StatusCode::OK);
+    let (_, profile) = call(&state, "GET", "/api/v1/admin/profile", Some(&token), None).await;
+    assert_eq!(
+        profile["preferences"],
+        json!({"dialect":"us","interface_locale":"zh-Hans","lexicon_languages":languages("en-GB","zh-Hans")})
+    );
+    assert_eq!(
+        patch_preferences(&state, None, Some(json!({"lexicon_languages":choice})))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+async fn browser_import_initializes_only_unset_account_and_invalid_choices_are_atomic(
+    pool: PgPool,
+) {
+    let state = AppState::for_test(pool.clone());
+    let id = seed_admin(&pool, false).await;
+    let token = admin_token(&state, id);
+    let import = languages("en-US", "zh-Hant");
+    let (s, v) = patch_preferences(
+        &state,
+        Some(&token),
+        Some(json!({"lexicon_languages":import,"lexicon_languages_if_unset":true})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["preferences"]["lexicon_languages"], import);
+    let (_,v)=patch_preferences(&state,Some(&token),Some(json!({"lexicon_languages":languages("en-GB","zh-Hans"),"lexicon_languages_if_unset":true}))).await;
+    assert_eq!(
+        v["preferences"]["lexicon_languages"], import,
+        "stale browser never overwrites account selection"
+    );
+    for invalid in [
+        Value::Null,
+        json!({"target_language":"en","target_locale":"en-US"}),
+        languages("fr", "zh-Hans"),
+        languages("en-US", "fr"),
+        json!({"target_language":"en","target_locale":"en-US","medium_locale":"zh-Hant","admin_id":id}),
+    ] {
+        assert_eq!(
+            patch_preferences(
+                &state,
+                Some(&token),
+                Some(json!({"dialect":"us","lexicon_languages":invalid}))
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    assert_eq!(
+        patch_preferences(
+            &state,
+            Some(&token),
+            Some(json!({"dialect":"us","lexicon_languages_if_unset":true}))
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (_, v) = call(&state, "GET", "/api/v1/admin/profile", Some(&token), None).await;
+    assert_eq!(v["preferences"]["dialect"], "uk");
+    assert_eq!(v["preferences"]["lexicon_languages"], import);
+}
+
+#[sqlx::test]
+async fn lexicon_preference_migration_round_trip_keeps_identity_and_other_fields(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let id = seed_admin(&pool, false).await;
+    let token = admin_token(&state, id);
+    let (s,_)=patch_preferences(&state,Some(&token),Some(json!({"dialect":"us","interface_locale":"zh-Hans","lexicon_languages":languages("en-US","zh-Hant")}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let original: Value =
+        sqlx::query_scalar("SELECT to_jsonb(a)-'lexicon_languages' FROM admins a WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114120000_admin_lexicon_languages.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261114120000_admin_lexicon_languages.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let current: Value =
+        sqlx::query_scalar("SELECT to_jsonb(a)-'lexicon_languages' FROM admins a WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(current, original);
+    let (_, profile) = call(&state, "GET", "/api/v1/admin/profile", Some(&token), None).await;
+    assert_eq!(
+        profile["preferences"]["lexicon_languages"],
+        Value::Null,
+        "down deliberately removes language preference metadata"
     );
 }
