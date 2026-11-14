@@ -11,15 +11,23 @@ fail-closed aggregate, so branch protection does not need to change.
   selected by its complete libtest name with `--exact`, plus the complete `wordlists_handler`,
   `question_bank_handler` and `shared_sentences` targets without that filter.
 - `lexicon-learning`: all `learning_*` targets without the pagination filter.
-- `lexicon-handler`: every other case in the same `lexicon_handler` executable.
-  The skip filter is rejected if it could accidentally match another case.
+- `lexicon-handler`: the profiling shard. It keeps every `batch5::` case (the
+  maximum-batch audit measures the same execution that contains the case) plus
+  every other `lexicon_handler` case at an even index after sorting by name.
+- `lexicon-handler-b`: the remaining `lexicon_handler` cases. The two shards skip
+  each other's complete case names, so a name that is a substring of a case the
+  other shard must run fails closed instead of silently dropping coverage.
 - `lexicon-other`: every other target in the original lexicon module, excluding
   `lexicon_handler`, `learning_*` and the three pagination companion targets.
 - `admin`, `identity`, `platform`: their original complete target sets.
 
 The old module classifier still requires every repository integration target to
-belong to exactly one logical module. New cases in lexicon_handler automatically
-join the handler shard; removing or renaming the pagination case fails closed.
+belong to exactly one logical module. New cases in `lexicon_handler` automatically
+join one of the two handler shards, so neither shard needs an edited case list;
+removing or renaming the pagination case fails closed. Splitting the handler
+executable is the only lever that lowers its wall time: one shard already
+saturates every core of the 4-vCPU runner, so the two shards halve its critical
+path at the cost of one more compile and runner.
 Each matrix job has its own PostgreSQL and Redis containers. No test result,
 database, publication, token or credential is cached or shared between jobs.
 There are three additional jobs compared with the original four modules, so reduced elapsed time may cost more aggregate
@@ -34,7 +42,7 @@ runs the same binaries, and checks actual result names against the selected
 inventory. Expected ignored cases are retained; unexpectedly ignored cases,
 failures, duplicates and omissions cannot produce a passing report.
 
-Seven reports are uploaded from the current run. The aggregate checks every
+Eight reports are uploaded from the current run. The aggregate checks every
 report's workflow SHA, complete target membership, matching shared-binary
 inventories, and actual execution counts. Every discovered integration case
 must occur exactly once across the reports. Missing jobs/reports fail the gate.

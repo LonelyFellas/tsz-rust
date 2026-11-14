@@ -328,12 +328,12 @@ jobs:
     if: github.event_name != 'schedule'
     name: Integration (${{ matrix.module }})
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ (matrix.module == 'lexicon-handler' || matrix.module == 'lexicon-other') && 35 || 20 }}
+    timeout-minutes: ${{ (startsWith(matrix.module, 'lexicon-handler') || matrix.module == 'lexicon-other') && 35 || 20 }}
 
     strategy:
       fail-fast: false
       matrix:
-        module: [lexicon-pagination, lexicon-learning, lexicon-handler, lexicon-other, admin, identity, platform]
+        module: [lexicon-pagination, lexicon-learning, lexicon-handler, lexicon-handler-b, lexicon-other, admin, identity, platform]
 
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/tsz_rust
