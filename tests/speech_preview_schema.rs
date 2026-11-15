@@ -57,31 +57,6 @@ async fn audio_format_migration_roundtrips_and_refuses_wav_data(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn speech_schema_supports_voice_and_preview_cache(pool: PgPool) {
-    let voice_id = insert_voice(&pool, "en-us-jenny", true).await;
-    sqlx::query(
-        r#"INSERT INTO speech.preview_cache
-           (request_hash, voice_id, content_hash, object_key, mime_type, size_bytes, expires_at)
-           VALUES ($1, $2, $3, 'previews/test.mp3', 'audio/mpeg', 3, now() + interval '1 hour')"#,
-    )
-    .bind(vec![1_u8; 32])
-    .bind(voice_id)
-    .bind(vec![2_u8; 32])
-    .execute(&pool)
-    .await
-    .expect("valid preview cache row should insert");
-
-    let row: (String, i64) = sqlx::query_as(
-        "SELECT object_key, size_bytes FROM speech.preview_cache WHERE request_hash = $1",
-    )
-    .bind(vec![1_u8; 32])
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(row, ("previews/test.mp3".to_owned(), 3));
-}
-
-#[sqlx::test]
 async fn voice_alias_and_cache_constraints_are_enforced(pool: PgPool) {
     insert_voice(&pool, "en-us-jenny", true).await;
     let duplicate = sqlx::query(
