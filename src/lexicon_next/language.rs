@@ -19,6 +19,7 @@ pub(super) const POS: &[&str] = &[
 ];
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
+        relations: None,
         sentence_details: None,
         definition_details: None,
         sentences: None,
@@ -109,7 +110,9 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
         + draft
             .senses
             .iter()
-            .map(|s| s.definitions.len() + s.equivalents.len())
+            .map(|s| {
+                s.definitions.len() + s.equivalents.len() + s.relations.as_ref().map_or(0, Vec::len)
+            })
             .sum::<usize>();
     if count > 500 {
         return Err(invalid());
@@ -134,6 +137,7 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
         }
         text(&form.text, 200)?;
     }
+    super::relations::validate(draft, &mut ids)?;
     for sense in &draft.senses {
         identity(&mut ids, sense.id)?;
         if sense
@@ -261,6 +265,7 @@ pub fn view(
                 .cloned()
                 .collect();
             NextSenseView {
+                relations: sense.relations.clone(),
                 sentence_ids: sense.sentence_ids.clone(),
                 no_equivalents: Some(sense.no_equivalents.contains(&selection.medium_locale)),
                 level: sense.level.clone(),

@@ -129,6 +129,13 @@ pub struct NextSense {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_relations"
+    )]
+    #[schema(nullable = false)]
+    pub relations: Option<Vec<crate::lexicon::dto::WordRelationWritableV3>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         deserialize_with = "non_null_sentence_ids"
     )]
     #[schema(nullable = false)]
@@ -313,6 +320,9 @@ pub struct NextLanguageCapability {
 pub struct NextCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub relations: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub sentence_details: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -396,6 +406,9 @@ pub struct NextEntryList {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextSenseView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub relations: Option<Vec<crate::lexicon::dto::WordRelationWritableV3>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sentence_ids: Option<Vec<Uuid>>,
@@ -517,4 +530,10 @@ fn definition_unbound_schema() -> utoipa::openapi::schema::Object {
         .schema_type(utoipa::openapi::schema::Type::Boolean)
         .enum_values(Some([true]))
         .build()
+}
+
+fn non_null_relations<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<crate::lexicon::dto::WordRelationWritableV3>>, D::Error> {
+    Vec::deserialize(deserializer).map(Some)
 }

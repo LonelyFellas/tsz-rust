@@ -387,6 +387,12 @@ pub async fn command(
                 "词条状态已变化，请刷新列表",
             ));
         }
+        if matches!(
+            input.action,
+            NextListAction::Archive | NextListAction::Delete
+        ) {
+            super::relations::ensure_not_referenced(&mut tx, target.entry_id, &[]).await?;
+        }
         match input.action {
             NextListAction::Archive | NextListAction::Restore => {
                 let next = if matches!(input.action, NextListAction::Archive) {
