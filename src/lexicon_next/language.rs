@@ -19,6 +19,7 @@ pub(super) const POS: &[&str] = &[
 ];
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
+        equivalent_metadata: None,
         sense_metadata: None,
         grammar_audio: None,
         grammar_structures: None,
@@ -253,6 +254,7 @@ pub fn view(
                 .cloned()
                 .collect();
             NextSenseView {
+                no_equivalents: Some(sense.no_equivalents.contains(&selection.medium_locale)),
                 level: sense.level.clone(),
                 frequency: sense.frequency.clone(),
                 depends_on_context: sense.depends_on_context,
@@ -260,7 +262,8 @@ pub fn view(
                 sense_group_id: sense.sense_group_id,
                 missing_target_definitions: target_definitions.is_empty(),
                 missing_medium_definitions: medium_definitions.is_empty(),
-                missing_equivalents: equivalents.is_empty(),
+                missing_equivalents: equivalents.is_empty()
+                    && !sense.no_equivalents.contains(&selection.medium_locale),
                 target_definitions,
                 medium_definitions,
                 equivalents,

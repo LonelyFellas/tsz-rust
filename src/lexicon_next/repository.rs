@@ -178,6 +178,7 @@ pub async fn save(
     mut input: SaveNextDraft,
     supports_audio: bool,
     supports_sense_metadata: bool,
+    supports_equivalent_metadata: bool,
 ) -> Result<NextEntry, AppError> {
     if input.expected_revision < 1 {
         return Err(language::invalid());
@@ -220,6 +221,9 @@ pub async fn save(
         .await
         .map_err(AppError::internal)?
         .entry()?;
+    let taxonomy_refs =
+        super::equivalents::prepare(conn, draft, &previous.draft, supports_equivalent_metadata)
+            .await?;
     if !supports_sense_metadata {
         for sense in &mut draft.senses {
             if let Some(saved) = previous
@@ -321,12 +325,13 @@ pub async fn save(
         }
         for (order, equivalent) in sense.equivalents.iter().enumerate() {
             node(conn, equivalent.id, id, "equivalent", Some(sense.id)).await?;
-            sqlx::query("INSERT INTO lexicon_next.equivalents(id,sense_id,locale,text,sort_order) VALUES($1,$2,$3,$4,$5)")
-                .bind(equivalent.id).bind(sense.id).bind(&equivalent.locale).bind(&equivalent.text).bind(order as i32).execute(&mut *conn).await.map_err(AppError::internal)?;
+            sqlx::query("INSERT INTO lexicon_next.equivalents(id,sense_id,locale,text,sort_order,metadata) VALUES($1,$2,$3,$4,$5,$6)")
+                .bind(equivalent.id).bind(sense.id).bind(&equivalent.locale).bind(&equivalent.text).bind(order as i32).bind(equivalent.metadata.as_ref().map(serde_json::to_value).transpose().map_err(AppError::internal)?).execute(&mut *conn).await.map_err(AppError::internal)?;
         }
     }
     let next_revision = revision.checked_add(1).ok_or_else(language::invalid)?;
     snapshot(conn, id, next_revision, actor, draft).await?;
+    super::equivalents::persist_refs(conn, id, next_revision, taxonomy_refs).await?;
     sqlx::query("UPDATE lexicon_next.entries SET headword=$2,revision=$3,updated_at=clock_timestamp() WHERE id=$1")
         .bind(id).bind(&draft.headword).bind(next_revision).execute(&mut *conn).await.map_err(AppError::internal)?;
     let result = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)

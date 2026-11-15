@@ -383,6 +383,13 @@ async fn migration_can_be_reversed_and_reapplied_without_changing_parts(pool: Pg
             .fetch_one(&pool)
             .await
             .unwrap();
+    // Reverse newer consumers before reversing the catalog they reference.
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261115100000_lexicon_next_equivalent_metadata.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20261113150000_lexicon_taxonomies.down.sql"
     ))
@@ -418,6 +425,12 @@ async fn migration_can_be_reversed_and_reapplied_without_changing_parts(pool: Pg
 
     sqlx::raw_sql(include_str!(
         "../migrations/20261113150000_lexicon_taxonomies.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261115100000_lexicon_next_equivalent_metadata.up.sql"
     ))
     .execute(&pool)
     .await

@@ -3227,3 +3227,362 @@ async fn sense_metadata_roundtrips_and_legacy_edits_preserve_values(pool: PgPool
     .await;
     assert_eq!(caps["sense_metadata"], true);
 }
+
+async fn equivalent_call(
+    state: &AppState,
+    actor: Option<Uuid>,
+    method: &str,
+    path: &str,
+    body: Value,
+    negotiated: bool,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if negotiated {
+        req = req.header("x-tsz-next-equivalents", "v1");
+    }
+    if let Some(actor) = actor {
+        req = req.header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                state.admin_token_manager.generate(actor, "admin").unwrap()
+            ),
+        );
+    }
+    let response = tsz_rust::router(state.clone())
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        },
+    )
+}
+async fn equivalent_taxonomy(pool: &PgPool, kind: &str, code: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO catalog.lexicon_taxonomies(id,kind,code,name_zh,name_en) VALUES($1,$2,$3,$3,$3)")
+        .bind(id).bind(kind).bind(code).execute(pool).await.unwrap();
+    id
+}
+
+#[sqlx::test]
+async fn equivalent_metadata_roundtrip_legacy_preservation_and_reference_protection(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "lexicon_settings.access",
+            "lexicon_settings.delete",
+        ],
+    )
+    .await;
+    let register = equivalent_taxonomy(&pool, "registers", "spoken").await;
+    let domain = equivalent_taxonomy(&pool, "domains", "business").await;
+    let entry = create(&state, actor).await;
+    let path = format!("{ROOT}/entries/{}", entry["id"].as_str().unwrap());
+    let mut content = draft();
+    content["senses"][0]["equivalents"][0]["metadata"] = json!({"register_ids":[register],"domain_ids":[domain],"commonness":[{"score":"95"},{"domain_id":domain,"score":"80.0","assessed_at":"2000-01-01T00:00:00Z"}]});
+    content["senses"][0]["no_equivalents"] = json!(["zh-Hant"]);
+    // The fixture also has a Traditional equivalent; remove it before declaring none.
+    content["senses"][0]["equivalents"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|r| r["locale"] != "zh-Hant");
+    let (status, saved) = equivalent_call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let metadata = saved["draft"]["senses"][0]["equivalents"][0]["metadata"].clone();
+    assert_eq!(metadata["commonness"][0]["score"], "95.0");
+    assert_ne!(
+        metadata["commonness"][1]["assessed_at"],
+        "2000-01-01T00:00:00Z"
+    );
+    let (_, read) = equivalent_call(&state, Some(actor), "GET", &path, Value::Null, true).await;
+    assert_eq!(read["draft"], saved["draft"]);
+    let projection: Value =
+        sqlx::query_scalar("SELECT metadata FROM lexicon_next.equivalents WHERE id=$1")
+            .bind(
+                Uuid::parse_str(
+                    saved["draft"]["senses"][0]["equivalents"][0]["id"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap(),
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(projection, metadata);
+    let (_, old) = equivalent_call(&state, Some(actor), "GET", &path, Value::Null, false).await;
+    assert!(
+        old["draft"]["senses"][0]["equivalents"][0]
+            .get("metadata")
+            .is_none()
+    );
+    assert!(old["draft"]["senses"][0].get("no_equivalents").is_none());
+    let mut old_draft = old["draft"].clone();
+    old_draft["senses"][0]["equivalents"][0]["text"] = json!("核心");
+    let (status, old_saved) = equivalent_call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":old_draft}),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{old_saved}");
+    let (_, reopened) = equivalent_call(&state, Some(actor), "GET", &path, Value::Null, true).await;
+    assert_eq!(
+        reopened["draft"]["senses"][0]["equivalents"][0]["metadata"],
+        metadata
+    );
+    assert_eq!(
+        reopened["draft"]["senses"][0]["no_equivalents"],
+        json!(["zh-Hant"])
+    );
+    let (_, view) = equivalent_call(
+        &state,
+        Some(actor),
+        "GET",
+        &format!("{path}/view?target_locale=en-GB&medium_locale=zh-Hant"),
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(view["senses"][0]["no_equivalents"], true);
+    assert_eq!(view["senses"][0]["missing_equivalents"], false);
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261115100000_lexicon_next_equivalent_metadata.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .is_err(),
+        "used metadata must refuse unsafe rollback"
+    );
+    let deletion = format!("/api/v1/admin/lexicon/taxonomies/domains/{domain}?base_revision=1");
+    let (status, rejected) =
+        equivalent_call(&state, Some(actor), "DELETE", &deletion, Value::Null, false).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(rejected["code"], "taxonomy_conflict");
+    // A capable client can clear, but retained historical references still protect the directory.
+    let mut cleared = reopened["draft"].clone();
+    cleared["senses"][0]["equivalents"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("metadata");
+    cleared["senses"][0]["no_equivalents"] = json!([]);
+    let (status, cleared) = equivalent_call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":cleared}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert!(
+        cleared["draft"]["senses"][0]["equivalents"][0]
+            .get("metadata")
+            .is_none()
+    );
+    let (status, _) =
+        equivalent_call(&state, Some(actor), "DELETE", &deletion, Value::Null, false).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = equivalent_call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":cleared["draft"]}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[sqlx::test]
+async fn equivalent_catalog_permission_and_invalid_metadata(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool, &["words.access", "words.create", "words.edit"]).await;
+    let denied = admin(&pool, &[]).await;
+    let register = equivalent_taxonomy(&pool, "registers", "spoken").await;
+    for i in 0..105 {
+        equivalent_taxonomy(&pool, "domains", &format!("domain_{i}")).await;
+    }
+    let catalog = format!("{ROOT}/equivalent-catalog");
+    let (status, options) =
+        equivalent_call(&state, Some(actor), "GET", &catalog, Value::Null, true).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert_eq!(options["domains"].as_array().unwrap().len(), 105);
+    assert_eq!(options["registers"][0]["id"], register.to_string());
+    for (who, expected) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some(denied), StatusCode::FORBIDDEN),
+    ] {
+        assert_eq!(
+            equivalent_call(&state, who, "GET", &catalog, Value::Null, true)
+                .await
+                .0,
+            expected
+        );
+    }
+    let entry = create(&state, actor).await;
+    let path = format!("{ROOT}/entries/{}", entry["id"].as_str().unwrap());
+    let metadata =
+        json!({"register_ids":[register],"domain_ids":[],"commonness":[{"score":"0.1"}]});
+    for patch in [
+        json!({"register_ids":[Uuid::now_v7()]}),
+        json!({"domain_ids":[register]}),
+        json!({"commonness":[{"score":"0"}]}),
+        json!({"commonness":[{"score":"100"}]}),
+        json!({"commonness":[{"score":"1.01"}]}),
+        json!({"commonness":[{"score":"1"},{"score":"2"}]}),
+        json!({"commonness":null}),
+    ] {
+        let mut content = draft();
+        let mut bad = metadata.clone();
+        for (k, v) in patch.as_object().unwrap() {
+            bad[k] = v.clone();
+        }
+        content["senses"][0]["equivalents"][0]["metadata"] = bad;
+        let (status, error) = equivalent_call(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":content}),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    }
+    let mut content = draft();
+    content["senses"][0]["equivalents"][0]["metadata"] = metadata;
+    assert_eq!(
+        equivalent_call(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":content}),
+            false
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        equivalent_call(
+            &state,
+            Some(denied),
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":draft()}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let mut duplicates = draft();
+    let mut second = duplicates["senses"][0]["equivalents"][0].clone();
+    second["id"] = json!(Uuid::now_v7());
+    duplicates["senses"][0]["equivalents"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    assert_eq!(
+        equivalent_call(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":duplicates}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut content = draft();
+    content["senses"][0]["equivalents"][0]["metadata"] =
+        json!({"register_ids":[],"domain_ids":[],"commonness":[{"score":"99.9"}]});
+    content["senses"][0]["equivalents"][1]["metadata"] =
+        json!({"register_ids":[],"domain_ids":[],"commonness":[{"score":"0.1"}]});
+    let (status, saved) = equivalent_call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+}
+
+#[sqlx::test]
+async fn equivalent_save_racing_taxonomy_delete_cannot_create_dangling_reference(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "lexicon_settings.access",
+            "lexicon_settings.delete",
+        ],
+    )
+    .await;
+    let domain = equivalent_taxonomy(&pool, "domains", "race_domain").await;
+    let entry = create(&state, actor).await;
+    let path = format!("{ROOT}/entries/{}", entry["id"].as_str().unwrap());
+    let deletion = format!("/api/v1/admin/lexicon/taxonomies/domains/{domain}?base_revision=1");
+    let mut content = draft();
+    content["senses"][0]["equivalents"][0]["metadata"] =
+        json!({"register_ids":[],"domain_ids":[domain],"commonness":[]});
+    let ((save_status, save_body), (delete_status, delete_body)) = tokio::join!(
+        equivalent_call(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":content}),
+            true
+        ),
+        equivalent_call(&state, Some(actor), "DELETE", &deletion, Value::Null, false)
+    );
+    assert!(
+        matches!(
+            (save_status, delete_status),
+            (StatusCode::OK, StatusCode::CONFLICT)
+                | (StatusCode::UNPROCESSABLE_ENTITY, StatusCode::NO_CONTENT)
+        ),
+        "save {save_status} {save_body}; delete {delete_status} {delete_body}"
+    );
+    let dangling: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.equivalent_taxonomy_refs r LEFT JOIN catalog.lexicon_taxonomies t ON t.id=r.taxonomy_id WHERE t.id IS NULL").fetch_one(&pool).await.unwrap();
+    assert_eq!(dangling, 0);
+}

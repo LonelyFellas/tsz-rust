@@ -24,6 +24,16 @@ pub fn router() -> Router<AppState> {
 }
 
 fn database_error(error: sqlx::Error) -> AppError {
+    if error
+        .as_database_error()
+        .is_some_and(|db| db.is_foreign_key_violation())
+    {
+        return AppError::conflict(
+            ErrorCode::TaxonomyConflict,
+            Some("id"),
+            "该配置已被词条草稿或保留历史引用，不能删除",
+        );
+    }
     if let Some(db) = error
         .as_database_error()
         .filter(|db| db.is_unique_violation())
@@ -195,7 +205,7 @@ pub async fn remove(
         .bind(path.id)
         .execute(&mut *tx)
         .await
-        .map_err(AppError::internal)?;
+        .map_err(database_error)?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(StatusCode::NO_CONTENT)
 }

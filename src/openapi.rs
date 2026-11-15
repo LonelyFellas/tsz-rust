@@ -295,6 +295,7 @@ use utoipa::{
         crate::lexicon_next::workspace_annotation,
         crate::lexicon_next::workspace_command,
         crate::lexicon_next::capabilities,
+        crate::lexicon_next::equivalent_catalog,
         crate::lexicon_next::list,
         crate::lexicon_next::create,
         crate::lexicon_next::detect,

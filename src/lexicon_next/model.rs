@@ -45,6 +45,13 @@ pub struct NextDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextEquivalent {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_equivalent_metadata"
+    )]
+    #[schema(nullable = false)]
+    pub metadata: Option<NextEquivalentMetadata>,
     pub id: Uuid,
     pub locale: String,
     pub text: String,
@@ -52,7 +59,42 @@ pub struct NextEquivalent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct NextEquivalentMetadata {
+    pub register_ids: Vec<Uuid>,
+    pub domain_ids: Vec<Uuid>,
+    /// Only independently assessed scores; inherited values are never stored.
+    pub commonness: Vec<NextEquivalentScore>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextEquivalentScore {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_group_id"
+    )]
+    #[schema(nullable = false)]
+    pub domain_id: Option<Uuid>,
+    /// Manual estimate, not a percentage. Exactly one decimal place on output.
+    #[schema(pattern = "^(?:[0-9]|[1-9][0-9])(?:\\.[0-9])?$", example = "95.0")]
+    pub score: String,
+    /// Set by the server; unchanged scores retain their original assessment time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_assessed_at"
+    )]
+    #[schema(nullable = false)]
+    pub assessed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NextSense {
+    /// Locales explicitly declared to have no suitable equivalents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_equivalents: Vec<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -230,6 +272,9 @@ pub struct NextLanguageCapability {
 pub struct NextCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub equivalent_metadata: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub sense_metadata: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -301,6 +346,9 @@ pub struct NextEntryList {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextSenseView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub no_equivalents: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub level: Option<String>,
@@ -386,4 +434,15 @@ fn non_null_bool<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<bool>, D::Error> {
     bool::deserialize(deserializer).map(Some)
+}
+
+fn non_null_equivalent_metadata<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NextEquivalentMetadata>, D::Error> {
+    NextEquivalentMetadata::deserialize(deserializer).map(Some)
+}
+fn non_null_assessed_at<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error> {
+    DateTime::<Utc>::deserialize(deserializer).map(Some)
 }

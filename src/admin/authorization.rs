@@ -121,6 +121,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::All(&["words.access"]),
     ),
     (
+        "GET",
+        "/lexicon-next/equivalent-catalog",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
         "POST",
         "/lexicon-next/entries",
         RoutePolicy::All(&["words.access", "words.create"]),

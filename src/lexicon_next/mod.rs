@@ -2,6 +2,7 @@
 mod audio;
 pub mod detection;
 pub mod entry_matches;
+mod equivalents;
 mod forms;
 mod grammar;
 pub mod language;
@@ -41,6 +42,7 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(workspace_command),
         )
         .route("/capabilities", get(capabilities))
+        .route("/equivalent-catalog", get(equivalent_catalog))
         .route("/detections", axum::routing::post(detect))
         .route("/entry-matches", axum::routing::post(match_entries))
         .route("/entries", get(list).post(create))
@@ -85,6 +87,9 @@ pub async fn capabilities(
         .await?
         .require("words.access")?;
     let mut capability = language::capabilities();
+    if supports_equivalent_metadata(&headers) {
+        capability.equivalent_metadata = Some(true);
+    }
     if supports_sense_metadata(&headers) {
         capability.sense_metadata = Some(true);
     }
@@ -161,6 +166,12 @@ pub async fn save(
     headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<SaveNextDraft>,
 ) -> Result<Json<NextEntry>, AppError> {
+    if !supports_equivalent_metadata(&headers) && equivalents::has_metadata(&input.draft) {
+        return Err(AppError::unprocessable(
+            crate::error::ErrorCode::CapabilityUnavailable,
+            "equivalent metadata requires x-tsz-next-equivalents: v1",
+        ));
+    }
     if !supports_sense_metadata(&headers)
         && input.draft.senses.iter().any(|sense| {
             sense.level.is_some() || sense.frequency.is_some() || sense.depends_on_context.is_some()
@@ -194,6 +205,7 @@ pub async fn save(
             input,
             supports_grammar_audio(&headers),
             supports_sense_metadata(&headers),
+            supports_equivalent_metadata(&headers),
         )
         .await?,
         &headers,
@@ -260,6 +272,15 @@ pub async fn view(
             sense.depends_on_context = None;
         }
     }
+    if !supports_equivalent_metadata(&headers) {
+        for sense in &mut view.senses {
+            sense.no_equivalents = None;
+            sense.missing_equivalents = sense.equivalents.is_empty();
+            for row in &mut sense.equivalents {
+                row.metadata = None;
+            }
+        }
+    }
     Ok(Json(view))
 }
 
@@ -295,6 +316,9 @@ fn supports_sense_metadata(headers: &axum::http::HeaderMap) -> bool {
 }
 
 fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> NextEntry {
+    if !supports_equivalent_metadata(headers) {
+        equivalents::strip(&mut entry.draft);
+    }
     if !supports_sense_metadata(headers) {
         for sense in &mut entry.draft.senses {
             sense.level = None;
@@ -397,4 +421,50 @@ pub async fn workspace_command(
         .await?
         .require("words.access")?;
     Ok(Json(workspace::command(&state.pool, &auth, input).await?))
+}
+
+fn supports_equivalent_metadata(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-tsz-next-equivalents")
+        .is_some_and(|value| value == "v1")
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextEquivalentCatalog {
+    pub registers: Vec<crate::catalog::taxonomies::model::LexiconTaxonomy>,
+    pub domains: Vec<crate::catalog::taxonomies::model::LexiconTaxonomy>,
+}
+
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/equivalent-catalog", tag="admin-lexicon-next", security(("bearer_auth"=[])), responses((status=200, body=NextEquivalentCatalog), (status=401), (status=403)))]
+pub async fn equivalent_catalog(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+) -> Result<Json<NextEquivalentCatalog>, AppError> {
+    permissions::load(&state, &auth)
+        .await?
+        .require("words.access")?;
+    // Both complete directories are read in one statement/snapshot; no first-page truncation.
+    let rows = sqlx::query_as::<_, EquivalentCatalogRow>(
+        "SELECT kind,id,code,name_zh,name_en,sort_order,revision,created_at,updated_at FROM catalog.lexicon_taxonomies ORDER BY kind,sort_order,created_at,id"
+    ).fetch_all(&state.pool).await.map_err(AppError::internal)?;
+    let mut result = NextEquivalentCatalog {
+        registers: vec![],
+        domains: vec![],
+    };
+    for row in rows {
+        if row.kind == "registers" {
+            result.registers.push(row.item);
+        } else {
+            result.domains.push(row.item);
+        }
+    }
+    Ok(Json(result))
+}
+
+#[derive(sqlx::FromRow)]
+struct EquivalentCatalogRow {
+    kind: String,
+    #[sqlx(flatten)]
+    item: crate::catalog::taxonomies::model::LexiconTaxonomy,
 }
