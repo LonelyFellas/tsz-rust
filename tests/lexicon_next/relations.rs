@@ -257,19 +257,27 @@ async fn relations_reject_foreign_targets_duplicate_ids_and_invalid_shapes(pool:
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
     }
-    let mut draft = source["draft"].clone();
-    draft["senses"][0]["relations"] = json!([relation.clone(), {"id":Uuid::now_v7(),"relation":"synonym","pending_target_headword":"WORK","score":"60"}]);
-    assert_eq!(
-        request(
-            &state,
-            Some(actor),
-            "PUT",
-            &path,
-            json!({"expected_revision":2,"draft":draft}),
-            true
-        )
-        .await
-        .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
+    for (first, second) in [("work", "WORK"), ("look  up", "look up"), ("it's", "it’s")] {
+        for kind in ["synonym", "antonym"] {
+            let mut draft = source["draft"].clone();
+            draft["senses"][0]["relations"] = json!([
+                {"id":Uuid::now_v7(), "relation":kind, "pending_target_headword":first, "score":"80"},
+                {"id":Uuid::now_v7(), "relation":kind, "pending_target_headword":second, "score":"60"}
+            ]);
+            let (status, response) = request(
+                &state,
+                Some(actor),
+                "PUT",
+                &path,
+                json!({"expected_revision":2,"draft":draft}),
+                true,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{kind}: {first} / {second}: {response}"
+            );
+        }
+    }
 }

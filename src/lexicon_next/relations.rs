@@ -38,13 +38,13 @@ pub(super) fn validate(draft: &NextDraft, ids: &mut HashSet<Uuid>) -> Result<(),
                 }
             } else {
                 let word = row.pending_target_headword.as_deref().unwrap_or("");
-                crate::lexicon::normalization::NormalizedHeadword::parse(word)
+                let normalized = crate::lexicon::normalization::NormalizedHeadword::parse(word)
                     .map_err(|_| invalid("请输入有效的拓展词词面"))?;
                 if let Some(gloss) = &row.pending_target_gloss {
                     language::text(gloss, 5000)?;
                 }
                 if row.relation != "derivative"
-                    && !targets.insert((row.relation.clone(), super::equivalents::key(word), None))
+                    && !targets.insert((row.relation.clone(), normalized.key, None))
                 {
                     return Err(invalid("同类拓展词词面不能重复"));
                 }
