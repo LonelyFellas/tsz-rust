@@ -4860,3 +4860,5 @@ async fn unified_sentence_drafts_are_atomic_scoped_and_permission_checked(pool: 
             .any(|v| v["locale"] == "zh-Hant")
     );
 }
+#[path = "lexicon_next/relations.rs"]
+mod relations;
