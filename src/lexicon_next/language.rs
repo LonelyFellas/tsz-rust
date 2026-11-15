@@ -19,6 +19,7 @@ pub(super) const POS: &[&str] = &[
 ];
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
+        definition_details: None,
         equivalent_metadata: None,
         sense_metadata: None,
         grammar_audio: None,
@@ -123,6 +124,7 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
         }
     }
     super::grammar::validate(draft, &mut ids)?;
+    super::definitions::validate(draft)?;
     for form in &draft.forms {
         identity(&mut ids, form.id)?;
         if !matches!(form.locale.as_str(), "en" | "en-GB" | "en-US") {
@@ -184,6 +186,7 @@ pub fn view(
     entry: &NextEntry,
     selection: NextViewQuery,
     parents: &std::collections::HashMap<String, String>,
+    preserve_invalid_bindings: bool,
 ) -> Result<NextEntryView, AppError> {
     require_language(&entry.target_language)?;
     if !matches!(selection.target_locale.as_str(), "en-GB" | "en-US")
@@ -235,15 +238,17 @@ pub fn view(
                 .iter_mut()
                 .chain(medium_definitions.iter_mut())
             {
-                if definition.grammar_structure_id.is_some_and(|id| {
-                    entry
-                        .draft
-                        .grammar_structures
-                        .iter()
-                        .flatten()
-                        .find(|g| g.id == id)
-                        .is_none_or(|g| !super::grammar::matches_sense(g, sense, parents))
-                }) {
+                if !preserve_invalid_bindings
+                    && definition.grammar_structure_id.is_some_and(|id| {
+                        entry
+                            .draft
+                            .grammar_structures
+                            .iter()
+                            .flatten()
+                            .find(|g| g.id == id)
+                            .is_none_or(|g| !super::grammar::matches_sense(g, sense, parents))
+                    })
+                {
                     definition.grammar_structure_id = None;
                 }
             }

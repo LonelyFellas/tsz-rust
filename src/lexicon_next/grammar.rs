@@ -177,6 +177,9 @@ pub(super) fn issues(
             add(sense.id, "sub_pos", "请选择义项的细分词性");
         }
         for definition in &sense.definitions {
+            if definition.grammar_unbound == Some(true) {
+                continue;
+            }
             if definition
                 .grammar_structure_id
                 .and_then(|id| by_id.get(&id))

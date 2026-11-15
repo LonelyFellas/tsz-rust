@@ -29,6 +29,40 @@ pub enum NextDefinitionStyle {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextDefinition {
+    /// Independent assessment; omission means not assessed (never inherited from the sense).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_sub_pos"
+    )]
+    #[schema(nullable = false, pattern = "^(A1|A2|B1|B2|C1|C2)$")]
+    pub level: Option<String>,
+    /// true is an explicit choice; omission means no choice has been made.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_bool"
+    )]
+    #[schema(schema_with = definition_unbound_schema)]
+    pub grammar_unbound: Option<bool>,
+    /// English annotated body. text must equal its plain text projection.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_definition_content"
+    )]
+    #[schema(nullable = false)]
+    pub content: Option<crate::lexicon::dto::RichTextV3>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_voice_profile"
+    )]
+    #[schema(nullable = false)]
+    pub voice_profile: Option<crate::lexicon::dto::VoiceProfileV3>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 8)]
+    pub audio_assets: Vec<crate::lexicon::audio_assets::dto::AudioAsset>,
     pub id: Uuid,
     #[serde(
         default,
@@ -272,6 +306,9 @@ pub struct NextLanguageCapability {
 pub struct NextCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub definition_details: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub equivalent_metadata: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -445,4 +482,17 @@ fn non_null_assessed_at<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<DateTime<Utc>>, D::Error> {
     DateTime::<Utc>::deserialize(deserializer).map(Some)
+}
+
+fn non_null_definition_content<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::lexicon::dto::RichTextV3>, D::Error> {
+    crate::lexicon::dto::RichTextV3::deserialize(deserializer).map(Some)
+}
+
+fn definition_unbound_schema() -> utoipa::openapi::schema::Object {
+    utoipa::openapi::schema::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::Type::Boolean)
+        .enum_values(Some([true]))
+        .build()
 }
