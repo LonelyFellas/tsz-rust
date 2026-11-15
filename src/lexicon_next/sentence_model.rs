@@ -184,3 +184,14 @@ pub struct NextSentenceList {
     pub items: Vec<NextSentenceListItem>,
     pub pagination: crate::api::PaginationMeta,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextSentenceDraftChange {
+    pub id: Uuid,
+    #[schema(minimum = 1)]
+    pub expected_revision: Option<i64>,
+    pub target_locale: String,
+    pub medium_locale: String,
+    pub variant: NextSentenceVariant,
+}

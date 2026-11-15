@@ -1,5 +1,40 @@
 use super::*;
 
+#[sqlx::test]
+async fn unified_sentence_save_preserves_unnegotiated_relations(pool: PgPool) {
+    let actor = admin(&pool, SENTENCE_EDIT).await;
+    let state = AppState::for_test(pool);
+    let source = entry(&state, actor, "zh-Hans").await;
+    let path = format!("/entries/{}", source["id"].as_str().unwrap());
+    let mut draft = source["draft"].clone();
+    let rows = json!([{"id":Uuid::now_v7(),"relation":"synonym","pending_target_headword":"job","pending_target_gloss":"工作","score":"87.5"}]);
+    draft["senses"][0]["relations"] = rows.clone();
+    assert_eq!(
+        request(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":2,"draft":draft}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, legacy) = unified_sentence_client(&state, actor, "GET", &path, Value::Null).await;
+    assert!(legacy["draft"]["senses"][0].get("relations").is_none());
+    let id = Uuid::now_v7();
+    let mut draft = legacy["draft"].clone();
+    draft["senses"][0]["sentence_ids"] = json!([id]);
+    let (status, saved) = unified_sentence_client(&state, actor, "PUT", &path,
+        json!({"expected_revision":3,"draft":draft,"sentence_changes":[{"id":id,"target_locale":"en-GB","medium_locale":"zh-Hans","variant":sentence_variant("en-GB","zh-Hans","She has a job.")}]})).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["sentence_resources"].as_array().unwrap().len(), 1);
+    let (_, reloaded) = request(&state, Some(actor), "GET", &path, Value::Null, true).await;
+    assert_eq!(reloaded["draft"]["senses"][0]["relations"], rows);
+}
+
 async fn request(
     state: &AppState,
     actor: Option<Uuid>,

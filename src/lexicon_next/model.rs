@@ -272,6 +272,9 @@ pub struct NextDraft {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sentence_resources: Option<Vec<super::sentence_model::NextSentence>>,
     pub id: Uuid,
     /// Immutable draft ownership, negotiated by x-tsz-next-medium-ownership: v1.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -299,6 +302,9 @@ pub struct CreateNextEntry {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaveNextDraft {
+    #[serde(default)]
+    #[schema(max_items = 1000)]
+    pub sentence_changes: Vec<super::sentence_model::NextSentenceDraftChange>,
     #[schema(minimum = 1)]
     pub expected_revision: i64,
     /// Complete draft, including every locale. Omitted nodes are removed from the current draft.
@@ -318,6 +324,9 @@ pub struct NextLanguageCapability {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sentence_drafts: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub relations: Option<bool>,
@@ -439,6 +448,9 @@ pub struct NextSenseView {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextEntryView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sentence_resources: Option<Vec<super::sentence_model::NextSentence>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub grammar_structures: Option<Vec<NextGrammarStructure>>,
