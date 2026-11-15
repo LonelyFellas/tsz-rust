@@ -31,7 +31,7 @@ fn database_error(error: sqlx::Error) -> AppError {
         return AppError::conflict(
             ErrorCode::TaxonomyConflict,
             Some("id"),
-            "该配置已被词条草稿或保留历史引用，不能删除",
+            "该配置已被词条、例句或保留历史引用，不能删除",
         );
     }
     if let Some(db) = error
