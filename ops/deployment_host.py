@@ -31,6 +31,7 @@ from postgresql_backup_job import inspect_status as inspect_backup_status
 ROOT = Path("/opt/tsz-rust")
 LOCK = ROOT / "deploy.lock"
 CROSS_DEPLOY_LOCK = Path("/opt/tsz-cross-deploy.lock")
+FRONTEND_TRANSACTION = Path("/opt/tsz-frontend-transaction")
 BINARY = ROOT / "target/release/tsz-rust"
 MANIFEST = Path("/opt/tsz-deploy-manifests/api.json")
 TRANSACTIONS = ROOT / "deployment-transactions"
@@ -502,6 +503,7 @@ def recover(plan, credentials):
         require([row["version"] for row in added] == plan["migration"]["versions"][:len(added)], "recovery_migration_gap")
         maximum = max(row["version"] for row in actual)
         require(minimum < maximum <= plan["migration"]["candidate_version"], "migration_outside_recovery_interval")
+        require((plan.get("recovery_policy") or {}).get("kind") != "forward_only", "forward_only_schema_changed")
         require((plan.get("recovery_policy") or {}).get("kind") == "verified_down", "manual_migration_recovery_required")
         require(sha(BINARY) == plan["artifact_sha256"], "candidate_binary_required_for_recovery")
         run([str(BINARY), "deploy-undo-migrations", str(minimum), str(maximum)], environment=process_environment(plan), timeout=120)
@@ -612,6 +614,39 @@ def observe(plan):
 
 
 def dispatch(name, plan, credentials):
+    if name in {"verify_existing", "baseline_artifact_manifest"}:
+        with CROSS_DEPLOY_LOCK.open("r") as cross_lock:
+            try:
+                fcntl.flock(cross_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise HostError("frontend_deployment_busy") from None
+            require(not LOCK.exists() and not FRONTEND_TRANSACTION.exists(), "remote_deployment_busy")
+            baseline_matches(plan)
+            auth.check_formal(plan["baseline"]["service"]["file_sha256"])
+            if name == "baseline_artifact_manifest":
+                for path in TRANSACTIONS.glob("*/plan.json"):
+                    if path.is_symlink() or path.parent.is_symlink():
+                        continue
+                    try:
+                        previous = json.loads(path.read_text())
+                    except (OSError, ValueError):
+                        continue
+                    baseline = plan["baseline"]["deployment_manifest"]
+                    if (previous.get("source", {}).get("git_sha") == baseline["source"]["git_sha"]
+                            and previous.get("artifact_sha256") == baseline["artifact"]["sha256"]
+                            and previous.get("ci", {}).get("run_id") == baseline["ci"]["run_id"]
+                            and previous.get("ci", {}).get("artifact_id") == baseline["ci"].get("artifact_id")
+                            and previous.get("artifact_manifest")):
+                        if state(previous).get("accepted") is True:
+                            return {"manifest": previous["artifact_manifest"]}
+                raise HostError("deployed_artifact_manifest_missing")
+            for endpoint, expected in (("healthz", "ok"), ("readyz", "ready")):
+                body = json.loads(run(["curl", "--noproxy", "*", "-fsS", "-m", "8", "http://127.0.0.1:8383/" + endpoint]))
+                require(body.get("status") == expected, "existing_service_not_ready")
+            status = run(["curl", "--noproxy", "*", "-sS", "-m", "8", "--resolve", auth.HOST + ":443:127.0.0.1",
+                          "-o", "/dev/null", "-w", "%{http_code}", "https://" + auth.HOST + "/api/v1/auth/me"]).decode().strip()
+            require(status == "401", "existing_https_auth_failed")
+            return {"verified": True, "git_sha": plan["baseline"]["deployment_manifest"]["source"]["git_sha"], "server_writes": 0}
     if name == "preflight":
         return preflight(plan)
     if name == "observe":
@@ -630,10 +665,12 @@ def dispatch(name, plan, credentials):
             except BlockingIOError:
                 raise HostError("frontend_deployment_busy") from None
             require(not LOCK.exists(), "remote_deployment_busy")
+            require(not FRONTEND_TRANSACTION.exists(), "frontend_deployment_busy")
             baseline_matches(plan)
             configuration_sha256 = check_running_configuration()
             transaction(plan).mkdir(mode=0o700, parents=True, exist_ok=False)
             (transaction(plan) / "operation.lock").touch(mode=0o600)
+            atomic(transaction(plan) / "plan.json", plan)
             atomic(state_path(plan), {"owner": plan["deployment_id"], "sha": plan["source"]["git_sha"],
                                      "configuration_sha256": configuration_sha256,
                                      "plan_sha256": hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),

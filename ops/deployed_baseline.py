@@ -35,6 +35,8 @@ def file_digest(path):
 def remote_snapshot():
     if Path("/opt/tsz-rust/deploy.lock").exists():
         raise BaselineError("deployment_in_progress")
+    if Path("/opt/tsz-frontend-transaction").exists():
+        raise BaselineError("frontend_deployment_busy")
     manifest_path = Path("/opt/tsz-deploy-manifests/api.json")
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes)

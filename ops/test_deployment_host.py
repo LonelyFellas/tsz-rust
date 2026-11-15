@@ -1,3 +1,4 @@
+import copy
 import http.client
 import io
 import json
@@ -5,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -122,6 +124,7 @@ class HostOperationTests(unittest.TestCase):
                 self.acquire(plan)
                 value = host.state(plan)
                 self.assertEqual(value["plan_sha256"], identity_hash(plan))
+                self.assertEqual(json.loads((host.transaction(plan) / "plan.json").read_text()), plan)
                 changed = dict(plan, artifact_sha256="0" * 64)
                 with self.assertRaisesRegex(host.HostError, "remote_state_mismatch"):
                     host.state(changed)
@@ -221,6 +224,93 @@ class HostOperationTests(unittest.TestCase):
                     host.run(['synthetic-command'])
                     self.assertEqual(len(run.call_args.kwargs['pass_fds']), 1)
                 self.assertEqual(host.OPERATION_FDS, [])
+
+    def test_forward_only_failure_after_migration_never_runs_down_or_restores_old_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root):
+                plan = self.prepare(root)
+                plan['recovery_policy'] = {'kind': 'forward_only'}
+                added = {'version': 2, 'checksum': 'd' * 96, 'success': True}
+                plan['migration'].update(candidate_version=2, versions=[2], migrations=[{'up': added}])
+                self.acquire(plan)
+                with patch.object(host, 'stop_candidate'), patch.object(host, 'cleanup_business'), \
+                     patch.object(host, 'run') as command, \
+                     patch.object(host, 'ledger', return_value=plan['baseline']['postgresql']['migration_ledger'] + [added]), \
+                     patch.object(host.manifests, 'restore_deployment') as restore:
+                    with self.assertRaisesRegex(host.HostError, 'forward_only_schema_changed'):
+                        host.recover(plan, None)
+                restore.assert_not_called()
+                self.assertFalse(any('deploy-undo-migrations' in args.args[0] for args in command.call_args_list))
+                self.assertTrue(host.LOCK.exists())
+
+    def test_skip_verifies_readiness_and_https_without_creating_transaction_or_rewriting_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root), patch.object(host, 'FRONTEND_TRANSACTION', root / 'frontend-transaction'):
+                plan = self.prepare(root)
+                host.CROSS_DEPLOY_LOCK.touch()
+                before = host.MANIFEST.read_bytes()
+                with patch.object(host, 'baseline_matches'), patch.object(host.auth, 'check_formal'), \
+                     patch.object(host, 'run', side_effect=[b'{"status":"ok"}', b'{"status":"ready"}', b'401']):
+                    result = host.dispatch('verify_existing', plan, None)
+                self.assertTrue(result['verified'])
+                self.assertEqual(result['server_writes'], 0)
+                self.assertEqual(host.MANIFEST.read_bytes(), before)
+                self.assertFalse(host.LOCK.exists())
+                self.assertFalse(host.TRANSACTIONS.exists())
+
+    def test_deployed_artifact_metadata_requires_accepted_unchanged_archived_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root), patch.object(host, 'FRONTEND_TRANSACTION', root / 'frontend-transaction'):
+                plan = self.prepare(root)
+                self.acquire(plan)
+                value = host.state(plan)
+                value['accepted'] = True
+                host.atomic(host.state_path(plan), value)
+                request = {'deployment_id': plan['deployment_id'], 'baseline': {
+                    'deployment_manifest': {'source': plan['source'], 'artifact': {'sha256': plan['artifact_sha256']},
+                                            'ci': {'run_id': plan['ci']['run_id'], 'artifact_id': plan['ci']['artifact_id']}},
+                    'service': {'file_sha256': plan['artifact_sha256']}}}
+                host.LOCK.rename(host.transaction(plan) / 'released-lock')
+                with patch.object(host, 'baseline_matches'), patch.object(host.auth, 'check_formal'):
+                    result = host.dispatch('baseline_artifact_manifest', request, None)
+                    self.assertEqual(result['manifest'], plan['artifact_manifest'])
+                    archived = host.transaction(plan) / 'plan.json'
+                    changed = json.loads(archived.read_text())
+                    changed['artifact_manifest']['artifact']['sha256'] = '0' * 64
+                    host.atomic(archived, changed)
+                    with self.assertRaisesRegex(host.HostError, 'remote_state_mismatch'):
+                        host.dispatch('baseline_artifact_manifest', request, None)
+
+    def test_failed_retry_archive_does_not_hide_accepted_artifact_in_either_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root), patch.object(host, 'FRONTEND_TRANSACTION', root / 'frontend-transaction'):
+                failed = self.prepare(root)
+                self.acquire(failed)
+                host.LOCK.rename(host.transaction(failed) / 'released-lock')
+                request = {'deployment_id': failed['deployment_id'], 'baseline': {
+                    'deployment_manifest': {'source': failed['source'], 'artifact': {'sha256': failed['artifact_sha256']},
+                                            'ci': {'run_id': failed['ci']['run_id'], 'artifact_id': failed['ci']['artifact_id']}},
+                    'service': {'file_sha256': failed['artifact_sha256']}}}
+                with patch.object(host, 'baseline_matches'), patch.object(host.auth, 'check_formal'):
+                    with self.assertRaisesRegex(host.HostError, 'deployed_artifact_manifest_missing'):
+                        host.dispatch('baseline_artifact_manifest', request, None)
+                accepted = copy.deepcopy(failed)
+                accepted['deployment_id'] = str(uuid.uuid4())
+                self.acquire(accepted)
+                value = host.state(accepted)
+                value['accepted'] = True
+                host.atomic(host.state_path(accepted), value)
+                host.LOCK.rename(host.transaction(accepted) / 'released-lock')
+                paths = [host.transaction(item) / 'plan.json' for item in (failed, accepted)]
+                for order in (paths, list(reversed(paths))):
+                    with self.subTest(order=order), patch.object(Path, 'glob', return_value=iter(order)), \
+                         patch.object(host, 'baseline_matches'), patch.object(host.auth, 'check_formal'):
+                        result = host.dispatch('baseline_artifact_manifest', request, None)
+                        self.assertEqual(result['manifest'], accepted['artifact_manifest'])
 
     def test_recovery_acceptance_checks_full_manifest_and_owned_smoke_receipts(self):
         with tempfile.TemporaryDirectory() as directory:

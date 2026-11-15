@@ -2,7 +2,17 @@
 
 唯一发布入口为精确候选携带的 `ops/deploy_test.py`。授权、执行者与硬门禁见 [deploy 技能](../SKILL.md)；完整接口/状态见 [控制器说明](../../../../docs/ci/deployment-controller.md)。本手册不再维护独立的 SSH/rsync/systemctl/manifest 写入步骤。目标为 `LonelyFellas/tsz-rust` 当前 GitHub main 的成功 CI 制品，服务固定为 `tshb-test` 的后端；服务器无源码 checkout，不编译。
 
-2026-10-25 的[真实正常发布证据](../../../../docs/ci/evidence/2026-10-25-stage-d-manual-deployment.json)已通过。**真实回退尚未演练**，自动 CD 未启用；每次发布仍须重新执行门禁，历史成功不代替现场。
+2026-10-25 的[真实正常发布证据](../../../../docs/ci/evidence/2026-10-25-stage-d-manual-deployment.json)已通过。**真实回退尚未演练**；自动 CD 的实现与实际启用验收以[任务记录](../../../../docs/features/backend-auto-deploy/README.md)为准，历史成功不代替当前现场。
+
+## 常规自动发布
+
+`.github/workflows/deploy-tshb-test.yml` 监听 main 精确 CI 成功事件，使用 `ops/deploy_ci.py` 自动准备原始 Linux 制品和验证回执，再调用本控制器。正常版本不逐次人工确认，不在服务器构建，不重跑整套 CI，也不加入语音生成或试听。
+
+旧候选提前退出；纯文档/规则/测试变更按当前 accepted SHA 到候选的完整差异判断，核实在线制品和服务后跳过，不更新 accepted 身份。后端与前端沿用现有共享锁，不取消已经开始的事务。
+
+新增迁移自动验证实际基线的升级和持久化回读，固定 `forward_only`，不要求逐版本审批文件，不执行 down。没有账本变化的失败仍可恢复旧二进制；已迁移而失败时保留原事务和明确原因，禁止盲目换回旧版本或重新 apply。以下手动章节用于例外操作与原事务恢复，不是正常自动发布的人工检查清单。
+
+Actions 证据包保存计划、bundle、控制器状态和结果；远端事务保存 `plan.json`、原始 CI 制品 manifest 与已有动作记录。基线 CI 制品过期时，可以只读取得当前已验收二进制和对应原始 manifest 并按 accepted 身份复算，不重新编译或下载整库。runner 丢失时先定位原事务及原代码/计划，不能新建事务抢锁。
 
 ## 1. 先辨认新发布还是原事务恢复
 
@@ -73,7 +83,7 @@ Linux 制品不能直接在 macOS 执行。按宿主选择原生 Linux，或已�
 
 - 按 [PostgreSQL 备份恢复规范](../../../../docs/postgresql-backup-restore.md)区分普通兼容发布与数据风险发布。普通发布只读取独立备份状态及告警，不在发布路径重新导出、下载整库或执行完整恢复；不要求开发者电脑保存备份。新增迁移、不兼容写入格式、破坏性任务或兼容性未知时，先准备适用的写前备份与专项验证，核对权限、hash、快照时间、账本、工具及容量。恢复环境隔离业务网络，不机械照抄固定 tmpfs 大小。备份不在 bundle 内，不能误删；controller 的 `backup` 仍只复制当前二进制和 manifest。
 - 无新增迁移也需确认旧二进制可读取本次写入格式。只有实际账本仍等于基线才按 binary/manifest 恢复；该流程不自动恢复数据库或覆盖快照后的正常写入。
-- 有新增迁移：先按阶段 B 的 `ops/migration_compatibility.py` 对实际基线做隔离演练，提供 `migration-receipt.json` 和独立批准的恢复策略。候选区间缺少 down，或 up/down 非事务性时，当前控制器返回 `unsupported_recovery_interval`；`manual` 策略不能绕过这一能力限制。`verified_down`/`manual` 及受保护审批文件格式见[控制器说明](../../../../docs/ci/deployment-controller.md#中断与迁移恢复)。策略摘要绑定新旧 SHA、制品、账本/区间和回执；生成 plan 不能自行授予真实数据 down/PITR 权限。
+- 有新增迁移：常规自动发布用 `ops/migration_compatibility.py --recovery-mode forward_only` 对实际基线做隔离升级与回读，提供 `migration-receipt.json`，不执行 down 或要求审批文件。手动选择 `verified_down`/`manual` 时继续要求原独立批准证据，缺少 down 或非事务性区间仍返回 `unsupported_recovery_interval`；这些受控恢复策略及受保护审批文件格式见[控制器说明](../../../../docs/ci/deployment-controller.md#中断与迁移恢复)。生成 plan 不授予真实数据 down/PITR 权限。
 - 如本次授权要求“新增迁移或恢复点不适用即停止”，必须先停止报告，不用更宽策略继续。有 down 文件、合成数据演练成功或数据库备份存在都不等于真实数据可自动 down。
 - 保持 `.env` 和业务开关。正式进程、文件及 systemd 的 EnvironmentFiles/WorkingDirectory/相关 Environment 覆盖必须与候选配置一致。`COOKIE_SECURE=true`；`LOGIN_REWARD_ENABLED` 可为 true/false，但身份漂移一律拒绝。
 - TLS 的证书/私钥匹配、系统 CA/域名有效，已有 nginx HTTPS `/api/v1/` upstream 指向正式 `127.0.0.1:8383`。域名根 `/healthz` 可能是前端，正式健康只读本机后端精确 JSON。不改 nginx、不降级 Cookie、不使用 `-k`。
@@ -160,4 +170,4 @@ python3 /absolute/session/source/ops/deploy_test.py --state-dir /absolute/contro
 
 完整报告写明：实际旧/新 SHA、tree、CI run 与生产/验证 attempt、artifact ID/摘要、accepted 时间、事务 UUID、备份/恢复点及适用性、检查与未验证项；下载/上传/总耗时、server build=0、压缩包和二进制字节数；停服时间若只按步骤时间估算须标明上界。真实回退未发生时明确写“未演练”，不以正常成功代替。
 
-本手册不创建自动 CD，也不改变现有 PR/main 两轮 CI。后续自动化只能调用同一控制器，并须有独立授权和同等门禁。
+自动 CD 与手动入口调用同一控制器，不改变现有 PR/main 两轮 CI；常规自动发布已按任务获得持续授权，实际启用状态及首次真实验收以任务记录为准。

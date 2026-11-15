@@ -4,7 +4,7 @@
 
 `ops/deploy_test.py` 的 `plan/apply/status/resume` 是后端发布与原事务恢复的统一入口，执行步骤以 [部署 runbook](../../.agents/skills/deploy/references/runbook.md) 为准；兼容技能和执行 agent 复用同一流程。本说明解释接口和状态，不维护另一套远端命令。
 
-2026-10-25 阶段 D 已使用精确 main `65c16794c1c51691ccf1bbe862db29fb0d1b4425` 完成 `tshb-test` 的**真实正常发布验收**：候选/正式鉴权、业务持久化、v2 manifest、精确清理和独立复查通过，见[脱敏演练证据](evidence/2026-10-25-stage-d-manual-deployment.json)。本次无新增迁移、未触发恢复、未主动注入故障；**真实回退尚未演练**。自动 CD 未启用，阅读本文不授予发布或恢复授权。
+2026-10-25 阶段 D 已使用精确 main `65c16794c1c51691ccf1bbe862db29fb0d1b4425` 完成 `tshb-test` 的**真实正常发布验收**：候选/正式鉴权、业务持久化、v2 manifest、精确清理和独立复查通过，见[脱敏演练证据](evidence/2026-10-25-stage-d-manual-deployment.json)。本次无新增迁移、未触发恢复、未主动注入故障；**真实回退尚未演练**。后续自动 CD 的实现、授权和当前验收见[任务记录](../features/backend-auto-deploy/README.md)，阅读历史记录不授予额外的数据恢复授权。
 
 阶段 C 的隔离故障/中断测试与阶段 D 的正常真实演练分别说明各自范围；旧记录不是当前候选或现场证明。阶段 B 的制品 manifest、基线采集和迁移证据格式继续复用，原有完整 CI 保留。
 
@@ -118,7 +118,9 @@ main 只在 mutation 边界之前跟踪。停服前 main 或基线变化会阻�
 
 候选通过环境中的部署 UUID 标记找回，即使创建进程后 PID 尚未落盘也不会按名称批量杀进程。恢复先核精确账本；只有新增版本为审批区间前缀、历史 checksum 不变、迁移都成功时，才可能执行有边界的 down。旧二进制和 manifest 在账本恢复后还原，再做正式 readiness/鉴权复验。
 
-**阶段 B 的合成数据演练不授权测试服真实数据 down，也不证明 PITR 已就绪。** 非空迁移区间必须提供独立批准的恢复策略：
+**阶段 B 的合成数据演练不授权测试服真实数据 down，也不证明 PITR 已就绪。** 选择数据库恢复能力时必须提供独立批准的恢复策略。
+
+常规自动 CD 使用固定 `forward_only` 策略与绑定实际基线的隔离升级回执，不要求逐版本审批文件。该回执只证明升级和业务回读，不声明 `synthetic_recovery_verified`，不自动执行数据库 down；已迁移而发布失败时保留事务和失败现场。以下审批文件仅用于手动选择数据库恢复能力的旧策略：
 
 - `verified_down`：演练已通过 bounded down 和旧制品回读；真实环境恢复另有明确批准。控制器仍执行实际账本和数据守卫。
 - `manual`：升级链路已验证，但 down 被原子拒绝或明确采用人工恢复。失败后若已迁移，控制器停在 `manual_required`，不自动 down。

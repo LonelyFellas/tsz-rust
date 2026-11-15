@@ -210,6 +210,9 @@ jobs:
         run: >-
           python3 -m unittest discover -s ops -p 'test_deploy_test.py'
 
+      - name: Test automatic backend deployment
+        run: python3 -m unittest ops/test_deploy_ci.py
+
       - name: Test release host actions
         run: python3 -m unittest discover -s ops -p 'test_deployment_host.py'
 

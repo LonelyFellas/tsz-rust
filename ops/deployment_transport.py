@@ -14,13 +14,19 @@ REPOSITORY = "LonelyFellas/tsz-rust"
 MODULES = ("deployment_manifest", "deployment_auth_smoke", "deployment_business_smoke", "postgresql_backup_job", "deployment_host")
 
 
-def command(arguments, *, data=None, timeout=60):
+def command(arguments, *, data=None, timeout=60, failure_stages=()):
     try:
         result = subprocess.run(arguments, input=data, capture_output=True, text=True,
                                 timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise DeploymentError("transport_unavailable") from error
     if result.returncode:
+        try:
+            stage = json.loads(result.stdout).get("stage")
+        except (ValueError, AttributeError):
+            stage = None
+        if stage in failure_stages:
+            raise DeploymentError(stage)
         raise DeploymentError("transport_failed")
     return result.stdout
 
@@ -85,11 +91,12 @@ class GithubGate:
                 rows.append({"version": int(Path(filename).name.split("_", 1)[0]), "direction": direction,
                              "checksum": hashlib.sha384(raw).hexdigest(),
                              "transactional": not raw.startswith(b"-- no-transaction")})
-        expected = migration_interval({"schema_version": 1, "migrations": rows}, plan["baseline"]["postgresql"]["migration_ledger"])
+        mode = "forward_only" if plan.get("recovery_policy") == {"kind": "forward_only"} else "verified_down"
+        expected = migration_interval({"schema_version": 1, "migrations": rows}, plan["baseline"]["postgresql"]["migration_ledger"], recovery_mode=mode)
         if expected != plan["migration"]:
             raise DeploymentError("migration_interval_differs_from_source")
         # Validate the protected runner's explicit recovery approval file, not a boolean in a plan.
-        if expected["versions"]:
+        if expected["versions"] and mode != "forward_only":
             policy = plan["recovery_policy"]
             approval = Path.home() / ".config/tsz-rust/recovery-approvals" / (policy["approval_evidence_sha256"] + ".json")
             if not approval.is_file() or hashlib.sha256(approval.read_bytes()).hexdigest() != policy["approval_evidence_sha256"]:
@@ -129,11 +136,36 @@ class SshHost:
         # Reuse the standalone read-only stage-B collector; it does not create remote files.
         source = (ROOT / "deployed_baseline.py").read_text()
         result = json.loads(command(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o",
-                                     "StrictHostKeyChecking=yes", "tshb-test", "python3 -I - --remote"], data=source))
+                                     "StrictHostKeyChecking=yes", "tshb-test", "python3 -I - --remote"], data=source,
+                                    failure_stages=("deployment_in_progress", "frontend_deployment_busy")))
         return result
 
     def preflight(self, plan):
         return self.request("preflight", plan)
+
+    def verify_existing(self, baseline):
+        import uuid
+        return self.request("verify_existing", {"baseline": baseline, "deployment_id": str(uuid.uuid4())})
+
+    def download_baseline(self, baseline, directory):
+        import uuid
+        from deploy_test import atomic_json
+        from release_artifact_manifest import verify_manifest
+        folder = Path(directory)
+        folder.mkdir(mode=0o700, parents=True, exist_ok=False)
+        value = self.request("baseline_artifact_manifest", {"baseline": baseline, "deployment_id": str(uuid.uuid4())})
+        atomic_json(folder / "tsz-rust.manifest.json", value["manifest"])
+        with (folder / "tsz-rust").open("xb") as output:
+            result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o",
+                                     "StrictHostKeyChecking=yes", "tshb-test", "cat /opt/tsz-rust/target/release/tsz-rust"],
+                                    stdout=output, stderr=subprocess.PIPE, timeout=180, check=False)
+        if result.returncode:
+            raise DeploymentError("deployed_artifact_download_failed")
+        manifest = baseline["deployment_manifest"]
+        verify_manifest(folder / "tsz-rust.manifest.json", folder / "tsz-rust",
+                        expected_git_sha=manifest["source"]["git_sha"], expected_git_tree=manifest["source"]["git_tree"],
+                        expected_run_id=manifest["ci"]["run_id"], expected_run_attempt=manifest["ci"]["run_attempt"])
+        atomic_json(folder / "artifact.json", {"source": "deployed", "artifact_id": manifest["ci"]["artifact_id"]})
 
     def acquire(self, plan):
         self.request("acquire", plan)
