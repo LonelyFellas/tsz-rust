@@ -20,6 +20,7 @@ struct EntryRow {
 impl EntryRow {
     fn entry(self) -> Result<NextEntry, AppError> {
         Ok(NextEntry {
+            sentence_resources: None,
             id: self.id,
             target_language: self.target_language,
             medium_locale: Some(self.medium_locale),
@@ -172,6 +173,7 @@ pub(super) async fn node(
     Ok(())
 }
 pub(super) struct SaveCapabilities {
+    pub sentence_drafts: bool,
     pub grammar_audio: bool,
     pub sense_metadata: bool,
     pub equivalent_metadata: bool,
@@ -186,6 +188,9 @@ pub async fn save(
     mut input: SaveNextDraft,
     capabilities: SaveCapabilities,
 ) -> Result<NextEntry, AppError> {
+    if !input.sentence_changes.is_empty() && !capabilities.sentence_drafts {
+        return Err(language::unavailable());
+    }
     if input.expected_revision < 1 {
         return Err(language::invalid());
     }
@@ -285,6 +290,8 @@ pub async fn save(
             .await
             .map_err(crate::lexicon::handler::map_error)?;
     }
+    super::sentence_drafts::save_changes(&mut tx, auth, &previous, draft, input.sentence_changes)
+        .await?;
     let conn = &mut *tx;
     super::forms::persist(conn, id, draft).await?;
     super::grammar::persist(conn, id, draft).await?;
@@ -353,12 +360,19 @@ pub async fn save(
     super::equivalents::persist_refs(conn, id, next_revision, taxonomy_refs).await?;
     sqlx::query("UPDATE lexicon_next.entries SET headword=$2,revision=$3,updated_at=clock_timestamp() WHERE id=$1")
         .bind(id).bind(&draft.headword).bind(next_revision).execute(&mut *conn).await.map_err(AppError::internal)?;
-    let result = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
+    let mut result = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
         .bind(id)
         .fetch_one(&mut *conn)
         .await
         .map_err(AppError::internal)?
         .entry()?;
+    if capabilities.sentence_drafts
+        && permissions::lock(&mut tx, actor)
+            .await?
+            .has("sentences.access")
+    {
+        result.sentence_resources = Some(super::sentence_drafts::resources(&mut tx, draft).await?);
+    }
     tx.commit().await.map_err(AppError::internal)?;
     Ok(result)
 }

@@ -52,7 +52,7 @@ fn require_details(
 const LEVELS: &[&str] = &["A1", "A2", "B1", "B2", "C1", "C2"];
 const SELECT: &str = "SELECT s.id,s.target_language,s.owner_id,s.revision,s.updated_at,s.document,(SELECT count(*) FROM lexicon_next.sentence_references r WHERE r.sentence_id=s.id) AS reference_count FROM lexicon_next.sentences s";
 
-fn decode(row: sqlx::postgres::PgRow) -> Result<NextSentence, AppError> {
+pub(super) fn decode(row: sqlx::postgres::PgRow) -> Result<NextSentence, AppError> {
     Ok(NextSentence {
         id: row.get("id"),
         target_language: row.get("target_language"),
@@ -84,7 +84,7 @@ fn target(locale: &str) -> Result<(), AppError> {
     }
 }
 
-fn validate(id: Uuid, draft: &NextSentenceDraft) -> Result<(), AppError> {
+pub(super) fn validate(id: Uuid, draft: &NextSentenceDraft) -> Result<(), AppError> {
     if draft.schema_version != 1 || draft.variants.is_empty() {
         return Err(language::invalid());
     }
@@ -161,7 +161,7 @@ async fn node(
     Ok(())
 }
 
-fn scoped_variant(
+pub(super) fn scoped_variant(
     locale: &str,
     medium: &str,
     variant: &NextSentenceVariant,
@@ -174,7 +174,7 @@ fn scoped_variant(
     Ok(())
 }
 
-async fn prepare(
+pub(super) async fn prepare(
     conn: &mut PgConnection,
     actor: Uuid,
     id: Uuid,
@@ -233,6 +233,43 @@ async fn prepare(
             return Err(language::invalid());
         }
     }
+    Ok(())
+}
+
+pub(super) fn merge_variant(
+    previous: &NextSentenceVariant,
+    next: &mut NextSentenceVariant,
+    medium: &str,
+) -> Result<(), AppError> {
+    if previous.metadata.is_some() && next.metadata.is_none()
+        || previous.translations.iter().any(|row| {
+            row.locale == medium
+                && row.metadata.is_some()
+                && next
+                    .translations
+                    .iter()
+                    .any(|next| next.id == row.id && next.metadata.is_none())
+        })
+    {
+        return Err(AppError::unprocessable(
+            ErrorCode::InvalidRequestBody,
+            "例句扩展字段缺失，请重新加载后保存",
+        ));
+    }
+    if previous.id != next.id {
+        return Err(AppError::conflict(
+            ErrorCode::StableNodeIdChanged,
+            None,
+            "同一语言的例句节点身份不能变更",
+        ));
+    }
+    next.translations.extend(
+        previous
+            .translations
+            .iter()
+            .filter(|v| v.locale != medium)
+            .cloned(),
+    );
     Ok(())
 }
 
@@ -373,36 +410,7 @@ pub async fn save(
     {
         let previous = &draft.variants[position];
         require_details(previous, &input.medium_locale, &headers)?;
-        if previous.metadata.is_some() && input.variant.metadata.is_none()
-            || previous.translations.iter().any(|row| {
-                row.locale == input.medium_locale
-                    && row.metadata.is_some()
-                    && input
-                        .variant
-                        .translations
-                        .iter()
-                        .any(|next| next.id == row.id && next.metadata.is_none())
-            })
-        {
-            return Err(AppError::unprocessable(
-                ErrorCode::InvalidRequestBody,
-                "例句扩展字段缺失，请重新加载后保存",
-            ));
-        }
-        if previous.id != input.variant.id {
-            return Err(AppError::conflict(
-                ErrorCode::StableNodeIdChanged,
-                None,
-                "同一语言的例句节点身份不能变更",
-            ));
-        }
-        input.variant.translations.extend(
-            previous
-                .translations
-                .iter()
-                .filter(|v| v.locale != input.medium_locale)
-                .cloned(),
-        );
+        merge_variant(previous, &mut input.variant, &input.medium_locale)?;
         draft.variants[position] = input.variant;
     } else {
         draft.variants.push(input.variant);

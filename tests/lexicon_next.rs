@@ -4147,6 +4147,41 @@ async fn sentence_client_details(
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap(),
     )
 }
+async fn unified_sentence_client(
+    state: &AppState,
+    actor: Uuid,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(format!("{ROOT}{path}"))
+                .header("content-type", "application/json")
+                .header("x-tsz-next-sentences", "v1")
+                .header("x-tsz-next-sentence-details", "v1")
+                .header("x-tsz-next-sentence-drafts", "v1")
+                .header(
+                    "authorization",
+                    format!(
+                        "Bearer {}",
+                        state.admin_token_manager.generate(actor, "admin").unwrap()
+                    ),
+                )
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    (
+        status,
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap(),
+    )
+}
+
 fn sentence_variant(locale: &str, medium: &str, text: &str) -> Value {
     json!({"id":Uuid::now_v7(),"locale":locale,"level":"A2","content":{"version":2,"text":text,"annotations":[]},"translations":[{"id":Uuid::now_v7(),"locale":medium,"style":"balanced_fluency","content":{"version":2,"text":"例句译文","annotations":[]}}]})
 }
@@ -4673,4 +4708,155 @@ async fn next_sentence_new_sense_reference_requires_access_but_keep_and_remove_d
     .await
     .unwrap();
     assert_eq!(refs, 0);
+}
+
+#[sqlx::test]
+async fn unified_sentence_drafts_are_atomic_scoped_and_permission_checked(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool, SENTENCE_EDIT).await;
+    let outsider = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.edit",
+            "words.edit_others",
+            "sentences.access",
+            "sentences.edit",
+        ],
+    )
+    .await;
+    let entry = create(&state, actor).await;
+    let word_path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut ids = [Uuid::now_v7(), Uuid::now_v7()];
+    ids.sort();
+    let [a, b] = ids;
+    let mut word = draft();
+    word["senses"][0]["sentence_ids"] = json!([a, b]);
+    let uk = sentence_variant("en-GB", "zh-Hans", "A centre.");
+    let us = sentence_variant("en-US", "zh-Hans", "A center.");
+    let mut bad = sentence_variant("en-GB", "zh-Hans", "Another example.");
+    bad["metadata"] = json!({"register_ids":[Uuid::now_v7()],"domain_ids":[],"sources":[]});
+    let mut changes = json!([
+        {"id":a,"target_locale":"en-GB","medium_locale":"zh-Hans","variant":uk},
+        {"id":a,"target_locale":"en-US","medium_locale":"zh-Hans","variant":us},
+        {"id":b,"target_locale":"en-GB","medium_locale":"zh-Hans","variant":bad}
+    ]);
+    let payload = json!({"expected_revision":1,"draft":word,"sentence_changes":changes});
+    let (status, detail) = unified_sentence_client(&state, actor, "PUT", &word_path, payload).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM lexicon_next.sentences WHERE id=ANY($1)"
+        )
+        .bind(ids.to_vec())
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        call(&state, Some(actor), "GET", &word_path, Value::Null)
+            .await
+            .1["revision"],
+        1
+    );
+    changes[2]["variant"]["metadata"]["register_ids"] = json!([]);
+    let (status, saved) = unified_sentence_client(
+        &state,
+        actor,
+        "PUT",
+        &word_path,
+        json!({"expected_revision":1,"draft":word,"sentence_changes":changes}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["revision"], 2);
+    assert_eq!(saved["sentence_resources"].as_array().unwrap().len(), 2);
+    let original = unified_sentence_client(&state, actor, "GET", &word_path, Value::Null)
+        .await
+        .1;
+    assert_eq!(original, saved);
+    assert!(
+        call(&state, Some(actor), "GET", &word_path, Value::Null)
+            .await
+            .1
+            .get("sentence_resources")
+            .is_none()
+    );
+    let resources = saved["sentence_resources"].as_array().unwrap();
+    let first = resources.iter().find(|r| r["id"] == a.to_string()).unwrap();
+    assert_eq!(first["revision"], 1);
+    assert_eq!(first["draft"]["variants"].as_array().unwrap().len(), 2);
+    for change in changes.as_array_mut().unwrap() {
+        change["expected_revision"] = json!(1);
+    }
+    changes[0]["variant"]["content"]["text"] = json!("Changed British.");
+    changes[1]["variant"]["content"]["text"] = json!("Changed American.");
+    changes[2]["expected_revision"] = json!(99);
+    let request = json!({"expected_revision":2,"draft":word,"sentence_changes":changes});
+    assert_eq!(
+        unified_sentence_client(&state, actor, "PUT", &word_path, request.clone())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        unified_sentence_client(&state, actor, "GET", &word_path, Value::Null)
+            .await
+            .1,
+        original
+    );
+    changes[2]["expected_revision"] = json!(1);
+    let valid = json!({"expected_revision":2,"draft":word,"sentence_changes":changes});
+    assert_eq!(
+        unified_sentence_client(&state, outsider, "PUT", &word_path, valid.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        unified_sentence_client(&state, actor, "GET", &word_path, Value::Null)
+            .await
+            .1,
+        original
+    );
+    // Other medium translations survive the coordinated update.
+    let mut traditional = first["draft"]["variants"][0].clone();
+    traditional["translations"] =
+        sentence_variant("en-GB", "zh-Hant", "unused")["translations"].clone();
+    let path = format!("/sentences/{a}");
+    let (status, enriched) = sentence_client_details(&state,actor,"PUT",&path,json!({"expected_revision":1,"target_locale":"en-GB","medium_locale":"zh-Hant","variant":traditional}),true).await;
+    assert_eq!(status, StatusCode::OK, "{enriched}");
+    changes[0]["expected_revision"] = json!(2);
+    changes[1]["expected_revision"] = json!(2);
+    let (status, saved) = unified_sentence_client(
+        &state,
+        actor,
+        "PUT",
+        &word_path,
+        json!({"expected_revision":2,"draft":word,"sentence_changes":changes}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let first = saved["sentence_resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == a.to_string())
+        .unwrap();
+    assert_eq!(first["revision"], 3);
+    let uk = first["draft"]["variants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["locale"] == "en-GB")
+        .unwrap();
+    assert_eq!(uk["content"]["text"], "Changed British.");
+    assert!(
+        uk["translations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["locale"] == "zh-Hant")
+    );
 }
