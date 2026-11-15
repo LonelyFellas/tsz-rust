@@ -98,6 +98,7 @@ pub(super) async fn persist(
     hydrate(&mut serialized, &canonical)?;
     *draft = serde_json::from_value(serialized).map_err(AppError::internal)?;
     super::grammar::validate_audio_scope(draft)?;
+    super::definitions::validate(draft)?;
     sqlx::query("DELETE FROM lexicon_next.audio_asset_references WHERE entry_id=$1")
         .bind(entry)
         .execute(&mut *conn)

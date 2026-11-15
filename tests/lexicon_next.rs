@@ -3586,3 +3586,516 @@ async fn equivalent_save_racing_taxonomy_delete_cannot_create_dangling_reference
     let dangling: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.equivalent_taxonomy_refs r LEFT JOIN catalog.lexicon_taxonomies t ON t.id=r.taxonomy_id WHERE t.id IS NULL").fetch_one(&pool).await.unwrap();
     assert_eq!(dangling, 0);
 }
+
+async fn definition_call(
+    state: &AppState,
+    actor: Uuid,
+    method: &str,
+    path: &str,
+    body: Value,
+    details: bool,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(format!("{ROOT}{path}"))
+        .header("content-type", "application/json")
+        .header("x-tsz-next-forms", "v1")
+        .header("x-tsz-next-grammar", "v1")
+        .header("x-tsz-next-grammar-audio", "v1")
+        .header("x-tsz-next-sense-metadata", "v1")
+        .header("x-tsz-next-equivalents", "v1")
+        .header("x-tsz-next-sense-groups", "v1")
+        .header("x-tsz-next-medium-ownership", "v1")
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                state.admin_token_manager.generate(actor, "admin").unwrap()
+            ),
+        );
+    if details {
+        req = req.header("x-tsz-next-definitions", "v1");
+    }
+    let response = tsz_rust::router(state.clone())
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+async fn definition_recording(pool: &PgPool, actor: Uuid, locale: &str) -> Value {
+    let asset = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,'audio/mpeg',3,$4,'female','fixture.mp3',$5)")
+        .bind(asset).bind(format!("local-fixture/{asset}")).bind(format!("local-fixture/source/{asset}")).bind(locale).bind(actor).execute(pool).await.unwrap();
+    let metadata: Value = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'locale',locale,'gender',gender,'content_type',content_type,'size_bytes',size_bytes,'duration_ms',duration_ms,'original_name',original_name,'created_at',created_at) FROM lexicon.audio_assets WHERE id=$1")
+        .bind(asset).fetch_one(pool).await.unwrap();
+    serde_json::to_value(
+        serde_json::from_value::<tsz_rust::lexicon::audio_assets::dto::AudioAsset>(metadata)
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn definition_details_roundtrip_legacy_edits_language_views_and_conflicts(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let reader = admin(&pool, &["words.access"]).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let (_, old_caps) =
+        definition_call(&state, actor, "GET", "/capabilities", Value::Null, false).await;
+    assert!(old_caps.get("definition_details").is_none());
+    let (_, caps) = definition_call(&state, actor, "GET", "/capabilities", Value::Null, true).await;
+    assert_eq!(caps["definition_details"], true);
+    let asset = definition_recording(&pool, actor, "en-GB").await;
+    let mut content = draft();
+    content["grammar_structures"] = json!([]);
+    content["senses"][0]["level"] = json!("C2");
+    content["senses"][0]["definitions"][0]["level"] = json!("A1");
+    content["senses"][0]["definitions"][0]["grammar_unbound"] = json!(true);
+    content["senses"][0]["definitions"][0]["content"] = json!({"version":2,"text":content["senses"][0]["definitions"][0]["text"],"annotations":[{"type":"pause","at":3,"duration_ms":250}]});
+    content["senses"][0]["definitions"][0]["audio_assets"] = json!([asset]);
+    let mut second = content["senses"][0]["definitions"][0].clone();
+    second["id"] = json!(Uuid::now_v7());
+    second.as_object_mut().unwrap().remove("audio_assets");
+    content["senses"][0]["definitions"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    content["senses"][0]["definitions"][2]["level"] = json!("B2");
+    let (status, _) = definition_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, saved) = definition_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, read) = definition_call(&state, actor, "GET", &path, Value::Null, true).await;
+    assert_eq!(read["draft"], saved["draft"]);
+    let (_, view) = definition_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{path}/view?target_locale=en-GB&medium_locale=zh-Hans"),
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(
+        view["senses"][0]["target_definitions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(view["senses"][0]["target_definitions"][0]["level"], "A1");
+    assert_eq!(view["senses"][0]["medium_definitions"][0]["level"], "B2");
+    assert!(
+        !view["grammar_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["node_id"] == content["senses"][0]["definitions"][0]["id"])
+    );
+    let (_, us) = definition_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{path}/view?target_locale=en-US&medium_locale=zh-Hans"),
+        Value::Null,
+        true,
+    )
+    .await;
+    assert_eq!(
+        us["senses"][0]["target_definitions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        us["senses"][0]["target_definitions"][0]
+            .get("level")
+            .is_none()
+    );
+    let (_, old) = definition_call(&state, actor, "GET", &path, Value::Null, false).await;
+    for field in [
+        "level",
+        "grammar_unbound",
+        "content",
+        "voice_profile",
+        "audio_assets",
+    ] {
+        assert!(
+            old["draft"]["senses"][0]["definitions"][0]
+                .get(field)
+                .is_none(),
+            "{field}"
+        );
+    }
+    let (_, old_view) = definition_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{path}/view?target_locale=en-GB&medium_locale=zh-Hans"),
+        Value::Null,
+        false,
+    )
+    .await;
+    assert!(
+        old_view["senses"][0]["target_definitions"][0]
+            .get("content")
+            .is_none()
+    );
+    assert_eq!(
+        definition_call(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":2,"draft":old["draft"]}),
+            false
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, retained) = definition_call(&state, actor, "GET", &path, Value::Null, true).await;
+    assert_eq!(retained["draft"], saved["draft"]);
+    assert_eq!(
+        definition_call(
+            &state,
+            reader,
+            "PUT",
+            &path,
+            json!({"expected_revision":3,"draft":retained["draft"]}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        definition_call(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":2,"draft":content}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let mut legacy = old["draft"].clone();
+    legacy["senses"][0]["definitions"][0]["text"] = json!("a new centre");
+    legacy["senses"][0]["definitions"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 4);
+    assert_eq!(
+        definition_call(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":3,"draft":legacy}),
+            false
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, changed) = definition_call(&state, actor, "GET", &path, Value::Null, true).await;
+    assert_eq!(changed["draft"]["forms"], saved["draft"]["forms"]);
+    assert_eq!(
+        changed["draft"]["senses"][0]["equivalents"],
+        saved["draft"]["senses"][0]["equivalents"]
+    );
+    assert_eq!(
+        changed["draft"]["senses"][0]["definitions"][4]["id"],
+        saved["draft"]["senses"][0]["definitions"][0]["id"]
+    );
+    assert_eq!(
+        changed["draft"]["senses"][0]["definitions"][4]["level"],
+        "A1"
+    );
+    assert!(
+        changed["draft"]["senses"][0]["definitions"][4]
+            .get("content")
+            .is_none()
+    );
+    assert!(
+        changed["draft"]["senses"][0]["definitions"][4]
+            .get("audio_assets")
+            .is_none()
+    );
+    let refs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon_next.audio_asset_references WHERE entry_id=$1",
+    )
+    .bind(Uuid::parse_str(entry["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(refs, 0);
+}
+
+#[sqlx::test]
+async fn definition_details_reject_invalid_assets_generation_sources_and_archived_writes(
+    pool: PgPool,
+) {
+    let actor = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "words.archive",
+        ],
+    )
+    .await;
+    let other = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let recording = definition_recording(&pool, actor, "en-GB").await;
+    let foreign = definition_recording(&pool, other, "en-GB").await;
+    let mut forged_us = definition_recording(&pool, actor, "en-US").await;
+    forged_us["locale"] = json!("en-GB");
+    let mut missing = recording.clone();
+    missing["id"] = json!(Uuid::now_v7());
+    let mut content = draft();
+    content["senses"][0]["definitions"][0]["content"] =
+        json!({"version":2,"text":content["senses"][0]["definitions"][0]["text"],"annotations":[]});
+    for asset in [foreign, forged_us, missing] {
+        let mut invalid = content.clone();
+        invalid["senses"][0]["definitions"][0]["audio_assets"] = json!([asset]);
+        assert_eq!(
+            definition_call(
+                &state,
+                actor,
+                "PUT",
+                &path,
+                json!({"expected_revision":1,"draft":invalid}),
+                true
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let mut generated = content.clone();
+    generated["senses"][0]["definitions"][0]["voice_profile"] = json!({"voices":[{
+        "voice_id":"saved-voice","enabled":false,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"not generated","locale":"en-GB","audio_asset_id":recording["id"]
+    }]});
+    assert_eq!(
+        definition_call(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":generated}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    // Source mismatches must be rejected even when an asset has a ready generation row.
+    sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state) VALUES($1,$2,$3,$4,$5,$6,$7,'ready')")
+        .bind(Uuid::parse_str(recording["id"].as_str().unwrap()).unwrap()).bind(Uuid::now_v7()).bind(actor).bind(vec![0u8;32])
+        .bind(json!({"kind":"text","content":{"version":2,"text":"different source","annotations":[]},"form_links":[]}))
+        .bind(json!({})).bind(json!({})).execute(&pool).await.unwrap();
+    assert_eq!(
+        definition_call(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":generated}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut disguised = content.clone();
+    disguised["senses"][0]["definitions"][0]["audio_assets"] = json!([recording]);
+    assert_eq!(
+        definition_call(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":disguised}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (_, unchanged) = definition_call(&state, actor, "GET", &path, Value::Null, true).await;
+    assert_eq!(unchanged["revision"], 1);
+    let (_, list) = call_scoped(
+        &state,
+        actor,
+        "GET",
+        "/workspace/entries?medium_locale=zh-Hans",
+        Value::Null,
+    )
+    .await;
+    let row = &list["items"][0];
+    assert_eq!(call_scoped(&state, actor, "POST", "/workspace/commands", json!({"request_id":Uuid::now_v7(),"action":"archive","items":[{"entry_id":entry["id"],"base_revision":1,"base_lifecycle_revision":row["lifecycle_revision"]}]})).await.0, StatusCode::OK);
+    let (status, error) = definition_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["code"], "entry_archived");
+}
+
+#[sqlx::test]
+async fn definition_details_common_english_invalid_grammar_and_verified_generation_binding(
+    pool: PgPool,
+) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let asset = definition_recording(&pool, actor, "en-GB").await;
+    let version = Uuid::now_v7();
+    let grammar = Uuid::now_v7();
+    let rich = json!({"version":2,"text":"the middle","annotations":[]});
+    // A database fixture proves source validation, not provider synthesis (batch 3).
+    sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state) VALUES($1,$2,$3,$4,$5,$6,$7,'ready')")
+        .bind(Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap()).bind(Uuid::now_v7()).bind(actor).bind(vec![0u8;32])
+        .bind(json!({"kind":"text","content":rich,"form_links":[]}))
+        .bind(json!({"version_id":version,"voice_id":"saved-voice","locale":"en-GB","rate_percent":0,"pitch_semitones":0,"volume_percent":100,"style":""}))
+        .bind(&rich).execute(&pool).await.unwrap();
+    let mut content = draft();
+    content["grammar_structures"] = json!([{"id":grammar,"part_of_speech":"adjective","variants":[{
+        "id":Uuid::now_v7(),"locale":"en","content":{"version":2,"text":"a common structure","annotations":[]}
+    }]}]);
+    content["senses"][0]["definitions"] = json!([
+        {"id":Uuid::now_v7(),"locale":"en","style":"definition","text":"the middle","level":"A2","grammar_structure_id":grammar,
+            "content":rich,"voice_profile":{"voices":[{"voice_id":"saved-voice","enabled":false,"rate_percent":0,"version_id":version,"version_name":"verified fixture","locale":"en-GB","audio_asset_id":asset["id"]}]}},
+        {"id":Uuid::now_v7(),"locale":"zh-Hans","style":"sentence","text":"这是中心。","grammar_unbound":true}
+    ]);
+    let (status, saved) = definition_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    for target in ["en-GB", "en-US"] {
+        let (_, view) = definition_call(
+            &state,
+            actor,
+            "GET",
+            &format!("{path}/view?target_locale={target}&medium_locale=zh-Hans"),
+            Value::Null,
+            true,
+        )
+        .await;
+        let row = &view["senses"][0]["target_definitions"][0];
+        assert_eq!(row["locale"], "en");
+        assert_eq!(row["grammar_structure_id"], json!(grammar));
+        assert!(
+            view["grammar_issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["node_id"] == row["id"])
+        );
+    }
+    let (_, old_view) = definition_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{path}/view?target_locale=en-GB&medium_locale=zh-Hans"),
+        Value::Null,
+        false,
+    )
+    .await;
+    assert!(
+        old_view["senses"][0]["target_definitions"][0]
+            .get("grammar_structure_id")
+            .is_none()
+    );
+    let mut changed = saved["draft"].clone();
+    changed["senses"][0]["definitions"][0]["text"] = json!("a different middle");
+    changed["senses"][0]["definitions"][0]["content"]["text"] = json!("a different middle");
+    assert_eq!(
+        definition_call(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":2,"draft":changed}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, old) = definition_call(&state, actor, "GET", &path, Value::Null, false).await;
+    let mut legacy = old["draft"].clone();
+    legacy["senses"][0]["definitions"][0]["text"] = json!("a different middle");
+    assert_eq!(
+        definition_call(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":2,"draft":legacy}),
+            false
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, changed) = definition_call(&state, actor, "GET", &path, Value::Null, true).await;
+    assert_eq!(
+        changed["draft"]["senses"][0]["definitions"][0]["content"]["text"],
+        "a different middle"
+    );
+    assert!(
+        changed["draft"]["senses"][0]["definitions"][0]["voice_profile"]["voices"][0]
+            .get("audio_asset_id")
+            .is_none()
+    );
+    let refs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon_next.audio_asset_references WHERE entry_id=$1",
+    )
+    .bind(Uuid::parse_str(entry["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(refs, 0);
+}

@@ -74,6 +74,11 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
                 id: Uuid::now_v7(),
                 part_of_speech: None,
                 definitions: vec![NextDefinition {
+                    level: None,
+                    grammar_unbound: None,
+                    content: None,
+                    voice_profile: None,
+                    audio_assets: vec![],
                     grammar_structure_id: None,
                     id: Uuid::now_v7(),
                     locale: "zh-Hant".into(),
@@ -240,4 +245,106 @@ fn sense_metadata_uses_v1_numeric_rules_without_backfilling_legacy_drafts() {
         value["senses"][0][field] = serde_json::Value::Null;
         assert!(serde_json::from_value::<NextDraft>(value).is_err());
     }
+}
+
+fn definition_draft() -> serde_json::Value {
+    json!({"schema_version":1,"headword":"job","forms":[],"senses":[{
+        "id":Uuid::now_v7(),"part_of_speech":"noun","level":"C2","definitions":[{
+            "id":Uuid::now_v7(),"locale":"en-GB","text":"a job","style":"definition",
+            "level":"A1","grammar_unbound":true,
+            "content":{"version":2,"text":"a job","annotations":[{"type":"pause","at":1,"duration_ms":200}]}
+        }],"equivalents":[]
+    }]})
+}
+
+#[test]
+fn definition_details_validate_independent_levels_projection_markup_and_scope() {
+    let raw = definition_draft();
+    for level in ["A1", "A2", "B1", "B2", "C1", "C2"] {
+        let mut value = raw.clone();
+        value["senses"][0]["definitions"][0]["level"] = json!(level);
+        language::validate("en", &serde_json::from_value(value).unwrap()).unwrap();
+    }
+    for (field, value) in [
+        ("level", json!("A0")),
+        ("grammar_unbound", json!(false)),
+        ("grammar_structure_id", json!(Uuid::now_v7())),
+        ("text", json!("different")),
+        ("locale", json!("zh-Hans")),
+        (
+            "content",
+            json!({"version":2,"text":"a job","annotations":[{"type":"pause","at":999,"duration_ms":200}]}),
+        ),
+        (
+            "voice_profile",
+            json!({"voices":[],"dubbing":{"area":"grammar","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}),
+        ),
+        (
+            "voice_profile",
+            json!({"voices":[{"voice_id":"test","enabled":false,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"US","locale":"en-US"}]}),
+        ),
+    ] {
+        let mut invalid = raw.clone();
+        invalid["senses"][0]["definitions"][0][field] = value;
+        assert!(
+            language::validate("en", &serde_json::from_value(invalid).unwrap()).is_err(),
+            "{field}"
+        );
+    }
+    for field in [
+        "level",
+        "grammar_unbound",
+        "content",
+        "voice_profile",
+        "audio_assets",
+    ] {
+        let mut invalid = raw.clone();
+        invalid["senses"][0]["definitions"][0][field] = json!(null);
+        assert!(
+            serde_json::from_value::<NextDraft>(invalid).is_err(),
+            "{field}"
+        );
+    }
+    let mut draft: NextDraft = serde_json::from_value(raw).unwrap();
+    draft.grammar_structures = Some(vec![]);
+    let issues = super::grammar::issues(&draft, &Default::default());
+    assert!(
+        !issues
+            .iter()
+            .any(|issue| issue.node_id == draft.senses[0].definitions[0].id)
+    );
+}
+
+#[test]
+fn legacy_definition_edits_preserve_hidden_metadata_and_invalidate_changed_source() {
+    let mut raw = definition_draft();
+    raw["senses"][0]["definitions"][0]["voice_profile"] = json!({"voices":[{
+        "voice_id":"saved-voice","enabled":false,"rate_percent":15,
+        "version_id":Uuid::now_v7(),"version_name":"原配音","locale":"en-GB","audio_asset_id":Uuid::now_v7()
+    }]});
+    let previous: NextDraft = serde_json::from_value(raw).unwrap();
+    let mut unchanged = previous.clone();
+    super::definitions::strip(&mut unchanged.senses[0].definitions[0]);
+    super::definitions::preserve(&mut unchanged, &previous);
+    assert_eq!(
+        serde_json::to_value(&unchanged).unwrap(),
+        serde_json::to_value(&previous).unwrap()
+    );
+    let mut changed = unchanged;
+    super::definitions::strip(&mut changed.senses[0].definitions[0]);
+    changed.senses[0].definitions[0].text = "a new job".into();
+    super::definitions::preserve(&mut changed, &previous);
+    language::validate("en", &changed).unwrap();
+    let row = &changed.senses[0].definitions[0];
+    assert_eq!(row.level.as_deref(), Some("A1"));
+    assert_eq!(row.grammar_unbound, Some(true));
+    let saved = serde_json::to_value(row).unwrap();
+    assert_eq!(saved["content"]["text"], "a new job");
+    assert_eq!(saved["content"]["annotations"], json!([]));
+    assert_eq!(saved["voice_profile"]["voices"][0]["rate_percent"], 15);
+    assert!(
+        saved["voice_profile"]["voices"][0]
+            .get("audio_asset_id")
+            .is_none()
+    );
 }

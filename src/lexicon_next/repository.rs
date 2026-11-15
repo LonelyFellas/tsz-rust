@@ -171,14 +171,19 @@ pub(super) async fn node(
     }
     Ok(())
 }
+pub(super) struct SaveCapabilities {
+    pub grammar_audio: bool,
+    pub sense_metadata: bool,
+    pub equivalent_metadata: bool,
+    pub definition_details: bool,
+}
+
 pub async fn save(
     pool: &PgPool,
     auth: &AdminAuth,
     id: Uuid,
     mut input: SaveNextDraft,
-    supports_audio: bool,
-    supports_sense_metadata: bool,
-    supports_equivalent_metadata: bool,
+    capabilities: SaveCapabilities,
 ) -> Result<NextEntry, AppError> {
     if input.expected_revision < 1 {
         return Err(language::invalid());
@@ -221,10 +226,18 @@ pub async fn save(
         .await
         .map_err(AppError::internal)?
         .entry()?;
-    let taxonomy_refs =
-        super::equivalents::prepare(conn, draft, &previous.draft, supports_equivalent_metadata)
-            .await?;
-    if !supports_sense_metadata {
+    if !capabilities.definition_details {
+        super::definitions::preserve(draft, &previous.draft);
+    }
+    super::definitions::validate(draft)?;
+    let taxonomy_refs = super::equivalents::prepare(
+        conn,
+        draft,
+        &previous.draft,
+        capabilities.equivalent_metadata,
+    )
+    .await?;
+    if !capabilities.sense_metadata {
         for sense in &mut draft.senses {
             if let Some(saved) = previous
                 .draft
@@ -244,7 +257,7 @@ pub async fn save(
             "grammar structures require an updated client; reopen before saving",
         ));
     }
-    if !supports_audio {
+    if !capabilities.grammar_audio {
         super::grammar::preserve_audio(draft, &previous.draft);
     }
     super::grammar::validate_catalog(&mut tx, draft).await?;
@@ -274,6 +287,7 @@ pub async fn save(
     super::forms::persist(conn, id, draft).await?;
     super::grammar::persist(conn, id, draft).await?;
     super::audio::persist(conn, auth.subject, id, draft).await?;
+    super::definitions::validate_bindings(conn, draft).await?;
     // Only current content is replaced. Nodes and previous revision snapshots remain intact.
     for sql in [
         "DELETE FROM lexicon_next.equivalents WHERE id IN (SELECT id FROM lexicon_next.nodes WHERE entry_id=$1)",
