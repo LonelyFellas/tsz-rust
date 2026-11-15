@@ -16,6 +16,13 @@ from test_deploy_test import plan_fixture
 
 
 class GateTests(unittest.TestCase):
+    def test_only_known_parallel_deployment_errors_are_reported_as_waitable(self):
+        for stage, expected in [('deployment_in_progress', 'deployment_in_progress'), ('other', 'transport_failed')]:
+            response = transport.subprocess.CompletedProcess([], 1, json.dumps({'status': 'failed', 'stage': stage}), 'private detail')
+            with self.subTest(stage=stage), patch.object(transport.subprocess, 'run', return_value=response), \
+                 self.assertRaisesRegex(DeploymentError, expected):
+                transport.command(['metadata'], failure_stages=('deployment_in_progress',))
+
     def fixture(self, root):
         plan, _, _ = plan_fixture(root)
         sha = plan['source']['git_sha']

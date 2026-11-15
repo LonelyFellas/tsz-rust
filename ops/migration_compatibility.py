@@ -15,7 +15,9 @@ from release_artifact_manifest import ArtifactManifestError, verify_manifest
 from release_artifact_smoke import verify_artifact_record, verify_ledger
 
 
-def migration_interval(info, ledger):
+def migration_interval(info, ledger, *, recovery_mode="verified_down"):
+    if recovery_mode not in {"verified_down", "forward_only"}:
+        raise VerificationError("invalid_migration_recovery_mode")
     if info.get("schema_version") != 1 or not isinstance(info.get("migrations"), list):
         raise VerificationError("invalid_embedded_migration_info")
     up, down = {}, {}
@@ -40,11 +42,11 @@ def migration_interval(info, ledger):
     if {v for v in up if v <= highest} != set(versions):
         raise VerificationError("baseline_migration_missing")
     interval = sorted(v for v in up if v > highest)
-    if any(v not in down or not up[v]["transactional"] or not down[v]["transactional"] for v in interval):
+    if recovery_mode != "forward_only" and any(v not in down or not up[v]["transactional"] or not down[v]["transactional"] for v in interval):
         raise VerificationError("unsupported_recovery_interval")
     return {"classification": "no_schema_change" if not interval else "new_migrations",
             "baseline_version": highest, "candidate_version": max(up),
-            "versions": interval, "migrations": [{"up": up[v], "down": down[v]} for v in interval]}
+            "versions": interval, "migrations": [{"up": up[v], "down": down.get(v)} for v in interval]}
 
 
 def baseline_identity(baseline, manifest):
@@ -95,6 +97,9 @@ def verify_catalog_metadata_recovery(before, after):
 
 
 def rehearse(args, runtime_factory=IsolatedRuntime):
+    recovery_mode = getattr(args, "recovery_mode", "verified_down")
+    if recovery_mode not in {"verified_down", "forward_only"}:
+        raise VerificationError("invalid_migration_recovery_mode")
     if args.output.exists():
         raise VerificationError("receipt_already_exists")
     if any(isinstance(value, bool) or value <= 0 for value in (args.artifact_id, args.baseline_artifact_id, args.run_id, args.run_attempt)):
@@ -108,7 +113,16 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
                                 expected_git_tree=args.expected_tree, expected_run_id=args.run_id,
                                 expected_run_attempt=args.run_attempt)
     verify_artifact_record(json.loads(args.artifact_metadata.read_text()), candidate, args.artifact_id)
-    verify_artifact_record(json.loads(args.baseline_artifact_metadata.read_text()), old, args.baseline_artifact_id)
+    if getattr(args, "baseline_deployed", False):
+        metadata = json.loads(args.baseline_artifact_metadata.read_text())
+        accepted = baseline["deployment_manifest"]
+        if (metadata != {"source": "deployed", "artifact_id": args.baseline_artifact_id}
+                or accepted.get("schema_version") != 2
+                or accepted["ci"].get("artifact_id") != args.baseline_artifact_id
+                or accepted["ci"].get("run_attempt") != old["ci"]["run_attempt"]):
+            raise VerificationError("deployed_baseline_artifact_mismatch")
+    else:
+        verify_artifact_record(json.loads(args.baseline_artifact_metadata.read_text()), old, args.baseline_artifact_id)
     ledger = baseline_identity(baseline, old)
     for artifact in (args.artifact, args.baseline_artifact):
         artifact.chmod(0o700)
@@ -118,12 +132,15 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
         "baseline_capture_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
         "baseline_source": old["source"], "baseline_ci": old["ci"],
         "baseline_artifact_id": args.baseline_artifact_id, "baseline_artifact_sha256": old["artifact"]["sha256"],
+        "baseline_artifact_source": "deployed" if getattr(args, "baseline_deployed", False) else "github_ci",
         "candidate_source": candidate["source"], "candidate_ci": candidate["ci"],
         "candidate_artifact_id": args.artifact_id, "candidate_artifact_sha256": candidate["artifact"]["sha256"],
         "baseline_ledger": ledger, "checks": {}, "rollback_schema_safe": False,
         "resource_owner": runtime.owner if hasattr(runtime, "owner") else None,
         "evidence_scope": "synthetic fixture only; not production data or PITR authorization",
     }
+    if recovery_mode == "forward_only":
+        receipt["recovery_mode"] = recovery_mode
     error = None
     try:
         receipt["environment"] = runtime.start()
@@ -131,15 +148,15 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
         if actual_major != int(baseline["postgresql"]["server_version_num"]) // 10000:
             raise VerificationError("postgresql_major_differs_from_baseline")
         info = json.loads(runtime.binary(args.artifact, "deploy-info"))
-        interval = migration_interval(info, ledger)
+        interval = migration_interval(info, ledger, recovery_mode=recovery_mode)
         receipt["interval"] = interval
         runtime.start_app(args.baseline_artifact)
         same_ledger(ledger, runtime.ledger())
         runtime.seed_user()
         wordlist = runtime.client().roundtrip()
         runtime.stop_app()
-        baseline_snapshot = runtime.snapshot()
-        baseline_columns = runtime.table_columns() if interval["versions"] else None
+        baseline_snapshot = runtime.snapshot() if recovery_mode != "forward_only" else None
+        baseline_columns = runtime.table_columns() if interval["versions"] and recovery_mode != "forward_only" else None
         fixture_before = runtime.sql("SELECT row_to_json(w) FROM wordlists w WHERE id='" + wordlist["id"] + "'")
         runtime.start_app(args.artifact)
         verify_ledger(info, runtime.ledger())
@@ -149,7 +166,7 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
         runtime.client().roundtrip(wordlist=wordlist)
         runtime.stop_app()
         receipt["checks"]["upgrade_and_persistence"] = "passed"
-        if interval["versions"]:
+        if interval["versions"] and recovery_mode != "forward_only":
             before = runtime.snapshot()
             # Capture candidate writes through the schema that the old binary will read.
             # Full snapshots still protect new tables, refusal atomicity and sequences.
@@ -187,18 +204,23 @@ def rehearse(args, runtime_factory=IsolatedRuntime):
                     if table != "catalog.metadata" or catalog_before is None:
                         raise VerificationError("recovery_changed_synthetic_data")
             receipt["checks"]["bounded_down"] = "passed"
+        elif recovery_mode == "forward_only":
+            receipt["checks"]["bounded_down"] = "not_attempted_forward_only"
         else:
             receipt["checks"]["bounded_down"] = "not_needed_no_schema_change"
-        runtime.start_app(args.baseline_artifact)
-        same_ledger(ledger, runtime.ledger())
-        runtime.client().roundtrip(wordlist=wordlist)
-        runtime.stop_app()
-        receipt["checks"]["old_binary_after_recovery"] = "passed"
+        if recovery_mode != "forward_only":
+            runtime.start_app(args.baseline_artifact)
+            same_ledger(ledger, runtime.ledger())
+            runtime.client().roundtrip(wordlist=wordlist)
+            runtime.stop_app()
+            receipt["checks"]["old_binary_after_recovery"] = "passed"
+        else:
+            receipt["checks"]["old_binary_after_recovery"] = "not_attempted_forward_only"
         for artifact, expected in [(args.artifact, candidate["artifact"]["sha256"]), (args.baseline_artifact, old["artifact"]["sha256"])]:
             if digest(artifact) != expected:
                 raise VerificationError("artifact_changed_during_rehearsal")
         receipt["status"] = "passed"
-        receipt["synthetic_recovery_verified"] = True
+        receipt["synthetic_recovery_verified"] = recovery_mode != "forward_only"
         receipt["baseline_revalidation_required_before_server_write"] = True
     except (VerificationError, OSError, ValueError, KeyError, StopIteration) as failure:
         error = failure
@@ -229,6 +251,8 @@ def parser():
         result.add_argument("--" + name, type=int, required=True)
     result.add_argument("--expected-sha", required=True)
     result.add_argument("--expected-tree", required=True)
+    result.add_argument("--recovery-mode", choices=("verified_down", "forward_only"), default="verified_down")
+    result.add_argument("--baseline-deployed", action="store_true")
     return result
 
 
@@ -240,7 +264,7 @@ def main(argv=None):
     except (VerificationError, ArtifactManifestError, OSError, ValueError, KeyError) as error:
         print(json.dumps({"status": "failed", "stage": str(error) if isinstance(error, VerificationError) else type(error).__name__}))
         return 1
-    print(json.dumps({"status": receipt["status"], "synthetic_recovery_verified": True, "cleanup_complete": receipt["cleanup"]["complete"]}))
+    print(json.dumps({"status": receipt["status"], "synthetic_recovery_verified": receipt["synthetic_recovery_verified"], "cleanup_complete": receipt["cleanup"]["complete"]}))
     return 0
 
 

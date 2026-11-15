@@ -146,6 +146,41 @@ def new_interval():
 
 
 class MigrationCompatibilityTests(unittest.TestCase):
+    def test_deployed_baseline_fallback_is_bound_to_accepted_artifact_identity(self):
+        for artifact_id in (101, 999):
+            with self.subTest(artifact_id=artifact_id), tempfile.TemporaryDirectory() as directory:
+                args = args_fixture(Path(directory))
+                baseline = json.loads(args.baseline.read_text())
+                baseline['deployment_manifest']['schema_version'] = 2
+                baseline['deployment_manifest']['ci']['artifact_id'] = 101
+                args.baseline.write_text(json.dumps(baseline))
+                args.baseline_deployed = True
+                args.recovery_mode = 'forward_only'
+                args.baseline_artifact_metadata = Path(directory) / 'deployed-baseline-artifact.json'
+                args.baseline_artifact_metadata.write_text(json.dumps({'source': 'deployed', 'artifact_id': artifact_id}))
+                if artifact_id == 101:
+                    result = rehearse(args, runtime_factory=MigrationRuntime)
+                    self.assertEqual(result['baseline_artifact_source'], 'deployed')
+                    self.assertEqual(result['status'], 'passed')
+                else:
+                    with self.assertRaisesRegex(VerificationError, 'deployed_baseline_artifact_mismatch'):
+                        rehearse(args, runtime_factory=MigrationRuntime)
+
+    def test_forward_only_upgrade_does_not_run_down_or_old_binary_after_upgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = args_fixture(Path(directory))
+            args.recovery_mode = "forward_only"
+            runtime = MigrationRuntime(new_interval(), refuse=True)
+            runtime.info["migrations"] = [row for row in runtime.info["migrations"] if row["direction"] == "up"]
+            result = rehearse(args, runtime_factory=lambda: runtime)
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["checks"]["upgrade_and_persistence"], "passed")
+            self.assertEqual(result["checks"]["bounded_down"], "not_attempted_forward_only")
+            self.assertFalse(result["synthetic_recovery_verified"])
+            self.assertFalse(result["rollback_schema_safe"])
+            self.assertEqual(runtime.app_starts, 2)
+            self.assertTrue(result["cleanup"]["complete"])
+
     def test_complete_interval_is_not_only_last_commit(self):
         interval = migration_interval(new_interval(), LEDGER)
         self.assertEqual(interval["versions"], [2, 3])

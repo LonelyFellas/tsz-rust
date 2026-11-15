@@ -1,0 +1,94 @@
+name: Deploy tshb-test
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deploy-tshb-test
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.repository == 'LonelyFellas/tsz-rust' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+      DEPLOY_CI_RUN: ${{ github.event.workflow_run.id }}
+      DEPLOY_CI_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - name: Check out trusted main tools
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check current deployment candidate
+        id: candidate
+        run: |
+          set -euo pipefail
+          git switch -C main "$GITHUB_SHA"
+          python3 -u ops/deploy_ci.py check \
+            --sha "$DEPLOY_SHA" --run-id "$DEPLOY_CI_RUN" --attempt "$DEPLOY_CI_ATTEMPT" \
+            --directory "$RUNNER_TEMP/backend-deploy"
+
+      - name: Configure deployment SSH
+        if: steps.candidate.outputs.current == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.TSHB_TEST_SSH_HOST }}
+          DEPLOY_USER: ${{ secrets.TSHB_TEST_SSH_USER }}
+          DEPLOY_KEY: ${{ secrets.TSHB_TEST_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.TSHB_TEST_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9.:-]+$ && "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          [[ -n "$DEPLOY_KEY" && -n "$DEPLOY_KNOWN_HOSTS" ]]
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/tshb-test-key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/tshb-test-key" "$HOME/.ssh/known_hosts"
+          printf 'Host tshb-test\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/tshb-test-key\n  IdentitiesOnly yes\n  BatchMode yes\n  ConnectTimeout 10\n  StrictHostKeyChecking yes\n  ControlMaster auto\n  ControlPersist 1800\n  ControlPath "%s"\n' \
+            "$DEPLOY_HOST" "$DEPLOY_USER" "$RUNNER_TEMP/backend-ssh" > "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config"
+          ssh -MNf tshb-test </dev/null >/dev/null 2>&1
+
+      - name: Deploy verified CI artifact
+        if: steps.candidate.outputs.current == 'true'
+        run: |
+          set -euo pipefail
+          python3 -u ops/deploy_ci.py deploy \
+            --sha "$DEPLOY_SHA" --run-id "$DEPLOY_CI_RUN" --attempt "$DEPLOY_CI_ATTEMPT" \
+            --directory "$RUNNER_TEMP/backend-deploy" \
+            2>&1 | tee "$RUNNER_TEMP/backend-deploy/controller.log"
+
+      - name: Close deployment SSH connection
+        if: ${{ always() }}
+        run: |
+          if [[ -S "$RUNNER_TEMP/backend-ssh" ]]; then
+            ssh -S "$RUNNER_TEMP/backend-ssh" -o BatchMode=yes -o ConnectTimeout=10 -O exit tshb-test >/dev/null 2>&1 || true
+          fi
+
+      - name: Preserve transaction evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: backend-deploy-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/backend-deploy/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 30

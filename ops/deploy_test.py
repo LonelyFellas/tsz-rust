@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Explicit tshb-test release transaction. No workflow or automatic deployment trigger."""
+"""tshb-test release transaction shared by automated and explicitly requested releases."""
 
 import argparse
 import contextlib
+import copy
 import datetime
 import fcntl
 import hashlib
@@ -83,6 +84,8 @@ def check_plan(plan):
                                expected_git_tree=plan["source"]["git_tree"],
                                expected_run_id=plan["ci"]["run_id"],
                                expected_run_attempt=plan["ci"]["run_attempt"])
+    if "artifact_manifest" in plan and plan["artifact_manifest"] != manifest:
+        raise DeploymentError("artifact_manifest_copy_mismatch")
     if plan["source"] != manifest["source"] or any(plan["ci"].get(key) != value for key, value in manifest["ci"].items()):
         raise DeploymentError("plan_differs_from_artifact_identity")
     metadata = json.loads(Path(plan["artifact_metadata_path"]).read_text())
@@ -133,6 +136,13 @@ def check_plan(plan):
         manual_refusal = (evidence.get("status") == "blocked"
                           and evidence.get("failed_stage") == "recovery_refused_requires_manual_plan"
                           and evidence.get("checks", {}).get("recovery_refusal_atomic") == "passed")
+        forward_only = (policy == {"kind": "forward_only"}
+                        and evidence.get("status") == "passed"
+                        and evidence.get("recovery_mode") == "forward_only"
+                        and evidence.get("synthetic_recovery_verified") is False
+                        and evidence.get("rollback_schema_safe") is False
+                        and evidence.get("checks", {}).get("bounded_down") == "not_attempted_forward_only"
+                        and evidence.get("checks", {}).get("old_binary_after_recovery") == "not_attempted_forward_only")
         if (evidence.get("cleanup", {}).get("complete") is not True
                 or evidence.get("candidate_source") != manifest["source"] or evidence.get("candidate_ci") != manifest["ci"]
                 or evidence.get("candidate_artifact_id") != plan["ci"]["artifact_id"]
@@ -142,9 +152,9 @@ def check_plan(plan):
                 or evidence.get("baseline_source", {}).get("git_tree") != baseline["deployment_manifest"]["source"]["git_tree"]
                 or evidence.get("baseline_artifact_sha256") != old_digest
                 or evidence.get("checks", {}).get("upgrade_and_persistence") != "passed"
-                or not (verified_down or (policy.get("kind") == "manual" and manual_refusal))):
+                or not (verified_down or (policy.get("kind") == "manual" and manual_refusal) or forward_only)):
             raise DeploymentError("migration_rehearsal_mismatch")
-        if (policy.get("kind") not in {"verified_down", "manual"}
+        if not forward_only and (policy.get("kind") not in {"verified_down", "manual"}
                 or policy.get("baseline_sha") != baseline["deployment_manifest"]["source"]["git_sha"]
                 or policy.get("candidate_sha") != manifest["source"]["git_sha"]
                 or policy.get("baseline_version") != plan["migration"]["baseline_version"]
@@ -168,11 +178,13 @@ def build_plan(bundle, gate, host, *, recovery_policy=None):
         baseline = host.baseline()
     info = json.loads((folder / "deploy-info.json").read_text())
     from migration_compatibility import migration_interval
-    interval = migration_interval(info, baseline["postgresql"]["migration_ledger"])
+    mode = "forward_only" if recovery_policy == {"kind": "forward_only"} else "verified_down"
+    interval = migration_interval(info, baseline["postgresql"]["migration_ledger"], recovery_mode=mode)
     plan = {
         "schema_version": 1, "environment": "tshb-test", "deployment_id": str(uuid.uuid4()),
         "tools": tools_identity(),
         "source": manifest["source"], "artifact_sha256": manifest["artifact"]["sha256"],
+        "artifact_manifest": copy.deepcopy(manifest),
         "artifact_path": str(folder / "tsz-rust"), "manifest_path": str(manifest_path),
         "artifact_metadata_path": str(folder / "artifact.json"),
         "verification_receipt_path": str(receipt_path),

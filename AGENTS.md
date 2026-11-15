@@ -52,11 +52,12 @@
 
 - 后端发布统一使用精确候选携带的 `ops/deploy_test.py`，按 `.agents/skills/deploy/SKILL.md`
   和其 runbook 执行 `plan/apply/status/resume`；不另拼手工远端发布或回退步骤。
-- Codex 宿主委派项目 `backend_deploy_runner`（`.codex/agents/backend-deploy-runner.toml`），runner 不递归委派；
+- `tshb-test` 常规发布由 `.github/workflows/deploy-tshb-test.yml` 在 main 精确 CI 成功后自动触发，`ops/deploy_ci.py` 调用同一控制器；正常发布不逐次人工确认。纯文档/规则/测试变更经在线核验后跳过；新增迁移使用固定 `forward_only` 自动升级策略，不执行数据库 down。
+- Codex 宿主手动发布委派项目 `backend_deploy_runner`（`.codex/agents/backend-deploy-runner.toml`），runner 不递归委派；
   Claude 会话按用户既有约定直接执行同一控制器流程。两者沿用宿主权限，不能冒充不可用工具或绕过门禁。
 - 仅讨论、询问、评估或准备部署不构成执行授权；提交、推送、合并与部署是独立授权边界。
 - 部署 skill 是来源、配置、备份、恢复、验收和清理门禁的统一入口。真实正常发布已经验收，
-  真实回退尚未演练；不自动故障注入、数据库恢复或启用自动 CD。
+  真实回退尚未演练；不自动故障注入、数据库 down/PITR 或恢复正常业务数据。自动 CD 的当前启用及验收状态见 `docs/features/backend-auto-deploy/README.md`。
 
 ## 技能维护
 

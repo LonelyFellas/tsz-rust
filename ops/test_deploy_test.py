@@ -321,6 +321,35 @@ class ControllerTests(unittest.TestCase):
             with self.assertRaisesRegex(DeploymentError,'migration_rehearsal_mismatch'):
                 check_plan(plan)
 
+    def test_forward_only_requires_bound_upgrade_evidence_and_cannot_authorize_down(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan, _, _ = plan_fixture(root)
+            plan['migration'].update(candidate_version=2, versions=[2], classification='new_migrations')
+            plan['recovery_policy'] = {'kind': 'forward_only'}
+            evidence = {
+                'status': 'passed', 'recovery_mode': 'forward_only', 'synthetic_recovery_verified': False,
+                'rollback_schema_safe': False, 'cleanup': {'complete': True},
+                'candidate_source': plan['source'],
+                'candidate_ci': json.loads(Path(plan['manifest_path']).read_text())['ci'],
+                'candidate_artifact_id': plan['ci']['artifact_id'], 'candidate_artifact_sha256': plan['artifact_sha256'],
+                'baseline_ledger': plan['baseline']['postgresql']['migration_ledger'], 'interval': plan['migration'],
+                'baseline_source': plan['baseline']['deployment_manifest']['source'],
+                'baseline_artifact_sha256': plan['baseline']['service']['file_sha256'],
+                'checks': {'upgrade_and_persistence': 'passed', 'bounded_down': 'not_attempted_forward_only',
+                           'old_binary_after_recovery': 'not_attempted_forward_only'},
+            }
+            Path(plan['migration_receipt_path']).write_text(json.dumps(evidence))
+            check_plan(plan)
+            for changed in ({'candidate_artifact_sha256': '0' * 64}, {'cleanup': {'complete': False}}):
+                Path(plan['migration_receipt_path']).write_text(json.dumps({**evidence, **changed}))
+                with self.assertRaisesRegex(DeploymentError, 'migration_rehearsal_mismatch'):
+                    check_plan(plan)
+            Path(plan['migration_receipt_path']).write_text(json.dumps(evidence))
+            plan['recovery_policy'] = {'kind': 'verified_down'}
+            with self.assertRaisesRegex(DeploymentError, 'migration_rehearsal_mismatch'):
+                check_plan(plan)
+
     def test_recovery_completed_before_response_loss_does_not_repeat_restore(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
