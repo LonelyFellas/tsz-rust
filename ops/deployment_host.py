@@ -637,8 +637,8 @@ def dispatch(name, plan, credentials):
                             and previous.get("ci", {}).get("run_id") == baseline["ci"]["run_id"]
                             and previous.get("ci", {}).get("artifact_id") == baseline["ci"].get("artifact_id")
                             and previous.get("artifact_manifest")):
-                        require(state(previous).get("accepted") is True, "deployed_artifact_record_not_accepted")
-                        return {"manifest": previous["artifact_manifest"]}
+                        if state(previous).get("accepted") is True:
+                            return {"manifest": previous["artifact_manifest"]}
                 raise HostError("deployed_artifact_manifest_missing")
             for endpoint, expected in (("healthz", "ok"), ("readyz", "ready")):
                 body = json.loads(run(["curl", "--noproxy", "*", "-fsS", "-m", "8", "http://127.0.0.1:8383/" + endpoint]))

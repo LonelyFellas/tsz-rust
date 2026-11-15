@@ -1,3 +1,4 @@
+import copy
 import http.client
 import io
 import json
@@ -5,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -281,6 +283,34 @@ class HostOperationTests(unittest.TestCase):
                     host.atomic(archived, changed)
                     with self.assertRaisesRegex(host.HostError, 'remote_state_mismatch'):
                         host.dispatch('baseline_artifact_manifest', request, None)
+
+    def test_failed_retry_archive_does_not_hide_accepted_artifact_in_either_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root), patch.object(host, 'FRONTEND_TRANSACTION', root / 'frontend-transaction'):
+                failed = self.prepare(root)
+                self.acquire(failed)
+                host.LOCK.rename(host.transaction(failed) / 'released-lock')
+                request = {'deployment_id': failed['deployment_id'], 'baseline': {
+                    'deployment_manifest': {'source': failed['source'], 'artifact': {'sha256': failed['artifact_sha256']},
+                                            'ci': {'run_id': failed['ci']['run_id'], 'artifact_id': failed['ci']['artifact_id']}},
+                    'service': {'file_sha256': failed['artifact_sha256']}}}
+                with patch.object(host, 'baseline_matches'), patch.object(host.auth, 'check_formal'):
+                    with self.assertRaisesRegex(host.HostError, 'deployed_artifact_manifest_missing'):
+                        host.dispatch('baseline_artifact_manifest', request, None)
+                accepted = copy.deepcopy(failed)
+                accepted['deployment_id'] = str(uuid.uuid4())
+                self.acquire(accepted)
+                value = host.state(accepted)
+                value['accepted'] = True
+                host.atomic(host.state_path(accepted), value)
+                host.LOCK.rename(host.transaction(accepted) / 'released-lock')
+                paths = [host.transaction(item) / 'plan.json' for item in (failed, accepted)]
+                for order in (paths, list(reversed(paths))):
+                    with self.subTest(order=order), patch.object(Path, 'glob', return_value=iter(order)), \
+                         patch.object(host, 'baseline_matches'), patch.object(host.auth, 'check_formal'):
+                        result = host.dispatch('baseline_artifact_manifest', request, None)
+                        self.assertEqual(result['manifest'], accepted['artifact_manifest'])
 
     def test_recovery_acceptance_checks_full_manifest_and_owned_smoke_receipts(self):
         with tempfile.TemporaryDirectory() as directory:
