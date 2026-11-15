@@ -1,16 +1,53 @@
 //! Independent, locale-scoped sentence drafts; never resolves legacy sentence identities.
-use super::{audio, language, model::NextDraft, sentence_model::*};
+use super::{audio, language, model::NextDraft, sentence_details, sentence_model::*};
 use crate::{
     admin::{AdminAuth, permissions},
     api::{ApiJson, ApiPath, ApiQuery},
     error::{AppError, ErrorCode},
     state::AppState,
 };
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode, header::VARY},
+    response::{IntoResponse, Response},
+};
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row};
 use std::collections::HashSet;
 use uuid::Uuid;
+
+const DETAILS_HEADER: &str = "x-tsz-next-sentence-details";
+
+pub(super) fn supports_details(headers: &HeaderMap) -> bool {
+    headers
+        .get(DETAILS_HEADER)
+        .is_some_and(|value| value == "v1")
+}
+fn for_client(mut sentence: NextSentence, headers: &HeaderMap) -> NextSentence {
+    if !supports_details(headers) {
+        for variant in &mut sentence.draft.variants {
+            variant.metadata = None;
+            for translation in &mut variant.translations {
+                translation.metadata = None;
+            }
+        }
+    }
+    sentence
+}
+fn require_details(
+    variant: &NextSentenceVariant,
+    medium: &str,
+    headers: &HeaderMap,
+) -> Result<(), AppError> {
+    if !supports_details(headers) && sentence_details::has_details(variant, medium) {
+        return Err(AppError::unprocessable(
+            ErrorCode::InvalidRequestBody,
+            "例句包含新版自由度、标签或来源，请刷新页面后编辑；当前输入已保留",
+        ));
+    }
+    Ok(())
+}
 
 const LEVELS: &[&str] = &["A1", "A2", "B1", "B2", "C1", "C2"];
 const SELECT: &str = "SELECT s.id,s.target_language,s.owner_id,s.revision,s.updated_at,s.document,(SELECT count(*) FROM lexicon_next.sentence_references r WHERE r.sentence_id=s.id) AS reference_count FROM lexicon_next.sentences s";
@@ -144,6 +181,7 @@ async fn prepare(
     draft: &mut NextSentenceDraft,
     changed_locale: &str,
 ) -> Result<(), AppError> {
+    sentence_details::persist_taxonomies(conn, id, draft).await?;
     for variant in &draft.variants {
         node(conn, variant.id, id, "variant", &variant.locale, None).await?;
         for translation in &variant.translations {
@@ -198,24 +236,32 @@ async fn prepare(
     Ok(())
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon-next/sentences/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,body=NextSentence),(status=401),(status=403),(status=404)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon-next/sentences/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("x-tsz-next-sentence-details"=Option<String>, Header, description="v1 negotiates sentence_details: freedom, taxonomy and manual source metadata. Omission hides metadata; legacy writes to enhanced content are refused.")),responses((status=200,body=NextSentence),(status=401),(status=403),(status=404)))]
 pub async fn read(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
-) -> Result<Json<NextSentence>, AppError> {
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("sentences.access")?;
-    Ok(Json(get(&state.pool, id).await?))
+    Ok((
+        [(VARY, DETAILS_HEADER)],
+        Json(for_client(get(&state.pool, id).await?, &headers)),
+    )
+        .into_response())
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon-next/sentences",tag="admin-lexicon-next",security(("bearer_auth"=[])),request_body=CreateNextSentence,responses((status=201,body=NextSentence),(status=401),(status=403),(status=409),(status=422)))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon-next/sentences",tag="admin-lexicon-next",security(("bearer_auth"=[])),request_body=CreateNextSentence,params(("x-tsz-next-sentence-details"=Option<String>, Header, description="v1 negotiates sentence_details: freedom, taxonomy and manual source metadata. Omission hides metadata; legacy writes to enhanced content are refused.")),responses((status=201,body=NextSentence),(status=401),(status=403),(status=409),(status=422)))]
 pub async fn create(
     State(state): State<AppState>,
     auth: AdminAuth,
-    ApiJson(input): ApiJson<CreateNextSentence>,
-) -> Result<(StatusCode, Json<NextSentence>), AppError> {
+    headers: HeaderMap,
+    ApiJson(mut input): ApiJson<CreateNextSentence>,
+) -> Result<Response, AppError> {
+    require_details(&input.variant, &input.medium_locale, &headers)?;
+    sentence_details::normalize(&mut input.variant)?;
     language::require_language(&input.target_language)?;
     scoped_variant(&input.target_locale, &input.medium_locale, &input.variant)?;
     let digest = Sha256::digest(
@@ -276,16 +322,24 @@ pub async fn create(
             .map_err(AppError::internal)?;
     }
     tx.commit().await.map_err(AppError::internal)?;
-    Ok((StatusCode::CREATED, Json(get(&state.pool, input.id).await?)))
+    Ok((
+        StatusCode::CREATED,
+        [(VARY, DETAILS_HEADER)],
+        Json(for_client(get(&state.pool, input.id).await?, &headers)),
+    )
+        .into_response())
 }
 
-#[utoipa::path(put,path="/api/v1/admin/lexicon-next/sentences/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),request_body=SaveNextSentence,responses((status=200,body=NextSentence),(status=401),(status=403),(status=404),(status=409),(status=422)))]
+#[utoipa::path(put,path="/api/v1/admin/lexicon-next/sentences/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("x-tsz-next-sentence-details"=Option<String>, Header, description="v1 negotiates sentence_details: freedom, taxonomy and manual source metadata. Omission hides metadata; legacy writes to enhanced content are refused.")),request_body=SaveNextSentence,responses((status=200,body=NextSentence),(status=401),(status=403),(status=404),(status=409),(status=422)))]
 pub async fn save(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
+    headers: HeaderMap,
     ApiJson(mut input): ApiJson<SaveNextSentence>,
-) -> Result<Json<NextSentence>, AppError> {
+) -> Result<Response, AppError> {
+    require_details(&input.variant, &input.medium_locale, &headers)?;
+    sentence_details::normalize(&mut input.variant)?;
     if input.expected_revision < 1 {
         return Err(language::invalid());
     }
@@ -318,6 +372,23 @@ pub async fn save(
         .position(|v| v.locale == input.target_locale)
     {
         let previous = &draft.variants[position];
+        require_details(previous, &input.medium_locale, &headers)?;
+        if previous.metadata.is_some() && input.variant.metadata.is_none()
+            || previous.translations.iter().any(|row| {
+                row.locale == input.medium_locale
+                    && row.metadata.is_some()
+                    && input
+                        .variant
+                        .translations
+                        .iter()
+                        .any(|next| next.id == row.id && next.metadata.is_none())
+            })
+        {
+            return Err(AppError::unprocessable(
+                ErrorCode::InvalidRequestBody,
+                "例句扩展字段缺失，请重新加载后保存",
+            ));
+        }
         if previous.id != input.variant.id {
             return Err(AppError::conflict(
                 ErrorCode::StableNodeIdChanged,
@@ -340,7 +411,11 @@ pub async fn save(
     prepare(&mut tx, auth.subject, id, &mut draft, &input.target_locale).await?;
     sqlx::query("UPDATE lexicon_next.sentences SET revision=revision+1,document=$2,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(serde_json::to_value(draft).map_err(AppError::internal)?).execute(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(Json(get(&state.pool, id).await?))
+    Ok((
+        [(VARY, DETAILS_HEADER)],
+        Json(for_client(get(&state.pool, id).await?, &headers)),
+    )
+        .into_response())
 }
 
 fn filter(query: &mut QueryBuilder<Postgres>, selection: &NextSentenceQuery) {

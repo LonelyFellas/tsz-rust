@@ -4107,6 +4107,16 @@ async fn sentence_client(
     path: &str,
     body: Value,
 ) -> (StatusCode, Value) {
+    sentence_client_details(state, actor, method, path, body, false).await
+}
+async fn sentence_client_details(
+    state: &AppState,
+    actor: Uuid,
+    method: &str,
+    path: &str,
+    body: Value,
+    details: bool,
+) -> (StatusCode, Value) {
     let response = tsz_rust::router(state.clone())
         .oneshot(
             Request::builder()
@@ -4114,6 +4124,10 @@ async fn sentence_client(
                 .uri(format!("{ROOT}{path}"))
                 .header("content-type", "application/json")
                 .header("x-tsz-next-sentences", "v1")
+                .header(
+                    "x-tsz-next-sentence-details",
+                    if details { "v1" } else { "unknown" },
+                )
                 .header("x-tsz-next-forms", "v1")
                 .header(
                     "authorization",
@@ -4144,6 +4158,170 @@ const SENTENCE_EDIT: &[&str] = &[
     "sentences.create",
     "sentences.edit",
 ];
+
+#[sqlx::test]
+async fn next_sentence_details_persist_negotiate_validate_and_protect_taxonomies(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool, SENTENCE_EDIT).await;
+    let register = equivalent_taxonomy(&pool, "registers", "sentence_spoken").await;
+    let domain = equivalent_taxonomy(&pool, "domains", "sentence_business").await;
+    let id = Uuid::now_v7();
+    let source = json!({"id":Uuid::now_v7(),"source_type":"dictionary","title":"人工登记的资料","url":"https://example.com/entry","locator":"例句 2"});
+    let mut uk = sentence_variant("en-GB", "zh-Hans", "It is in the centre.");
+    uk["metadata"] = json!({"register_ids":[register],"domain_ids":[domain],"sources":[source]});
+    uk["translations"][0]["metadata"] = json!({"freedom":33.4,"sources":[]});
+    let input = json!({"id":id,"target_language":"en","target_locale":"en-GB","medium_locale":"zh-Hans","variant":uk});
+    assert_eq!(
+        sentence_client(&state, actor, "POST", "/sentences", input.clone())
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (status, created) =
+        sentence_client_details(&state, actor, "POST", "/sentences", input.clone(), true).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["draft"]["variants"][0]["translations"][0]["style"],
+        "balanced_fluency"
+    );
+    assert_eq!(
+        sentence_client_details(&state, actor, "POST", "/sentences", input, true)
+            .await
+            .1["revision"],
+        1
+    );
+    let path = format!("/sentences/{id}");
+    let old = sentence_client(&state, actor, "GET", &path, Value::Null)
+        .await
+        .1;
+    assert!(old["draft"]["variants"][0].get("metadata").is_none());
+    assert!(
+        old["draft"]["variants"][0]["translations"][0]
+            .get("metadata")
+            .is_none()
+    );
+    let old_write = json!({"expected_revision":1,"target_locale":"en-GB","medium_locale":"zh-Hans","variant":old["draft"]["variants"][0]});
+    assert_eq!(
+        sentence_client(&state, actor, "PUT", &path, old_write)
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        sentence_client_details(&state, actor, "GET", &path, Value::Null, true)
+            .await
+            .1,
+        created
+    );
+    let us = sentence_variant("en-US", "zh-Hans", "It is in the center.");
+    let (status, saved) = sentence_client_details(&state,actor,"PUT",&path,json!({"expected_revision":1,"target_locale":"en-US","medium_locale":"zh-Hans","variant":us}),true).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["draft"]["variants"][0],
+        created["draft"]["variants"][0]
+    );
+    let mut traditional = saved["draft"]["variants"][0].clone();
+    traditional["translations"] =
+        sentence_variant("en-GB", "zh-Hant", "unused")["translations"].clone();
+    traditional["translations"][0]["metadata"] = json!({"freedom":100.0,"sources":[]});
+    let (status,saved) = sentence_client_details(&state,actor,"PUT",&path,json!({"expected_revision":2,"target_locale":"en-GB","medium_locale":"zh-Hant","variant":traditional}),true).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["draft"]["variants"][0]["translations"][0]["style"],
+        "adapted_creation"
+    );
+    assert_eq!(
+        saved["draft"]["variants"][0]["translations"][1],
+        created["draft"]["variants"][0]["translations"][0]
+    );
+    let stored: Value =
+        sqlx::query_scalar("SELECT document FROM lexicon_next.sentences WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, saved["draft"]);
+    let refs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon_next.sentence_taxonomy_refs WHERE sentence_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(refs, 2);
+    assert!(
+        sqlx::query("DELETE FROM catalog.lexicon_taxonomies WHERE id=$1")
+            .bind(domain)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    for translation_metadata in [false, true] {
+        let mut bad = uk.clone();
+        if translation_metadata {
+            bad["translations"][0]["metadata"] = Value::Null;
+        } else {
+            bad["metadata"] = Value::Null;
+        }
+        assert_eq!(sentence_client_details(&state, actor, "PUT", &path, json!({"expected_revision":3,"target_locale":"en-GB","medium_locale":"zh-Hans","variant":bad}), true).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    for invalid in [json!(33.33), json!(-0.1), json!(100.1)] {
+        let mut bad = uk.clone();
+        bad["translations"][0]["metadata"]["freedom"] = invalid;
+        let (status, _) = sentence_client_details(&state,actor,"PUT",&path,json!({"expected_revision":3,"target_locale":"en-GB","medium_locale":"zh-Hans","variant":bad}),true).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    for (field, value) in [("url", "javascript:alert(1)"), ("title", "")] {
+        let mut bad = uk.clone();
+        bad["metadata"]["sources"][0][field] = json!(value);
+        assert_eq!(sentence_client_details(&state,actor,"PUT",&path,json!({"expected_revision":3,"target_locale":"en-GB","medium_locale":"zh-Hans","variant":bad}),true).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let mut wrong_kind = uk.clone();
+    wrong_kind["metadata"]["register_ids"] = json!([domain]);
+    assert_eq!(sentence_client_details(&state,actor,"PUT",&path,json!({"expected_revision":3,"target_locale":"en-GB","medium_locale":"zh-Hans","variant":wrong_kind}),true).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        sentence_client_details(&state, actor, "GET", &path, Value::Null, true)
+            .await
+            .1,
+        saved
+    );
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261115140000_next_sentence_taxonomies.down.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    );
+    tx.rollback().await.unwrap();
+    sqlx::query("DELETE FROM lexicon_next.sentences WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM lexicon_next.sentence_taxonomy_refs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261115140000_next_sentence_taxonomies.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261115140000_next_sentence_taxonomies.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+}
 #[sqlx::test]
 async fn next_sentences_scope_revision_permissions_and_idempotence(pool: PgPool) {
     let actor = admin(&pool, SENTENCE_EDIT).await;

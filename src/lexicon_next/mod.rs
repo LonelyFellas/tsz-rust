@@ -10,6 +10,7 @@ pub mod language;
 pub mod list_model;
 pub mod model;
 mod repository;
+mod sentence_details;
 pub mod sentence_model;
 pub mod sentences;
 mod workspace;
@@ -92,6 +93,9 @@ pub async fn capabilities(
         .await?
         .require("words.access")?;
     let mut capability = language::capabilities();
+    if sentences::supports_details(&headers) {
+        capability.sentence_details = Some(true);
+    }
     if supports_sentences(&headers) {
         capability.sentences = Some(true);
     }
