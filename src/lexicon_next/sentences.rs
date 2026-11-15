@@ -492,12 +492,24 @@ pub(super) async fn persist_references(
         .collect::<Vec<_>>();
     ids.sort();
     ids.dedup();
-    let previous_ids = previous
+    let previous_references = previous
         .senses
         .iter()
-        .flat_map(|s| s.sentence_ids.iter().flatten())
+        .flat_map(|sense| {
+            sense
+                .sentence_ids
+                .iter()
+                .flatten()
+                .map(move |id| (sense.id, *id))
+        })
         .collect::<HashSet<_>>();
-    if ids.iter().any(|id| !previous_ids.contains(id)) {
+    if draft.senses.iter().any(|sense| {
+        sense
+            .sentence_ids
+            .iter()
+            .flatten()
+            .any(|id| !previous_references.contains(&(sense.id, *id)))
+    }) {
         permissions::lock(tx, actor)
             .await?
             .require("sentences.access")?;

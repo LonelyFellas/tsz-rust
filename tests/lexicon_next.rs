@@ -4427,3 +4427,72 @@ async fn next_sentence_audio_is_canonical_exclusive_readable_and_protected_from_
         .unwrap();
     assert_eq!(count, 0);
 }
+
+#[sqlx::test]
+async fn next_sentence_new_sense_reference_requires_access_but_keep_and_remove_do_not(
+    pool: PgPool,
+) {
+    let actor = admin(&pool, SENTENCE_EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let sentence = Uuid::now_v7();
+    assert_eq!(sentence_client(&state,actor,"POST","/sentences",json!({"id":sentence,"target_language":"en","target_locale":"en-GB","medium_locale":"zh-Hans","variant":sentence_variant("en-GB","zh-Hans","Shared example.")})).await.0,StatusCode::CREATED);
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut content = draft();
+    content["senses"][0]["sentence_ids"] = json!([sentence]);
+    content["senses"].as_array_mut().unwrap().push(json!({"id":Uuid::now_v7(),"part_of_speech":"noun","definitions":[],"equivalents":[],"sentence_ids":[]}));
+    let (status, saved) = sentence_client(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.access'").bind(actor).execute(&pool).await.unwrap();
+    let (status, kept) = sentence_client(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":saved["draft"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    let mut added = kept["draft"].clone();
+    added["senses"][1]["sentence_ids"] = json!([sentence]);
+    let (status, denied) = sentence_client(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":added}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let current = sentence_client(&state, actor, "GET", &path, Value::Null)
+        .await
+        .1;
+    assert_eq!(current["revision"], 3);
+    assert_eq!(current["draft"]["senses"][1]["sentence_ids"], json!([]));
+    let mut removed = kept["draft"].clone();
+    removed["senses"][0]["sentence_ids"] = json!([]);
+    let (status, saved) = sentence_client(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":removed}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let refs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon_next.sentence_references WHERE sentence_id=$1",
+    )
+    .bind(sentence)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(refs, 0);
+}
