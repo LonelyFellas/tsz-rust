@@ -403,3 +403,15 @@ TASK#190 与后续 #402 的耦合：录音 `is_default` 保留 absent／true／f
 主记录与验收位于前端 `tsz/docs/features/lexicon-sense-metadata/README.md`。`NextSense` 和语言视图增加可选、非 null 的 `level`、`frequency`（十进制字符串）、`depends_on_context`，通过现有草稿 JSONB 保存，无迁移；等级及 0–100 / 最多两位小数的词频规则复用 V1 校验。
 
 协商 `x-tsz-next-sense-metadata: v1` 后能力目录返回 `sense_metadata: true`。旧客户端响应省略扩展，旧写入按稳定义项 ID 保留已保存总体数据；新客户端可清空词频。等级筛选使用当前保存版本。先发后端再发前端；出现新字段草稿后不可直接回退到不认识这些字段的旧后端二进制。AI 生成和审核不在本轮范围。
+
+
+### 新版词库：媒介语译词元数据
+
+配套主记录：前端 `docs/features/lexicon-medium-equivalents/README.md`。首批仅手工编辑，不开放 AI 生成或审核。
+
+- `x-tsz-next-equivalents: v1` 协商后，capabilities 返回 `equivalent_metadata: true`；译词可带 `metadata: { register_ids, domain_ids, commonness }`。未协商读取省略扩展，保存按稳定译词 ID 保留隐藏元数据；已有译词不能改媒介语。
+- 独立评分为 `{ domain_id?, score, assessed_at? }`，省略 domain_id 表示通用维度。score 为 0.1–99.9、最多一位小数的十进制字符串，响应规范为一位小数。assessed_at 由服务端维护，当前写入均为人工估计；继承分不存储。
+- `NextSense.no_equivalents` 为明确无译词的媒介语列表；同语言不可同时有译词。语言 view 返回当前媒介语的布尔值，并据此区分缺项。
+- `GET /api/v1/admin/lexicon-next/equivalent-catalog` 需要 words.access，一次返回完整 registers/domains 两类选项，无配置管理权限的词库用户可读取，目录管理权限不变。
+- 新迁移 `20261115100000` 增加当前元数据投影和按保留 revision 的真实目录引用。被当前/历史引用的目录删除返回 409 taxonomy_conflict；永久删除词条后引用随 revision 清理。保存与目录删除由行锁及外键保护。
+- 先发布后端再发布前端；已产生扩展快照后 down 明确拒绝，需要兼容的数据回退方案，不能直接运行拒绝未知字段的旧二进制。
