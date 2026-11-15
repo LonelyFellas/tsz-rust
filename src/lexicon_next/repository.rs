@@ -172,6 +172,7 @@ pub(super) async fn node(
     Ok(())
 }
 pub(super) struct SaveCapabilities {
+    pub relations: bool,
     pub grammar_audio: bool,
     pub sense_metadata: bool,
     pub equivalent_metadata: bool,
@@ -232,6 +233,8 @@ pub async fn save(
     }
     super::definitions::validate(draft)?;
     super::sentences::preserve(draft, &previous.draft, capabilities.sentences)?;
+    super::relations::prepare(conn, id, draft, &previous, capabilities.relations).await?;
+    language::validate(&language, draft)?;
     let taxonomy_refs = super::equivalents::prepare(
         conn,
         draft,
@@ -330,6 +333,9 @@ pub async fn save(
         .execute(&mut *conn)
         .await
         .map_err(AppError::internal)?;
+        for relation in sense.relations.iter().flatten() {
+            node(conn, relation.id, id, "relation", Some(sense.id)).await?;
+        }
         for (order, definition) in sense.definitions.iter().enumerate() {
             node(conn, definition.id, id, "definition", Some(sense.id)).await?;
             let style = match definition.style {

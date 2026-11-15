@@ -4674,3 +4674,6 @@ async fn next_sentence_new_sense_reference_requires_access_but_keep_and_remove_d
     .unwrap();
     assert_eq!(refs, 0);
 }
+
+#[path = "lexicon_next/relations.rs"]
+mod relations;
