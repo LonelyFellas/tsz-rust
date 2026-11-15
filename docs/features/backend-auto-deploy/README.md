@@ -27,6 +27,28 @@
 
 真实 Linux CI 制品 `16478dd6` → `2f836b61` 的隔离升级通过，覆盖迁移 `20261115120000` 与已有草稿持久化回读；环境为 PostgreSQL 18.6 / Redis 6.0.20。未执行 down 或调用语音供应商，测试服写入为零。临时容器、网络、下载制品及原始材料已清理，独立复查资源 owner 无残留。该证据只覆盖合成 fixture 的升级，不代表真实数据库恢复或最终发布版本已验收。
 
-四项仓库 SSH Secrets 已配置，专用发布 key 登录验证通过，临时私钥与 known-hosts 材料已清理。服务器只读基线为 `55579dc77112176c4b3c74081c1801f58ff2a5d7`、PostgreSQL 18.6、175 条迁移。此时尚未执行本任务真实发布。
+四项仓库 SSH Secrets 已配置，专用发布 key 登录验证通过，临时私钥与 known-hosts 材料已清理。首次发布前服务器基线为 `55579dc77112176c4b3c74081c1801f58ff2a5d7`、PostgreSQL 18.6、175 条迁移。
 
-已无冲突合入主线 #424 的例句维度功能及迁移；首次发布按实际在线账本判断迁移区间。精确提交独立审查正在进行，剩余为审查收尾、PR/main CI 与首次自动发布验收。
+实现由 [PR #425](https://github.com/LonelyFellas/tsz-rust/pull/425) 合并，精确审查提交为 `0006a6f47cffadc9315b4f60f2faebb1bcba5ec4`。审查：2 轮；确认缺陷 1（失败归档遮蔽重试成功归档，已修复）；证据排除误报 0；未解决 P0–P2 为 0；关联回归/回退：未知。修复后的 31 项定向检查通过。
+
+## 首次自动发布验收（2026-11-15）
+
+自动 CD 已启用并完成一次自然触发的真实发布；正常版本不逐次人工确认。
+
+| 证据 | 实际结果 |
+| --- | --- |
+| PR CI | [43713335083/1](https://github.com/LonelyFellas/tsz-rust/actions/runs/43713335083) 成功；PR 的制品构建/验证按设计跳过 |
+| main CI | [43714265026/1](https://github.com/LonelyFellas/tsz-rust/actions/runs/43714265026) 的 18 个 job 全部成功 |
+| 自动部署 | [43715087536/1](https://github.com/LonelyFellas/tsz-rust/actions/runs/43715087536) 由 `workflow_run` 触发并成功；job 95 秒，driver 80.807 秒，服务器构建 0 |
+| 在线 SHA / tree | `de8e84eb29c4d852e161e7c310b3536a37f3c199` / `40fea8d662b9a76292ae928f311026583ffa7bda` |
+| 原始制品 | artifact `14160944899`，生产/验证 attempt 均为 1；二进制 70,117,480 字节 |
+| 二进制 SHA256 | `95bf110125478f82136ad51cf1d923a0b93dbb134ed5a79e139b7dc398542df9`；正式进程、磁盘与 accepted manifest 一致 |
+| 发布事务 | `d00f4bfe-a550-45c0-992c-697cd5b186f7`；原始计划和 manifest 已远端归档，最终 `accepted` |
+| 迁移 | 自动采用 `forward_only`，升级 `20261115140000`，账本从 175 条到 176 条；未执行 down |
+| 备份 | 已有独立定时备份状态 `passed`，未现场重新导出整库 |
+| 正式验收 | 候选/正式 HTTPS 鉴权、草稿创建→新请求读取→修改→新请求读取均通过 |
+| 独立清理复查 | 3 份 fixture 的账号、会话、角色、草稿及相关外键/幂等/词项引用和 Redis 账号键无残留；候选进程退出，owner 锁释放 |
+| 正常数据与配置 | 发布前保存的 3 份正常词表摘要、`.env`/nginx/Web/Admin 的 8 项文件指纹均未变 |
+| Actions 证据 | 19 个文件，保留 bundle、计划、状态和结果；归档 58,003,709 字节，SHA256 `e4cd338c1d307199fa3d02ed4aa54563d254c1a5495495c99b80c718e86bfa5b` |
+
+本次真实迁移升级成功不代表真实数据库回退或 PITR 已演练。没有语音生成、试听或供应商验收。纯文档收尾仅回填本记录，后续 main CI 成功后应只读核验并以 `verified_inputs_unchanged` 跳过发布；实际运行回执以关联 PR 的验收记录为准。
