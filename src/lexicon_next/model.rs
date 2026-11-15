@@ -126,6 +126,13 @@ pub struct NextEquivalentScore {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextSense {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_sentence_ids"
+    )]
+    #[schema(nullable = false)]
+    pub sentence_ids: Option<Vec<Uuid>>,
     /// Locales explicitly declared to have no suitable equivalents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_equivalents: Vec<String>,
@@ -304,6 +311,9 @@ pub struct NextLanguageCapability {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sentences: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub definition_details: Option<bool>,
@@ -385,6 +395,9 @@ pub struct NextEntryList {
 pub struct NextSenseView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub sentence_ids: Option<Vec<Uuid>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub no_equivalents: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -461,10 +474,16 @@ fn non_null_sub_pos<'de, D: serde::Deserializer<'de>>(
     String::deserialize(deserializer).map(Some)
 }
 
-fn non_null_voice_profile<'de, D: serde::Deserializer<'de>>(
+pub(super) fn non_null_voice_profile<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<crate::lexicon::dto::VoiceProfileV3>, D::Error> {
     crate::lexicon::dto::VoiceProfileV3::deserialize(deserializer).map(Some)
+}
+
+fn non_null_sentence_ids<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<Uuid>>, D::Error> {
+    Vec::<Uuid>::deserialize(deserializer).map(Some)
 }
 
 fn non_null_bool<'de, D: serde::Deserializer<'de>>(

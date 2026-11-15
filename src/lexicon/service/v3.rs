@@ -4547,7 +4547,8 @@ async fn validate_requested_audio_assets(
                ) OR EXISTS (
                    SELECT 1 FROM lexicon.shared_sentence_audio_asset_references reference
                    WHERE reference.asset_id = asset.id
-               ) OR EXISTS (SELECT 1 FROM lexicon_next.audio_asset_references reference WHERE reference.asset_id=asset.id) AS taken
+               ) OR EXISTS (SELECT 1 FROM lexicon_next.audio_asset_references reference WHERE reference.asset_id=asset.id)
+               OR EXISTS (SELECT 1 FROM lexicon_next.sentence_audio_asset_references reference WHERE reference.asset_id=asset.id) AS taken
         FROM lexicon.audio_assets asset
         WHERE asset.id = ANY($1) AND asset.reclamation_started_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=asset.id AND g.state<>'ready')
