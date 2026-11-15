@@ -303,6 +303,10 @@ use utoipa::{
         crate::lexicon_next::read,
         crate::lexicon_next::save,
         crate::lexicon_next::view,
+        crate::lexicon_next::sentences::list,
+        crate::lexicon_next::sentences::read,
+        crate::lexicon_next::sentences::create,
+        crate::lexicon_next::sentences::save,
         // lexicon 域
         crate::lexicon::handler::query::list,
         crate::lexicon::handler::query::related_search,

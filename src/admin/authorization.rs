@@ -117,6 +117,26 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "GET",
+        "/lexicon-next/sentences",
+        RoutePolicy::All(&["sentences.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon-next/sentences",
+        RoutePolicy::All(&["sentences.create"]),
+    ),
+    (
+        "GET",
+        "/lexicon-next/sentences/{id}",
+        RoutePolicy::All(&["sentences.access"]),
+    ),
+    (
+        "PUT",
+        "/lexicon-next/sentences/{id}",
+        RoutePolicy::All(&["sentences.edit"]),
+    ),
+    (
+        "GET",
         "/lexicon-next/capabilities",
         RoutePolicy::All(&["words.access"]),
     ),

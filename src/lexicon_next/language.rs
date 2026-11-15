@@ -20,6 +20,7 @@ pub(super) const POS: &[&str] = &[
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
         definition_details: None,
+        sentences: None,
         equivalent_metadata: None,
         sense_metadata: None,
         grammar_audio: None,
@@ -259,6 +260,7 @@ pub fn view(
                 .cloned()
                 .collect();
             NextSenseView {
+                sentence_ids: sense.sentence_ids.clone(),
                 no_equivalents: Some(sense.no_equivalents.contains(&selection.medium_locale)),
                 level: sense.level.clone(),
                 frequency: sense.frequency.clone(),

@@ -6,6 +6,12 @@ use sqlx::{PgConnection, Row};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+#[derive(Clone, Copy)]
+pub(super) enum Owner {
+    Entry(Uuid),
+    Sentence(Uuid),
+}
+
 pub(super) async fn persist(
     conn: &mut PgConnection,
     actor: Uuid,
@@ -13,7 +19,23 @@ pub(super) async fn persist(
     draft: &mut NextDraft,
 ) -> Result<(), AppError> {
     let mut serialized = serde_json::to_value(&*draft).map_err(AppError::internal)?;
-    let mut ids = crate::speech::generated_references::asset_references(&serialized)
+    persist_value(conn, actor, Owner::Entry(entry), &mut serialized).await?;
+    *draft = serde_json::from_value(serialized).map_err(AppError::internal)?;
+    super::grammar::validate_audio_scope(draft)?;
+    super::definitions::validate(draft)
+}
+
+pub(super) async fn persist_value(
+    conn: &mut PgConnection,
+    actor: Uuid,
+    owner: Owner,
+    serialized: &mut Value,
+) -> Result<(), AppError> {
+    let (entry, sentence) = match owner {
+        Owner::Entry(id) => (id, false),
+        Owner::Sentence(id) => (id, true),
+    };
+    let mut ids = crate::speech::generated_references::asset_references(serialized)
         .into_iter()
         .flat_map(|(_, ids)| ids)
         .collect::<HashSet<_>>();
@@ -38,7 +60,7 @@ pub(super) async fn persist(
         }
         Ok(())
     }
-    recording_ids(&serialized, &mut ids)?;
+    recording_ids(serialized, &mut ids)?;
     let ids = ids.into_iter().collect::<Vec<_>>();
     // Lock before checking references: both reclamation and other claimants serialize here.
     sqlx::query("SELECT id FROM lexicon.audio_assets WHERE id=ANY($1) ORDER BY id FOR UPDATE")
@@ -47,14 +69,16 @@ pub(super) async fn persist(
         .await
         .map_err(AppError::internal)?;
     let rows = sqlx::query(r#"SELECT a.id,
-      (a.created_by_admin_id=$2 OR EXISTS(SELECT 1 FROM lexicon_next.audio_asset_references r WHERE r.asset_id=a.id AND r.entry_id=$3)) AS accessible,
-      (EXISTS(SELECT 1 FROM lexicon_next.audio_asset_references r WHERE r.asset_id=a.id AND r.entry_id<>$3)
+      (a.created_by_admin_id=$2 OR EXISTS(SELECT 1 FROM lexicon_next.audio_asset_references r WHERE r.asset_id=a.id AND r.entry_id=$3 AND NOT $4)
+       OR EXISTS(SELECT 1 FROM lexicon_next.sentence_audio_asset_references r WHERE r.asset_id=a.id AND r.sentence_id=$3 AND $4)) AS accessible,
+      (EXISTS(SELECT 1 FROM lexicon_next.audio_asset_references r WHERE r.asset_id=a.id AND (r.entry_id<>$3 OR $4))
+       OR EXISTS(SELECT 1 FROM lexicon_next.sentence_audio_asset_references r WHERE r.asset_id=a.id AND (r.sentence_id<>$3 OR NOT $4))
        OR EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references r WHERE r.asset_id=a.id)
        OR EXISTS(SELECT 1 FROM lexicon.shared_sentence_audio_asset_references r WHERE r.asset_id=a.id)) AS taken,
       jsonb_build_object('id',a.id,'locale',a.locale,'gender',a.gender,'content_type',a.content_type,'size_bytes',a.size_bytes,'duration_ms',a.duration_ms,'original_name',a.original_name,'created_at',a.created_at) AS metadata
       FROM lexicon.audio_assets a WHERE a.id=ANY($1) AND a.reclamation_started_at IS NULL
       AND NOT EXISTS(SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=a.id AND g.state<>'ready')"#)
-        .bind(&ids).bind(actor).bind(entry).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
+        .bind(&ids).bind(actor).bind(entry).bind(sentence).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
     let mut canonical = std::collections::HashMap::new();
     for row in rows {
         if !row.get::<bool, _>("accessible") || row.get::<bool, _>("taken") {
@@ -95,24 +119,29 @@ pub(super) async fn persist(
         }
         Ok(())
     }
-    hydrate(&mut serialized, &canonical)?;
-    *draft = serde_json::from_value(serialized).map_err(AppError::internal)?;
-    super::grammar::validate_audio_scope(draft)?;
-    super::definitions::validate(draft)?;
-    sqlx::query("DELETE FROM lexicon_next.audio_asset_references WHERE entry_id=$1")
+    hydrate(serialized, &canonical)?;
+    let (delete, insert) = match owner {
+        Owner::Entry(_) => (
+            "DELETE FROM lexicon_next.audio_asset_references WHERE entry_id=$1",
+            "INSERT INTO lexicon_next.audio_asset_references(entry_id,asset_id) VALUES($1,$2)",
+        ),
+        Owner::Sentence(_) => (
+            "DELETE FROM lexicon_next.sentence_audio_asset_references WHERE sentence_id=$1",
+            "INSERT INTO lexicon_next.sentence_audio_asset_references(sentence_id,asset_id) VALUES($1,$2)",
+        ),
+    };
+    sqlx::query(delete)
         .bind(entry)
         .execute(&mut *conn)
         .await
         .map_err(AppError::internal)?;
     for asset in ids {
-        sqlx::query(
-            "INSERT INTO lexicon_next.audio_asset_references(entry_id,asset_id) VALUES($1,$2)",
-        )
-        .bind(entry)
-        .bind(asset)
-        .execute(&mut *conn)
-        .await
-        .map_err(AppError::internal)?;
+        sqlx::query(insert)
+            .bind(entry)
+            .bind(asset)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::internal)?;
     }
     Ok(())
 }

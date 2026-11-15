@@ -176,6 +176,7 @@ pub(super) struct SaveCapabilities {
     pub sense_metadata: bool,
     pub equivalent_metadata: bool,
     pub definition_details: bool,
+    pub sentences: bool,
 }
 
 pub async fn save(
@@ -230,6 +231,7 @@ pub async fn save(
         super::definitions::preserve(draft, &previous.draft);
     }
     super::definitions::validate(draft)?;
+    super::sentences::preserve(draft, &previous.draft, capabilities.sentences)?;
     let taxonomy_refs = super::equivalents::prepare(
         conn,
         draft,
@@ -344,6 +346,9 @@ pub async fn save(
         }
     }
     let next_revision = revision.checked_add(1).ok_or_else(language::invalid)?;
+    super::sentences::persist_references(&mut tx, actor, id, &language, draft, &previous.draft)
+        .await?;
+    let conn = &mut *tx;
     snapshot(conn, id, next_revision, actor, draft).await?;
     super::equivalents::persist_refs(conn, id, next_revision, taxonomy_refs).await?;
     sqlx::query("UPDATE lexicon_next.entries SET headword=$2,revision=$3,updated_at=clock_timestamp() WHERE id=$1")

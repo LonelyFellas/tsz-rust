@@ -65,6 +65,7 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
                 text: surface.into(),
             }],
             senses: vec![NextSense {
+                sentence_ids: None,
                 no_equivalents: vec![],
                 level: None,
                 frequency: None,

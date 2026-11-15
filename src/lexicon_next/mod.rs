@@ -10,6 +10,8 @@ pub mod language;
 pub mod list_model;
 pub mod model;
 mod repository;
+pub mod sentence_model;
+pub mod sentences;
 mod workspace;
 
 use crate::{
@@ -44,6 +46,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/capabilities", get(capabilities))
         .route("/equivalent-catalog", get(equivalent_catalog))
+        .route("/sentences", get(sentences::list).post(sentences::create))
+        .route("/sentences/{id}", get(sentences::read).put(sentences::save))
         .route("/detections", axum::routing::post(detect))
         .route("/entry-matches", axum::routing::post(match_entries))
         .route("/entries", get(list).post(create))
@@ -88,6 +92,9 @@ pub async fn capabilities(
         .await?
         .require("words.access")?;
     let mut capability = language::capabilities();
+    if supports_sentences(&headers) {
+        capability.sentences = Some(true);
+    }
     if supports_definitions(&headers) {
         capability.definition_details = Some(true);
     }
@@ -170,6 +177,18 @@ pub async fn save(
     headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<SaveNextDraft>,
 ) -> Result<Json<NextEntry>, AppError> {
+    if !supports_sentences(&headers)
+        && input
+            .draft
+            .senses
+            .iter()
+            .any(|sense| sense.sentence_ids.is_some())
+    {
+        return Err(AppError::unprocessable(
+            crate::error::ErrorCode::CapabilityUnavailable,
+            "sentence references require x-tsz-next-sentences: v1",
+        ));
+    }
     if !supports_definitions(&headers) && definitions::has_details(&input.draft) {
         return Err(AppError::unprocessable(
             crate::error::ErrorCode::CapabilityUnavailable,
@@ -218,6 +237,7 @@ pub async fn save(
                 sense_metadata: supports_sense_metadata(&headers),
                 equivalent_metadata: supports_equivalent_metadata(&headers),
                 definition_details: supports_definitions(&headers),
+                sentences: supports_sentences(&headers),
             },
         )
         .await?,
@@ -251,6 +271,11 @@ pub async fn view(
         Default::default()
     };
     let mut view = language::view(&entry, query, &parents, supports_definitions(&headers))?;
+    if !supports_sentences(&headers) {
+        for sense in &mut view.senses {
+            sense.sentence_ids = None;
+        }
+    }
     if supports_grammar(&headers) {
         view.grammar_issues = entry
             .draft
@@ -346,6 +371,11 @@ fn supports_sense_metadata(headers: &axum::http::HeaderMap) -> bool {
 }
 
 fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> NextEntry {
+    if !supports_sentences(headers) {
+        for sense in &mut entry.draft.senses {
+            sense.sentence_ids = None;
+        }
+    }
     if !supports_definitions(headers) {
         for row in entry
             .draft
@@ -388,6 +418,12 @@ fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> Ne
         }
     }
     entry
+}
+
+fn supports_sentences(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-tsz-next-sentences")
+        .is_some_and(|value| value == "v1")
 }
 
 #[cfg(test)]
