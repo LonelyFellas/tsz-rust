@@ -8,7 +8,7 @@ pub(super) fn validate(draft: &NextDraft, ids: &mut HashSet<Uuid>) -> Result<(),
     let grammars = draft.grammar_structures.as_deref().unwrap_or_default();
     for grammar in grammars {
         language::identity(ids, grammar.id)?;
-        if !language::POS.contains(&grammar.part_of_speech.as_str()) {
+        if !language::valid_pos(&grammar.part_of_speech) {
             return Err(language::invalid());
         }
         let mut locales = HashSet::new();
@@ -84,10 +84,15 @@ pub(super) async fn catalog(conn: &mut PgConnection) -> Result<HashMap<String, S
 pub(super) async fn validate_catalog(
     conn: &mut PgConnection,
     draft: &NextDraft,
+    kind: &str,
 ) -> Result<(), AppError> {
-    if draft.grammar_structures.is_none() {
-        return Ok(());
-    }
+    let codes: Vec<String> = sqlx::query_scalar(
+        "SELECT code::text FROM catalog.parts_of_speech WHERE kind=$1 FOR SHARE",
+    )
+    .bind(kind)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(AppError::internal)?;
     let parents = catalog(conn).await?;
     for (pos, sub) in draft
         .grammar_structures
@@ -101,6 +106,12 @@ pub(super) async fn validate_catalog(
                 .map(|s| (s.part_of_speech.as_deref(), s.sub_pos.as_deref())),
         )
     {
+        if pos.is_some_and(|code| !codes.iter().any(|saved| saved == code)) {
+            return Err(AppError::unprocessable(
+                ErrorCode::InvalidRequestBody,
+                "基本词性不属于当前词条类型，请重新选择",
+            ));
+        }
         if let Some(sub) = sub.filter(|s| !s.is_empty())
             && parents.get(sub).map(String::as_str) != pos
         {

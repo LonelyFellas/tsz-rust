@@ -28,6 +28,8 @@ pub(super) fn select(medium_locale: Option<&str>) -> QueryBuilder<Postgres> {
     ARRAY(SELECT DISTINCT s.part_of_speech FROM lexicon_next.senses s JOIN lexicon_next.nodes n ON n.id=s.id
       WHERE n.entry_id=e.id AND s.part_of_speech IS NOT NULL
       UNION SELECT p->>'pos' FROM jsonb_array_elements(COALESCE(current.document->'form_editor'->'pos','[]'::jsonb)) p ORDER BY 1) AS part_of_speech,
+    ARRAY(SELECT DISTINCT s->>'level' FROM jsonb_array_elements(current.document->'senses') s
+      WHERE s->>'level' IN ('A1','A2','B1','B2','C1','C2') ORDER BY 1) AS levels,
     COALESCE((SELECT d.text FROM lexicon_next.definitions d JOIN lexicon_next.nodes n ON n.id=d.id WHERE n.entry_id=e.id
       AND ("#
     ));
@@ -139,7 +141,7 @@ pub(super) fn validate(query: &NextWorkspaceQuery) -> Result<(), AppError> {
         || query
             .pos
             .as_deref()
-            .is_some_and(|v| !language::POS.contains(&v))
+            .is_some_and(|v| !language::valid_pos(v))
         || query
             .level
             .as_deref()

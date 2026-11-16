@@ -82,7 +82,7 @@ fn sub_part_code_regex() -> &'static Regex {
     REGEX.get_or_init(|| Regex::new(r"^[A-Z][A-Z0-9_-]{0,31}$").expect("valid sub part code regex"))
 }
 
-fn valid_part_code(value: String) -> Result<String, CatalogServiceError> {
+pub(crate) fn valid_part_code(value: String) -> Result<String, CatalogServiceError> {
     if part_code_regex().is_match(&value) {
         Ok(value)
     } else {
