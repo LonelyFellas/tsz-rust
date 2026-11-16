@@ -98,6 +98,15 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<NextEntry, AppError> {
         .ok_or_else(|| AppError::not_found("lexicon-next entry not found"))?
         .entry()
 }
+pub(super) async fn get_on(conn: &mut PgConnection, id: Uuid) -> Result<NextEntry, AppError> {
+    sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
+        .bind(id)
+        .fetch_optional(conn)
+        .await
+        .map_err(AppError::internal)?
+        .ok_or_else(|| AppError::not_found("lexicon-next entry not found"))?
+        .entry()
+}
 pub async fn create(
     pool: &PgPool,
     auth: &AdminAuth,

@@ -104,7 +104,7 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
     let caps = language::capabilities();
     assert_eq!(caps.languages.len(), 1);
     assert_eq!(caps.languages[0].target_language, "en");
-    assert!(!caps.generation && !caps.publishing);
+    assert!(!caps.generation && caps.publishing);
 }
 
 #[test]

@@ -70,11 +70,13 @@ pub(super) async fn persist_value(
         .map_err(AppError::internal)?;
     let rows = sqlx::query(r#"SELECT a.id,
       (a.created_by_admin_id=$2 OR EXISTS(SELECT 1 FROM lexicon_next.audio_asset_references r WHERE r.asset_id=a.id AND r.entry_id=$3 AND NOT $4)
-       OR EXISTS(SELECT 1 FROM lexicon_next.sentence_audio_asset_references r WHERE r.asset_id=a.id AND r.sentence_id=$3 AND $4)) AS accessible,
+       OR EXISTS(SELECT 1 FROM lexicon_next.sentence_audio_asset_references r WHERE r.asset_id=a.id AND r.sentence_id=$3 AND $4)
+       OR EXISTS(SELECT 1 FROM lexicon_next.publication_audio_references r WHERE r.asset_id=a.id AND r.resource_id=$3)) AS accessible,
       (EXISTS(SELECT 1 FROM lexicon_next.audio_asset_references r WHERE r.asset_id=a.id AND (r.entry_id<>$3 OR $4))
        OR EXISTS(SELECT 1 FROM lexicon_next.sentence_audio_asset_references r WHERE r.asset_id=a.id AND (r.sentence_id<>$3 OR NOT $4))
        OR EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references r WHERE r.asset_id=a.id)
-       OR EXISTS(SELECT 1 FROM lexicon.shared_sentence_audio_asset_references r WHERE r.asset_id=a.id)) AS taken,
+       OR EXISTS(SELECT 1 FROM lexicon.shared_sentence_audio_asset_references r WHERE r.asset_id=a.id)
+       OR EXISTS(SELECT 1 FROM lexicon_next.publication_audio_references r WHERE r.asset_id=a.id AND r.resource_id<>$3)) AS taken,
       jsonb_build_object('id',a.id,'locale',a.locale,'gender',a.gender,'content_type',a.content_type,'size_bytes',a.size_bytes,'duration_ms',a.duration_ms,'original_name',a.original_name,'created_at',a.created_at) AS metadata
       FROM lexicon.audio_assets a WHERE a.id=ANY($1) AND a.reclamation_started_at IS NULL
       AND NOT EXISTS(SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=a.id AND g.state<>'ready')"#)

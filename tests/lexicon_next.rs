@@ -2623,7 +2623,7 @@ async fn grammar_rich_variants_bind_subcategories_and_protect_legacy_drafts(pool
     assert!(old_caps.get("grammar_structures").is_none());
     let (_, caps) = call_grammar(&state, actor, "GET", "/capabilities", Value::Null).await;
     assert_eq!(caps["grammar_structures"], true);
-    assert_eq!(caps["publishing"], false);
+    assert_eq!(caps["publishing"], true);
     let entry = create(&state, actor).await;
     let path = format!("/entries/{}", entry["id"].as_str().unwrap());
     let grammar_id = Uuid::now_v7();
@@ -4862,3 +4862,6 @@ async fn unified_sentence_drafts_are_atomic_scoped_and_permission_checked(pool: 
 }
 #[path = "lexicon_next/relations.rs"]
 mod relations;
+
+#[path = "lexicon_next/publications.rs"]
+mod publications;

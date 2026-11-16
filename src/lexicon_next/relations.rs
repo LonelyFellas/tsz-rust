@@ -119,7 +119,7 @@ pub(super) async fn prepare(
                 "SELECT EXISTS(SELECT 1 FROM lexicon_next.entries e
                  JOIN lexicon_next.senses s ON s.id=$2
                  JOIN lexicon_next.nodes n ON n.id=s.id AND n.entry_id=e.id
-                 WHERE e.id=$1 AND e.status='draft' AND e.target_language=$3 AND e.medium_locale=$4)",
+                 WHERE e.id=$1 AND e.status<>'archived' AND e.target_language=$3 AND e.medium_locale=$4)",
             ).bind(target).bind(row.target_sense_id).bind(&previous.target_language)
                 .bind(&previous.medium_locale).fetch_one(&mut *conn).await.map_err(AppError::internal)?;
             if !valid {

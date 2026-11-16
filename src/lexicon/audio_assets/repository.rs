@@ -88,6 +88,8 @@ impl AudioAssetRepository {
             r#"SELECT EXISTS(
                    SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1 AND $2
                    UNION ALL
+                   SELECT 1 FROM lexicon_next.publication_audio_references WHERE asset_id = $1 AND $2
+                   UNION ALL
                    SELECT 1 FROM lexicon_next.audio_asset_references WHERE asset_id = $1 AND $2
                    UNION ALL
                    SELECT 1 FROM lexicon_next.sentence_audio_asset_references WHERE asset_id=$1 AND $3

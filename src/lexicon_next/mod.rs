@@ -9,6 +9,8 @@ mod grammar;
 pub mod language;
 pub mod list_model;
 pub mod model;
+pub mod publication_model;
+pub mod publications;
 mod relations;
 mod repository;
 mod sentence_details;
@@ -56,21 +58,33 @@ pub fn router() -> Router<AppState> {
         .route("/entries", get(list).post(create))
         .route("/entries/{id}", get(read).put(save))
         .route("/entries/{id}/view", get(view))
+        .route("/entries/{id}/publication", get(publications::read))
+        .route(
+            "/entries/{id}/publication-preview",
+            axum::routing::post(publications::preview),
+        )
+        .route(
+            "/entries/{id}/publications",
+            axum::routing::post(publications::publish),
+        )
         .layer(DefaultBodyLimit::max(
             crate::lexicon::validation::MAX_STEP_CONTENT_BODY_BYTES + 512 * 1024,
         ))
 }
 
-#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entry-matches", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=entry_matches::NextEntryMatchInput, responses((status=200, body=entry_matches::NextEntryMatches), (status=401), (status=403), (status=422)))]
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entry-matches", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=entry_matches::NextEntryMatchInput, params(("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status in matched entries; omitted maps published to draft.")), responses((status=200, body=entry_matches::NextEntryMatches), (status=401), (status=403), (status=422)))]
 pub async fn match_entries(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<entry_matches::NextEntryMatchInput>,
 ) -> Result<Json<entry_matches::NextEntryMatches>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.create")?;
-    Ok(Json(entry_matches::find(&state.pool, input).await?))
+    let mut result = entry_matches::find(&state.pool, input).await?;
+    publication_statuses(&headers, &mut result.items);
+    Ok(Json(result))
 }
 
 #[utoipa::path(post, path="/api/v1/admin/lexicon-next/detections", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=detection::NextDetectionInput, responses((status=200, body=detection::NextDetection), (status=401), (status=403), (status=422), (status=503)))]
@@ -496,27 +510,33 @@ fn supports_sentences(headers: &axum::http::HeaderMap) -> bool {
 #[cfg(test)]
 mod tests;
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(NextWorkspaceQuery),responses((status=200,body=NextWorkspaceList),(status=401),(status=403),(status=422)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(NextWorkspaceQuery,("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status; omitted maps published to draft for old strict clients.")),responses((status=200,body=NextWorkspaceList),(status=401),(status=403),(status=422)))]
 pub async fn workspace_list(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: axum::http::HeaderMap,
     ApiQuery(query): ApiQuery<NextWorkspaceQuery>,
 ) -> Result<Json<NextWorkspaceList>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.access")?;
-    Ok(Json(workspace::list(&state.pool, query).await?))
+    let mut result = workspace::list(&state.pool, query).await?;
+    publication_statuses(&headers, &mut result.items);
+    Ok(Json(result))
 }
-#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,body=NextWorkspaceEntry),(status=401),(status=403),(status=404)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status; omitted maps published to draft for old strict clients.")),responses((status=200,body=NextWorkspaceEntry),(status=401),(status=403),(status=404)))]
 pub async fn workspace_read(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: axum::http::HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<NextWorkspaceEntry>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.access")?;
-    Ok(Json(workspace::get(&state.pool, id).await?))
+    let mut result = workspace::get(&state.pool, id).await?;
+    publication_statuses(&headers, std::slice::from_mut(&mut result));
+    Ok(Json(result))
 }
 #[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/stats",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(NextWorkspaceQuery),responses((status=200,body=NextWorkspaceStats),(status=401),(status=403),(status=422)))]
 pub async fn workspace_stats(
@@ -610,4 +630,17 @@ struct EquivalentCatalogRow {
     kind: String,
     #[sqlx(flatten)]
     item: crate::catalog::taxonomies::model::LexiconTaxonomy,
+}
+
+fn publication_statuses(headers: &axum::http::HeaderMap, items: &mut [NextWorkspaceEntry]) {
+    if !headers
+        .get("x-tsz-next-publications")
+        .is_some_and(|v| v == "v1")
+    {
+        for entry in items {
+            if entry.status == "published" {
+                entry.status = "draft".into();
+            }
+        }
+    }
 }

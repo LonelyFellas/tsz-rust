@@ -380,7 +380,9 @@ pub async fn command(
         } else {
             "archived"
         };
-        if status != required {
+        if status != required
+            && !(matches!(input.action, NextListAction::Archive) && status == "published")
+        {
             return Err(AppError::conflict(
                 ErrorCode::RevisionConflict,
                 None,
@@ -393,10 +395,40 @@ pub async fn command(
         ) {
             super::relations::ensure_not_referenced(&mut tx, target.entry_id, &[]).await?;
         }
+        let has_publication: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM lexicon_next.publications WHERE entry_id=$1)",
+        )
+        .bind(target.entry_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+        if has_publication {
+            if matches!(input.action, NextListAction::Delete) {
+                return Err(AppError::conflict(
+                    ErrorCode::RevisionConflict,
+                    None,
+                    "有发布历史的词条不能永久删除",
+                ));
+            }
+            authorization.require_owned_action("words.publish", owner)?;
+        }
+        if matches!(input.action, NextListAction::Archive) {
+            let referenced: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries e JOIN LATERAL (SELECT snapshot FROM lexicon_next.publications WHERE entry_id=e.id ORDER BY lifecycle_revision DESC LIMIT 1) p ON true CROSS JOIN LATERAL jsonb_array_elements(p.snapshot->'relation_targets') r WHERE e.status='published' AND e.id<>$1 AND r->>'entry_id'=$1::text)")
+                .bind(target.entry_id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+            if referenced {
+                return Err(AppError::conflict(
+                    ErrorCode::RevisionConflict,
+                    None,
+                    "词条仍被已发布拓展词引用，请先更新引用方",
+                ));
+            }
+        }
         match input.action {
             NextListAction::Archive | NextListAction::Restore => {
                 let next = if matches!(input.action, NextListAction::Archive) {
                     "archived"
+                } else if has_publication {
+                    "published"
                 } else {
                     "draft"
                 };

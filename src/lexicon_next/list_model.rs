@@ -120,5 +120,6 @@ pub struct NextAnnotationResult {
 #[serde(rename_all = "snake_case")]
 pub enum NextWorkspaceStatus {
     Draft,
+    Published,
     Archived,
 }
