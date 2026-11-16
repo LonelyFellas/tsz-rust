@@ -71,6 +71,8 @@ pub struct NextPublication {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextPublicationState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dialect_senses: Option<Vec<super::dialect_pairs::NextDialectSense>>,
     pub entry_id: Uuid,
     pub status: super::list_model::NextWorkspaceStatus,
     pub lifecycle_revision: i64,

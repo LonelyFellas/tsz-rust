@@ -397,6 +397,18 @@ pub async fn command(
         ) {
             super::relations::ensure_not_referenced(&mut tx, target.entry_id, &[]).await?;
         }
+        if matches!(input.action, NextListAction::Delete)
+            && super::dialect_pairs::project(&mut tx, target.entry_id, revision, false)
+                .await?
+                .iter()
+                .any(|s| s.paired)
+        {
+            return Err(AppError::conflict(
+                ErrorCode::RevisionConflict,
+                None,
+                "词义仍有方言配对，请先恢复并解除配对",
+            ));
+        }
         let has_publication: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM lexicon_next.publications WHERE entry_id=$1)",
         )
@@ -466,6 +478,9 @@ pub async fn command(
                     .execute(&mut *tx)
                     .await
                     .map_err(AppError::internal)?;
+                // Historical revisions of a surviving endpoint still name the pair.
+                sqlx::query("DELETE FROM lexicon_next.dialect_pairs p WHERE $1 IN (p.gb_entry,p.us_entry) AND NOT EXISTS (SELECT FROM lexicon_next.entries e WHERE e.id IN(p.gb_entry,p.us_entry))")
+                    .bind(target.entry_id).execute(&mut *tx).await.map_err(AppError::internal)?;
             }
         }
     }

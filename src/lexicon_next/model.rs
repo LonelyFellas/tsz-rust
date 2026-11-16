@@ -273,6 +273,8 @@ pub struct NextDraft {
 #[serde(deny_unknown_fields)]
 pub struct NextEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub dialect_senses: Option<Vec<super::dialect_pairs::NextDialectSense>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sentence_resources: Option<Vec<super::sentence_model::NextSentence>>,
     pub id: Uuid,
@@ -304,6 +306,9 @@ pub struct CreateNextEntry {
 pub struct SaveNextDraft {
     #[serde(default)]
     #[schema(max_items = 1000)]
+    pub dialect_changes: Vec<super::dialect_pairs::NextDialectChange>,
+    #[serde(default)]
+    #[schema(max_items = 1000)]
     pub sentence_changes: Vec<super::sentence_model::NextSentenceDraftChange>,
     #[schema(minimum = 1)]
     pub expected_revision: i64,
@@ -324,6 +329,8 @@ pub struct NextLanguageCapability {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dialect_pairs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sentence_drafts: Option<bool>,
@@ -448,6 +455,8 @@ pub struct NextSenseView {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextEntryView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dialect_senses: Option<Vec<super::dialect_pairs::NextDialectSense>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sentence_resources: Option<Vec<super::sentence_model::NextSentence>>,

@@ -25,6 +25,7 @@ pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
         sentence_drafts: None,
         relations: None,
+        dialect_pairs: None,
         sentence_details: None,
         definition_details: None,
         sentences: None,
@@ -289,6 +290,7 @@ pub fn view(
         })
         .collect();
     Ok(NextEntryView {
+        dialect_senses: None,
         sentence_resources: None,
         grammar_structures: entry.draft.grammar_structures.as_ref().map(|rows| {
             rows.iter()

@@ -36,11 +36,12 @@ fn decode(row: sqlx::postgres::PgRow) -> Result<NextPublication, AppError> {
     })
 }
 
-#[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}/publication", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("id"=Uuid, Path)), responses((status=200, body=NextPublicationState), (status=401), (status=403), (status=404)))]
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}/publication", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("id"=Uuid, Path),("x-tsz-next-dialect-pairs"=Option<String>, Header, description="v1: only reciprocal currently published peers are navigable")), responses((status=200, body=NextPublicationState), (status=401), (status=403), (status=404)))]
 pub async fn read(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<NextPublicationState>, AppError> {
     permissions::load(&state, &auth)
         .await?
@@ -77,8 +78,17 @@ pub async fn read(
             changed |= revision != Some(sentence.revision);
         }
     }
+    let dialect_senses = if super::supports_pairs(&headers) && row.0 == "published" {
+        match &current {
+            Some(p) => Some(super::dialect_pairs::project(&mut tx, id, p.revision, true).await?),
+            None => None,
+        }
+    } else {
+        None
+    };
     tx.commit().await.map_err(AppError::internal)?;
     Ok(Json(NextPublicationState {
+        dialect_senses,
         entry_id: id,
         status: match row.0.as_str() {
             "published" => super::list_model::NextWorkspaceStatus::Published,
@@ -209,6 +219,16 @@ async fn prepare(
             }
         }
     }
+    let pairs = super::dialect_pairs::project(tx, id, revision, true).await?;
+    for sense in &pairs {
+        if sense.paired && sense.target.is_none() {
+            warnings.push(issue(
+                sense.sense_id,
+                "dialect_pairs",
+                "对方尚未发布同一配对，本侧可先发布；双方发布后链接生效",
+            ));
+        }
+    }
     let mut relation_targets = Vec::new();
     for sense in &entry.draft.senses {
         for relation in sense.relations.iter().flatten() {
@@ -332,6 +352,7 @@ async fn prepare(
             &entry.target_language,
             &entry.medium_locale,
             &snapshot,
+            &pairs,
             catalog,
             revision,
             lifecycle,

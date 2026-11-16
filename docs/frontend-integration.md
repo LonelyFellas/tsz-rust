@@ -425,3 +425,7 @@ TASK#190 与后续 #402 的耦合：录音 `is_default` 保留 absent／true／f
 独立例句 GET/POST/PUT 按请求头返回表示并设置 Vary。旧客户端不收到扩展字段，修改当前目标变体或媒介语言中已有扩展的内容时 422 拒绝并提示刷新；新客户端漏掉已有扩展字段同样拒绝。其他目标语/媒介语继续按现有范围完整保留。配置引用在保存事务内加锁并由外键保护。新增迁移 down 在含扩展数据时拒绝，回退后端需另定无损方案；可回退前端并保留新后端。
 
 新版前端遇旧服务只开放基础例句；过渡组合须先上线新后端，再开放扩展编辑。审核发布、AI 生成及公开 reader 不属于本批。
+
+### 新版词库：义项方言配对（#177）
+
+协商 `x-tsz-next-dialect-pairs: v1`：能力目录返回 `dialect_pairs`，读取和保存草稿、语言视图以及当前已发布状态可返回 `dialect_senses`。完整草稿 PUT 的可选 `dialect_changes` 与词条一起提交；修改涉及的每个对方均须具备编辑权限并匹配版本。已配义项的旧目标版本使用 `previous_target_revision`，新目标使用 `target.revision`。两端发布顺序不限，发布状态的 `paired: true, target: null` 表示本侧已记录配对但当前无可用的双向发布链接，不得用草稿补全。兼容顺序、回退限制与验收见前端主记录 `docs/features/lexicon-next-dialect-pairs/README.md`。

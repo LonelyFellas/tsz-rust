@@ -20,6 +20,7 @@ struct EntryRow {
 impl EntryRow {
     fn entry(self) -> Result<NextEntry, AppError> {
         Ok(NextEntry {
+            dialect_senses: None,
             sentence_resources: None,
             id: self.id,
             target_language: self.target_language,
@@ -134,7 +135,7 @@ pub async fn create(
         senses: vec![],
         form_editor: None,
     };
-    snapshot(&mut tx, id, 1, auth.subject, &draft).await?;
+    snapshot(&mut tx, id, 1, auth.subject, &draft, &[]).await?;
     let result = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
         .bind(id)
         .fetch_one(&mut *tx)
@@ -144,15 +145,16 @@ pub async fn create(
     tx.commit().await.map_err(AppError::internal)?;
     Ok(result)
 }
-async fn snapshot(
+pub(super) async fn snapshot(
     conn: &mut PgConnection,
     id: Uuid,
     revision: i64,
     actor: Uuid,
     draft: &NextDraft,
+    dialects: &[super::dialect_pairs::Binding],
 ) -> Result<(), AppError> {
-    sqlx::query("INSERT INTO lexicon_next.draft_revisions(entry_id,revision,actor_id,document) VALUES($1,$2,$3,$4)")
-        .bind(id).bind(revision).bind(actor).bind(serde_json::to_value(draft).map_err(AppError::internal)?)
+    sqlx::query("INSERT INTO lexicon_next.draft_revisions(entry_id,revision,actor_id,document,dialect_senses) VALUES($1,$2,$3,$4,$5)")
+        .bind(id).bind(revision).bind(actor).bind(serde_json::to_value(draft).map_err(AppError::internal)?).bind(sqlx::types::Json(dialects))
         .execute(conn).await.map_err(AppError::internal)?;
     Ok(())
 }
@@ -184,6 +186,7 @@ pub(super) async fn node(
 pub(super) struct SaveCapabilities {
     pub sentence_drafts: bool,
     pub relations: bool,
+    pub pairs: bool,
     pub grammar_audio: bool,
     pub sense_metadata: bool,
     pub equivalent_metadata: bool,
@@ -215,9 +218,8 @@ pub async fn save(
     .await
     .map_err(AppError::internal)?
     .ok_or_else(|| AppError::not_found("lexicon-next entry not found"))?;
-    permissions::lock(&mut tx, auth.subject)
-        .await?
-        .require_owned_action("words.edit", owner)?;
+    let access = permissions::lock(&mut tx, auth.subject).await?;
+    access.require_owned_action("words.edit", owner)?;
     if status == "archived" {
         return Err(AppError::conflict(
             ErrorCode::EntryArchived,
@@ -379,7 +381,9 @@ pub async fn save(
     super::sentences::persist_references(&mut tx, actor, id, &language, draft, &previous.draft)
         .await?;
     let conn = &mut *tx;
-    snapshot(conn, id, next_revision, actor, draft).await?;
+    let dialects =
+        super::dialect_pairs::apply(conn, &access, &previous, draft, input.dialect_changes).await?;
+    snapshot(conn, id, next_revision, actor, draft, &dialects).await?;
     super::equivalents::persist_refs(conn, id, next_revision, taxonomy_refs).await?;
     sqlx::query("UPDATE lexicon_next.entries SET headword=$2,revision=$3,updated_at=clock_timestamp() WHERE id=$1")
         .bind(id).bind(&draft.headword).bind(next_revision).execute(&mut *conn).await.map_err(AppError::internal)?;
@@ -389,6 +393,10 @@ pub async fn save(
         .await
         .map_err(AppError::internal)?
         .entry()?;
+    if capabilities.pairs {
+        result.dialect_senses =
+            Some(super::dialect_pairs::project(conn, id, next_revision, false).await?);
+    }
     if capabilities.sentence_drafts
         && permissions::lock(&mut tx, actor)
             .await?

@@ -37,6 +37,7 @@ async fn full_call(
     path: &str,
     body: Value,
 ) -> (StatusCode, Value) {
+    let pairs = !path.ends_with("?legacy");
     let mut req = Request::builder()
         .method(method)
         .uri(format!("{ROOT}{path}"))
@@ -57,6 +58,9 @@ async fn full_call(
         "levels",
     ] {
         req = req.header(format!("x-tsz-next-{header}"), "v1");
+    }
+    if pairs {
+        req = req.header("x-tsz-next-dialect-pairs", "v1");
     }
     req = req.header(
         "authorization",
@@ -905,4 +909,211 @@ async fn phrase_can_save_publish_and_reload_with_catalog_grammar(pool: PgPool) {
     )
     .await;
     assert!(legacy["items"][0].get("levels").is_none());
+}
+
+async fn dialect_save(
+    state: &AppState,
+    actor: Uuid,
+    path: &str,
+    entry: &Value,
+    usage: &str,
+    target: Option<&Value>,
+) -> (StatusCode, Value) {
+    let old = &entry["dialect_senses"][0]["target"];
+    let target=target.map(|v|json!({"entry_id":v["id"],"revision":v["revision"],"sense_id":v["draft"]["senses"][0]["id"]}));
+    full_call(state,actor,"PUT",path,json!({"expected_revision":entry["revision"],"draft":entry["draft"],"dialect_changes":[{"sense_id":entry["draft"]["senses"][0]["id"],"usage":usage,"target":target,"previous_target_revision":old["revision"]}]})).await
+}
+async fn publish_dialect(
+    state: &AppState,
+    actor: Uuid,
+    path: &str,
+    revision: i64,
+    lifecycle: i64,
+) -> Value {
+    let p = checked(state, actor, path, revision, lifecycle).await;
+    assert_eq!(p["can_publish"], true, "{p}");
+    let (status, rec) = full_call(
+        state,
+        actor,
+        "POST",
+        &format!("{path}/publications"),
+        command(&p),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rec}");
+    p
+}
+#[sqlx::test]
+async fn dialect_pairs_publish_independently_and_never_resolve_a_draft(pool: PgPool) {
+    let down = include_str!("../../migrations/20261116160000_lexicon_next_dialect_pairs.down.sql");
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261116160000_lexicon_next_dialect_pairs.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let actor = admin(&pool, PUBLISH).await;
+    let state = AppState::for_test(pool.clone());
+    let (brit, a) = fixture(&state, &pool, actor).await;
+    let (amer, b) = fixture(&state, &pool, actor).await;
+    let (ok, b) = dialect_save(&state, actor, &amer, &b, "en-US", None).await;
+    assert_eq!(ok, StatusCode::OK, "{b}");
+    let (ok, a) = dialect_save(&state, actor, &brit, &a, "en-GB", Some(&b)).await;
+    assert_eq!(ok, StatusCode::OK, "{a}");
+    let (_, b) = full_call(&state, actor, "GET", &amer, Value::Null).await;
+    assert_eq!(
+        a["dialect_senses"][0]["target"]["sense_id"],
+        b["draft"]["senses"][0]["id"]
+    );
+    assert_eq!(
+        b["dialect_senses"][0]["target"]["sense_id"],
+        a["draft"]["senses"][0]["id"]
+    );
+    let read = format!("{brit}/publication");
+    let p = publish_dialect(&state, actor, &brit, 3, 1).await;
+    assert!(
+        p["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["field"] == "dialect_pairs")
+    );
+    let (_, first) = full_call(&state, actor, "GET", &read, Value::Null).await;
+    assert_eq!(first["dialect_senses"][0]["paired"], true);
+    assert!(first["dialect_senses"][0]["target"].is_null());
+    publish_dialect(&state, actor, &amer, 4, 1).await;
+    let (_, live) = full_call(&state, actor, "GET", &read, Value::Null).await;
+    assert_eq!(live["dialect_senses"][0]["target"]["headword"], "center");
+    assert_eq!(live["current"], first["current"]);
+    for (action, lifecycle) in [("archive", 2), ("restore", 3)] {
+        let (ok,out)=full_call(&state,actor,"POST","/workspace/commands",json!({"action":action,"request_id":Uuid::now_v7(),"items":[{"entry_id":b["id"],"base_revision":4,"base_lifecycle_revision":lifecycle}]})).await;
+        assert_eq!(ok, StatusCode::OK, "{out}");
+        assert_eq!(full_call(&state,actor,"GET",&read,Value::Null).await.1["dialect_senses"][0]["target"].is_null(),action=="archive");
+    }
+    // Old-client save: no pair field/command. It cannot erase the reciprocal edge.
+    let (ok, legacy) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &format!("{brit}?legacy"),
+        json!({"expected_revision":3,"draft":a["draft"]}),
+    )
+    .await;
+    assert_eq!(ok, StatusCode::OK);
+    assert!(legacy.get("dialect_senses").is_none());
+    let (_, a) = full_call(&state, actor, "GET", &brit, Value::Null).await;
+    assert_eq!(a["dialect_senses"][0]["target"]["entry_id"], b["id"]);
+    let (ok, a) = dialect_save(&state, actor, &brit, &a, "en-GB", None).await;
+    assert_eq!(ok, StatusCode::OK, "{a}");
+    assert_eq!(
+        full_call(&state, actor, "GET", &read, Value::Null).await.1["dialect_senses"],
+        live["dialect_senses"]
+    );
+    publish_dialect(&state, actor, &brit, 5, 2).await;
+    let (_, other) = full_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{amer}/publication"),
+        Value::Null,
+    )
+    .await;
+    assert!(other["dialect_senses"][0]["target"].is_null());
+    assert_eq!(
+        full_call(&state, actor, "GET", &amer, Value::Null).await.1["dialect_senses"][0]["paired"],
+        false
+    );
+    assert!(sqlx::raw_sql(down).execute(&pool).await.is_err());
+}
+
+#[sqlx::test]
+async fn dialect_pairs_conflict_and_permissions_leave_both_sides_intact(pool: PgPool) {
+    let actor = admin(&pool, PUBLISH).await;
+    let stranger = admin(&pool, PUBLISH).await;
+    let state = AppState::for_test(pool.clone());
+    let (target, b) = fixture(&state, &pool, actor).await;
+    let (ok, b) = dialect_save(&state, actor, &target, &b, "en-US", None).await;
+    assert_eq!(ok, StatusCode::OK);
+    let (left, a) = fixture(&state, &pool, actor).await;
+    let (right, c) = fixture(&state, &pool, actor).await;
+    let (foreign, f) = fixture(&state, &pool, stranger).await;
+    assert_eq!(
+        dialect_save(&state, stranger, &foreign, &f, "en-GB", Some(&b))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        dialect_save(&state, actor, &left, &a, "en-US", Some(&b))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (one, two) = tokio::join!(
+        dialect_save(&state, actor, &left, &a, "en-GB", Some(&b)),
+        dialect_save(&state, actor, &right, &c, "en-GB", Some(&b))
+    );
+    assert!(
+        matches!(
+            (one.0, two.0),
+            (StatusCode::OK, StatusCode::CONFLICT) | (StatusCode::CONFLICT, StatusCode::OK)
+        ),
+        "{one:?} {two:?}"
+    );
+    let (winner, loser) = if one.0 == StatusCode::OK {
+        (&left, &right)
+    } else {
+        (&right, &left)
+    };
+    let (_, w) = full_call(&state, actor, "GET", winner, Value::Null).await;
+    let (_, l) = full_call(&state, actor, "GET", loser, Value::Null).await;
+    assert_eq!(l["revision"], 2);
+    let (_, b) = full_call(&state, actor, "GET", &target, Value::Null).await;
+    assert_eq!(b["dialect_senses"][0]["target"]["entry_id"], w["id"]);
+    assert_eq!(
+        dialect_save(&state, actor, winner, &w, "en-GB", Some(&l))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        full_call(&state, actor, "GET", &target, Value::Null)
+            .await
+            .1,
+        b
+    );
+    let (status, l) = dialect_save(&state, actor, loser, &l, "en-US", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, b_updated) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &target,
+        json!({"expected_revision":b["revision"],"draft":b["draft"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // The source is unchanged, but unlinking would overwrite an unseen peer version.
+    assert_eq!(
+        dialect_save(&state, actor, winner, &w, "en-GB", Some(&l))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let (_, w) = full_call(&state, actor, "GET", winner, Value::Null).await;
+    assert_eq!(
+        w["dialect_senses"][0]["target"]["revision"],
+        b_updated["revision"]
+    );
+    let (status, replaced) = dialect_save(&state, actor, winner, &w, "en-GB", Some(&l)).await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    let (_, previous) = full_call(&state, actor, "GET", &target, Value::Null).await;
+    assert_eq!(previous["dialect_senses"][0]["paired"], false);
+    assert_eq!(previous["dialect_senses"][0]["no_equivalent"], false);
+    let (_, new_peer) = full_call(&state, actor, "GET", loser, Value::Null).await;
+    assert_eq!(new_peer["dialect_senses"][0]["target"]["entry_id"], w["id"]);
+    let (status,none)=full_call(&state,actor,"PUT",&target,json!({"expected_revision":previous["revision"],"draft":previous["draft"],"dialect_changes":[{"sense_id":previous["draft"]["senses"][0]["id"],"usage":"en-US","no_equivalent":true,"note":"已人工核对"}]})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(none["dialect_senses"][0]["note"], "已人工核对");
 }
