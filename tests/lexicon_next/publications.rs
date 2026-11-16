@@ -54,6 +54,7 @@ async fn full_call(
         "equivalents",
         "relations",
         "publications",
+        "levels",
     ] {
         req = req.header(format!("x-tsz-next-{header}"), "v1");
     }
@@ -806,4 +807,102 @@ async fn publication_restore_requires_available_frozen_relation_targets(pool: Pg
     )
     .await;
     assert_eq!(read["status"], "published");
+}
+
+#[sqlx::test]
+async fn phrase_can_save_publish_and_reload_with_catalog_grammar(pool: PgPool) {
+    let actor = admin(&pool, PUBLISH).await;
+    let state = AppState::for_test(pool.clone());
+    let (status, entry) = full_call(
+        &state,
+        actor,
+        "POST",
+        "/entries",
+        json!({
+            "target_language":"en","medium_locale":"zh-Hans","kind":"phrase","headword":"take off"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{entry}");
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let part = Uuid::now_v7();
+    sqlx::query("INSERT INTO catalog.parts_of_speech(id,code,kind,name_zh,name_en,abbreviation,short_name_zh,full_name_en) VALUES($1,'phrase_verbal_constituent','phrase','动词性成分','Verbal constituent','V','动词性成分','Verbal constituent')").bind(part).execute(&pool).await.unwrap();
+    let sub = "PHRASE_INTRANSITIVE";
+    sqlx::query("INSERT INTO catalog.sub_parts_of_speech(id,part_of_speech_id,code,name_zh,name_en,short_name_zh,abbreviation,full_name_en) VALUES($1,$2,$3,'不及物动副短语','Intransitive verbal phrase','不及物短语','V-I','Intransitive verbal phrase')").bind(Uuid::now_v7()).bind(part).bind(sub).execute(&pool).await.unwrap();
+    let group = Uuid::now_v7();
+    let grammar = Uuid::now_v7();
+    let mut editor = form_editor();
+    editor["pos"][0]["pos"] = json!("phrase_verbal_constituent");
+    for region in ["uk", "us"] {
+        editor["contents"][0]["regional_variants"][region]["spelling"] = json!("take off");
+    }
+    let draft = json!({"schema_version":1,"headword":"take off","forms":[],"form_editor":editor,
+        "sense_groups":[{"id":group,"name_zh":"起飞","name_en":"flight"}],
+        "grammar_structures":[{"id":grammar,"part_of_speech":"phrase_verbal_constituent","sub_pos":sub,"variants":[{"id":Uuid::now_v7(),"locale":"en","content":{"version":2,"text":"The plane takes off.","annotations":[]}}]}],
+        "senses":[{"id":Uuid::now_v7(),"part_of_speech":"phrase_verbal_constituent","sub_pos":sub,"level":"A1","sense_group_id":group,
+            "definitions":[{"id":Uuid::now_v7(),"locale":"en","text":"to begin flying","style":"definition","level":"A1","grammar_structure_id":grammar},{"id":Uuid::now_v7(),"locale":"zh-Hans","text":"起飞","style":"definition","level":"A1","grammar_structure_id":grammar}],
+            "equivalents":[{"id":Uuid::now_v7(),"locale":"zh-Hans","text":"起飞"}]}]});
+    let (status, saved) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let mut invalid = draft.clone();
+    invalid["senses"][0]["part_of_speech"] = json!("phrase_unknown");
+    let (status, _) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":invalid}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let preview = checked(&state, actor, &path, 2, 1).await;
+    assert_eq!(preview["can_publish"], true, "{preview}");
+    let (status, published) = full_call(
+        &state,
+        actor,
+        "POST",
+        &format!("{path}/publications"),
+        command(&preview),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    let (_, publication_state) = full_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{path}/publication"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(publication_state["status"], "published");
+    assert_eq!(
+        publication_state["current"]["snapshot"]["draft"]["senses"][0]["part_of_speech"],
+        "phrase_verbal_constituent"
+    );
+    let (status, page) = full_call(
+        &state,
+        actor,
+        "GET",
+        "/workspace/entries?pos=phrase_verbal_constituent&kind=phrase&level=A1",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["levels"], json!(["A1"]));
+    let (_, legacy) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/workspace/entries",
+        Value::Null,
+    )
+    .await;
+    assert!(legacy["items"][0].get("levels").is_none());
 }

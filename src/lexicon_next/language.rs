@@ -17,6 +17,10 @@ pub(super) const POS: &[&str] = &[
     "numeral",
     "particle",
 ];
+pub(super) fn valid_pos(code: &str) -> bool {
+    (POS.contains(&code) || code.starts_with("phrase_"))
+        && crate::catalog::service::valid_part_code(code.to_owned()).is_ok()
+}
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
         sentence_drafts: None,
@@ -161,7 +165,7 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
         if sense
             .part_of_speech
             .as_deref()
-            .is_some_and(|p| !POS.contains(&p))
+            .is_some_and(|p| !valid_pos(p))
         {
             return Err(invalid());
         }

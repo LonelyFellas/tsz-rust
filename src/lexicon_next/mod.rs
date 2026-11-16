@@ -72,7 +72,7 @@ pub fn router() -> Router<AppState> {
         ))
 }
 
-#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entry-matches", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=entry_matches::NextEntryMatchInput, params(("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status in matched entries; omitted maps published to draft.")), responses((status=200, body=entry_matches::NextEntryMatches), (status=401), (status=403), (status=422)))]
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entry-matches", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=entry_matches::NextEntryMatchInput, params(("x-tsz-next-levels"=Option<String>,Header,description="v1 returns current saved sense levels in matches."),("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status in matched entries; omitted maps published to draft.")), responses((status=200, body=entry_matches::NextEntryMatches), (status=401), (status=403), (status=422)))]
 pub async fn match_entries(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -510,7 +510,7 @@ fn supports_sentences(headers: &axum::http::HeaderMap) -> bool {
 #[cfg(test)]
 mod tests;
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(NextWorkspaceQuery,("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status; omitted maps published to draft for old strict clients.")),responses((status=200,body=NextWorkspaceList),(status=401),(status=403),(status=422)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(NextWorkspaceQuery,("x-tsz-next-levels"=Option<String>,Header,description="v1 returns current saved sense levels; omission preserves old strict responses."),("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status; omitted maps published to draft for old strict clients.")),responses((status=200,body=NextWorkspaceList),(status=401),(status=403),(status=422)))]
 pub async fn workspace_list(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -524,7 +524,7 @@ pub async fn workspace_list(
     publication_statuses(&headers, &mut result.items);
     Ok(Json(result))
 }
-#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status; omitted maps published to draft for old strict clients.")),responses((status=200,body=NextWorkspaceEntry),(status=401),(status=403),(status=404)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("x-tsz-next-levels"=Option<String>,Header,description="v1 returns current saved sense levels."),("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status; omitted maps published to draft for old strict clients.")),responses((status=200,body=NextWorkspaceEntry),(status=401),(status=403),(status=404)))]
 pub async fn workspace_read(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -633,6 +633,11 @@ struct EquivalentCatalogRow {
 }
 
 fn publication_statuses(headers: &axum::http::HeaderMap, items: &mut [NextWorkspaceEntry]) {
+    for entry in items.iter_mut() {
+        if !headers.get("x-tsz-next-levels").is_some_and(|v| v == "v1") {
+            entry.levels = None;
+        }
+    }
     if !headers
         .get("x-tsz-next-publications")
         .is_some_and(|v| v == "v1")

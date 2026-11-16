@@ -350,3 +350,21 @@ fn legacy_definition_edits_preserve_hidden_metadata_and_invalidate_changed_sourc
             .is_none()
     );
 }
+
+#[test]
+fn phrase_constituents_save_with_their_grammar_and_filter_by_pos() {
+    let draft: NextDraft = serde_json::from_value(json!({
+        "schema_version":1,"headword":"take off","forms":[],
+        "grammar_structures":[{"id":Uuid::now_v7(),"part_of_speech":"phrase_verbal_constituent","variants":[]}],
+        "senses":[{"id":Uuid::now_v7(),"part_of_speech":"phrase_verbal_constituent","definitions":[],"equivalents":[]}]
+    })).unwrap();
+    language::validate("en", &draft).unwrap();
+    super::workspace::validate(&super::list_model::NextWorkspaceQuery {
+        pos: Some("phrase_verbal_constituent".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut invalid = draft;
+    invalid.senses[0].part_of_speech = Some("phrase_Invalid".into());
+    assert!(language::validate("en", &invalid).is_err());
+}

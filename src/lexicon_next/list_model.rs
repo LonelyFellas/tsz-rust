@@ -47,6 +47,10 @@ pub struct NextWorkspaceEntry {
     pub annotation_revision: i64,
     pub annotation_visible: bool,
     pub part_of_speech: Vec<String>,
+    /// Returned only when x-tsz-next-levels: v1 is negotiated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub levels: Option<Vec<String>>,
     #[schema(required)]
     pub gloss: Option<String>,
     #[sqlx(json)]

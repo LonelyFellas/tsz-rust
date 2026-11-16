@@ -279,7 +279,15 @@ pub async fn save(
     if !capabilities.grammar_audio {
         super::grammar::preserve_audio(draft, &previous.draft);
     }
-    super::grammar::validate_catalog(&mut tx, draft).await?;
+    super::grammar::validate_catalog(
+        &mut tx,
+        draft,
+        match previous.kind {
+            NextEntryKind::Word => "word",
+            NextEntryKind::Phrase => "phrase",
+        },
+    )
+    .await?;
     if previous.draft.sense_groups.is_some() && draft.sense_groups.is_none() {
         return Err(AppError::unprocessable(
             ErrorCode::InvalidRequestBody,
