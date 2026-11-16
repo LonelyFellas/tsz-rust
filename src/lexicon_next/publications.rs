@@ -245,6 +245,7 @@ async fn prepare(
                             sense_id: target_sense,
                             publication_id: row.get("id"),
                             headword: snapshot.draft.headword.clone(),
+                            forms: super::forms::projection(&snapshot.draft)?,
                             gloss,
                         });
                         continue;

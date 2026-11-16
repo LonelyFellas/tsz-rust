@@ -467,6 +467,19 @@ pub async fn command(
             }
         }
     }
+    if matches!(input.action, NextListAction::Restore) {
+        // Check the final batch state so restoring a source and its target is order independent.
+        let restored: Vec<_> = input.items.iter().map(|item| item.entry_id).collect();
+        let unavailable: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries e JOIN LATERAL (SELECT snapshot FROM lexicon_next.publications WHERE entry_id=e.id ORDER BY lifecycle_revision DESC LIMIT 1) p ON true CROSS JOIN LATERAL jsonb_array_elements(p.snapshot->'relation_targets') r WHERE e.id=ANY($1) AND e.status='published' AND NOT EXISTS(SELECT 1 FROM lexicon_next.entries target WHERE target.id=(r->>'entry_id')::uuid AND target.status='published'))")
+            .bind(&restored).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+        if unavailable {
+            return Err(AppError::conflict(
+                ErrorCode::RevisionConflict,
+                None,
+                "已发布拓展词的目标尚未恢复，请先恢复目标或一并恢复",
+            ));
+        }
+    }
     let result = NextListCommandResult {
         entry_ids: input.items.iter().map(|v| v.entry_id).collect(),
     };

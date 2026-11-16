@@ -638,6 +638,13 @@ async fn publication_pins_relation_versions_and_blocks_archiving_live_targets(po
         published["snapshot"]["relation_targets"][0]["headword"],
         "new target"
     );
+    assert!(
+        published["snapshot"]["relation_targets"][0]["forms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|form| form["locale"] == "en-US" && form["text"] == "center")
+    );
     content["senses"][0]["relations"] = json!([]);
     assert_eq!(
         full_call(
@@ -708,4 +715,95 @@ async fn publication_archive_restore_and_delete_preserve_frozen_history(pool: Pg
     let (status, error) = full_call(&state, actor, "POST", "/workspace/commands", json!({"request_id":Uuid::now_v7(),"action":"delete","items":[{"entry_id":saved["id"],"base_revision":2,"base_lifecycle_revision":5}]})).await;
     assert_eq!(status, StatusCode::CONFLICT, "{error}");
     assert!(error["detail"].as_str().unwrap().contains("发布历史"));
+}
+
+#[sqlx::test]
+async fn publication_restore_requires_available_frozen_relation_targets(pool: PgPool) {
+    let actor = admin(&pool, PUBLISH).await;
+    let state = AppState::for_test(pool.clone());
+    let (target_path, target) = fixture(&state, &pool, actor).await;
+    let preview = checked(&state, actor, &target_path, 2, 1).await;
+    assert_eq!(
+        full_call(
+            &state,
+            actor,
+            "POST",
+            &format!("{target_path}/publications"),
+            command(&preview)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (source_path, source) = fixture(&state, &pool, actor).await;
+    let mut content = source["draft"].clone();
+    content["senses"][0]["relations"] = json!([{"id":Uuid::now_v7(),"relation":"synonym","target_word_id":target["id"],"target_sense_id":target["draft"]["senses"][0]["id"],"score":"80"}]);
+    assert_eq!(
+        full_call(
+            &state,
+            actor,
+            "PUT",
+            &source_path,
+            json!({"expected_revision":2,"draft":content})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let preview = checked(&state, actor, &source_path, 3, 1).await;
+    assert_eq!(
+        full_call(
+            &state,
+            actor,
+            "POST",
+            &format!("{source_path}/publications"),
+            command(&preview)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    content["senses"][0]["relations"] = json!([]);
+    assert_eq!(
+        full_call(
+            &state,
+            actor,
+            "PUT",
+            &source_path,
+            json!({"expected_revision":3,"draft":content})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    for (id, revision) in [(&source["id"], 4), (&target["id"], 2)] {
+        let (status, result) = full_call(&state, actor, "POST", "/workspace/commands", json!({"request_id":Uuid::now_v7(),"action":"archive","items":[{"entry_id":id,"base_revision":revision,"base_lifecycle_revision":2}]})).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+    }
+    let restore = json!({"request_id":Uuid::now_v7(),"action":"restore","items":[{"entry_id":source["id"],"base_revision":4,"base_lifecycle_revision":3}]});
+    let (status, result) = full_call(&state, actor, "POST", "/workspace/commands", restore).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{result}");
+    let (_, read) = full_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{source_path}/publication"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(read["status"], "archived");
+    assert_eq!(read["lifecycle_revision"], 3);
+    let restore_both = json!({"request_id":Uuid::now_v7(),"action":"restore","items":[{"entry_id":source["id"],"base_revision":4,"base_lifecycle_revision":3},{"entry_id":target["id"],"base_revision":2,"base_lifecycle_revision":3}]});
+    let (status, result) =
+        full_call(&state, actor, "POST", "/workspace/commands", restore_both).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (_, read) = full_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{source_path}/publication"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(read["status"], "published");
 }

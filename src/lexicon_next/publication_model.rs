@@ -54,6 +54,7 @@ pub struct NextPublicationRelation {
     pub sense_id: Uuid,
     pub publication_id: Uuid,
     pub headword: String,
+    pub forms: Vec<super::model::NextForm>,
     pub gloss: String,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
