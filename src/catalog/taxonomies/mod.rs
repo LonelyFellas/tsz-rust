@@ -26,7 +26,7 @@ pub fn router() -> Router<AppState> {
 fn database_error(error: sqlx::Error) -> AppError {
     if error
         .as_database_error()
-        .is_some_and(|db| db.is_foreign_key_violation())
+        .is_some_and(|db| db.is_foreign_key_violation() || db.code().as_deref() == Some("23001"))
     {
         return AppError::conflict(
             ErrorCode::TaxonomyConflict,

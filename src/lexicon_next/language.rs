@@ -40,7 +40,7 @@ pub fn capabilities() -> NextCapabilities {
         }],
         manual_drafts: true,
         generation: false,
-        publishing: false,
+        publishing: true,
         form_editor: None,
         sense_groups: None,
     }
