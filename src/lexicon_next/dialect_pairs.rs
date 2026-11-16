@@ -102,63 +102,86 @@ pub(super) async fn project(
     revision: i64,
     published: bool,
 ) -> Result<Vec<NextDialectSense>, AppError> {
-    let rows=sqlx::query(r#"SELECT s.item, peer.id, peer.revision, peer.document, peer.medium_locale, peer.sense, peer.target_id FROM lexicon_next.draft_revisions own
-    CROSS JOIN LATERAL jsonb_array_elements(own.dialect_senses) s(item)
-    LEFT JOIN lexicon_next.dialect_pairs pair ON pair.id=(s.item->>'pair_id')::uuid
-    LEFT JOIN LATERAL (
-      SELECT e.id, r.revision, r.document, e.medium_locale, t.sense, (t.sense->>'id')::uuid AS target_id
-      FROM lexicon_next.entries e
-      LEFT JOIN LATERAL (SELECT revision FROM lexicon_next.publications WHERE entry_id=e.id ORDER BY lifecycle_revision DESC LIMIT 1) pub ON $3
-      JOIN lexicon_next.draft_revisions r ON r.entry_id=e.id AND r.revision=CASE WHEN $3 THEN pub.revision ELSE e.revision END
-      CROSS JOIN LATERAL jsonb_array_elements(r.document->'senses') t(sense)
-      WHERE e.id=CASE WHEN pair.gb_entry=$1 THEN pair.us_entry ELSE pair.gb_entry END
-        AND t.sense->>'id'=(CASE WHEN pair.gb_entry=$1 THEN pair.us_sense ELSE pair.gb_sense END)::text
-        AND (NOT $3 OR e.status='published')
-        AND r.dialect_senses @> jsonb_build_array(jsonb_build_object('sense_id',t.sense->>'id','pair_id',pair.id::text))
-    ) peer ON true WHERE own.entry_id=$1 AND own.revision=$2 ORDER BY s.item->>'sense_id'"#)
-      .bind(entry).bind(revision).bind(published).fetch_all(conn).await.map_err(AppError::internal)?;
-    rows.into_iter()
-        .map(|row| {
-            let Json(b): Json<Binding> = row.get("item");
-            let target = row
-                .get::<Option<Uuid>, _>("id")
-                .map(|entry_id| -> Result<_, AppError> {
-                    let Json(doc): Json<NextDraft> = row.get("document");
-                    let medium: String = row.get("medium_locale");
-                    let sense: serde_json::Value = row.get("sense");
-                    let side = if b.usage == NextDialectUsage::British {
-                        "us"
-                    } else {
-                        "uk"
-                    };
-                    let headword = base_spelling(&doc, sense["part_of_speech"].as_str(), side);
-                    let gloss = ["equivalents", "definitions"]
-                        .into_iter()
-                        .flat_map(|k| sense[k].as_array().into_iter().flatten())
-                        .filter(|d| d["locale"].as_str() == Some(medium.as_str()))
-                        .find_map(|d| d["text"].as_str().filter(|v| !v.is_empty()))
-                        .unwrap_or("")
-                        .to_owned();
-                    Ok(NextDialectPeer {
-                        entry_id,
-                        sense_id: row.get("target_id"),
-                        revision: row.get("revision"),
-                        headword,
-                        gloss,
-                        part_of_speech: sense["part_of_speech"].as_str().map(str::to_owned),
-                    })
+    // Group before joining documents: even if all senses point into the same
+    // entry, its chosen revision crosses the DB boundary only once.
+    let mut rows=sqlx::query(r#"WITH endpoints AS (
+        SELECT s.item, CASE WHEN p.gb_entry=$1 THEN p.us_entry ELSE p.gb_entry END AS peer,
+          CASE WHEN p.gb_entry=$1 THEN p.us_sense ELSE p.gb_sense END AS sid
+        FROM lexicon_next.draft_revisions r
+        CROSS JOIN LATERAL jsonb_array_elements(r.dialect_senses) s(item)
+        LEFT JOIN lexicon_next.dialect_pairs p ON p.id=(s.item->>'pair_id')::uuid
+        WHERE r.entry_id=$1 AND r.revision=$2
+    ), grouped AS MATERIALIZED (
+        SELECT peer,jsonb_agg(jsonb_build_array(item,sid)) AS members FROM endpoints GROUP BY peer
+    )
+    SELECT g.peer,g.members,e.medium_locale,r.revision,r.document,r.dialect_senses
+    FROM grouped g LEFT JOIN lexicon_next.entries e ON e.id=g.peer AND (NOT $3 OR e.status='published')
+    LEFT JOIN LATERAL (SELECT revision FROM lexicon_next.publications WHERE entry_id=e.id ORDER BY lifecycle_revision DESC LIMIT 1) pub ON $3
+    LEFT JOIN lexicon_next.draft_revisions r ON r.entry_id=e.id AND r.revision=CASE WHEN $3 THEN pub.revision ELSE e.revision END"#)
+      .bind(entry).bind(revision).bind(published).fetch(conn);
+    let mut result = Vec::new();
+    while let Some(row) = futures_util::TryStreamExt::try_next(&mut rows)
+        .await
+        .map_err(AppError::internal)?
+    {
+        let doc = row.get::<Option<Json<NextDraft>>, _>("document");
+        let bindings: Bindings = row
+            .get::<Option<Json<Vec<Binding>>>, _>("dialect_senses")
+            .into_iter()
+            .flat_map(|j| j.0)
+            .map(|s| (s.sense_id, s))
+            .collect();
+        let senses: BTreeMap<_, _> = doc
+            .iter()
+            .flat_map(|d| &d.senses)
+            .map(|s| (s.id, s))
+            .collect();
+        let Json(members): Json<Vec<(Binding, Option<Uuid>)>> = row.get("members");
+        for (b, sid) in members {
+            let target = sid.and_then(|id| {
+                let doc = doc.as_ref()?;
+                if bindings.get(&id)?.pair_id != b.pair_id {
+                    return None;
+                }
+                let s = senses.get(&id)?;
+                let medium: &str = row.get("medium_locale");
+                let gloss = s
+                    .equivalents
+                    .iter()
+                    .map(|v| (&v.locale, &v.text))
+                    .chain(s.definitions.iter().map(|v| (&v.locale, &v.text)))
+                    .find(|(l, t)| l.as_str() == medium && !t.is_empty())
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_default();
+                Some(NextDialectPeer {
+                    entry_id: row.get("peer"),
+                    sense_id: id,
+                    revision: row.get("revision"),
+                    headword: base_spelling(
+                        doc,
+                        s.part_of_speech.as_deref(),
+                        if b.usage == NextDialectUsage::British {
+                            "us"
+                        } else {
+                            "uk"
+                        },
+                    ),
+                    gloss,
+                    part_of_speech: s.part_of_speech.clone(),
                 })
-                .transpose()?;
-            Ok(NextDialectSense {
+            });
+            result.push(NextDialectSense {
                 sense_id: b.sense_id,
                 usage: b.usage,
                 no_equivalent: b.no_equivalent,
                 note: b.note,
                 paired: b.pair_id.is_some(),
                 target,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    result.sort_unstable_by_key(|r| r.sense_id);
+    Ok(result)
 }
 
 // Do not substitute a plural or inflection just because it occurs first.
@@ -242,7 +265,7 @@ pub(super) async fn apply(
         if entry.target_language != "en"
             || !retained.contains(&c.sense_id)
             || !touched.insert(c.sense_id)
-            || c.note.chars().count() > 1000
+            || (!c.note.is_empty() && language::text(&c.note, 1000).is_err())
             || (!c.no_equivalent && !c.note.is_empty())
             || (c.no_equivalent && c.target.is_some())
             || (c.usage == NextDialectUsage::General && (c.target.is_some() || c.no_equivalent))

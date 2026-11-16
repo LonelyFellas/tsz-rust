@@ -1117,3 +1117,55 @@ async fn dialect_pairs_conflict_and_permissions_leave_both_sides_intact(pool: Pg
     assert_eq!(status, StatusCode::OK);
     assert_eq!(none["dialect_senses"][0]["note"], "已人工核对");
 }
+
+#[sqlx::test]
+async fn dialect_projects_distinct_senses_from_one_peer_revision(pool: PgPool) {
+    let actor = admin(&pool, PUBLISH).await;
+    let state = AppState::for_test(pool.clone());
+    let (source, a) = fixture(&state, &pool, actor).await;
+    let (peer, b) = fixture(&state, &pool, actor).await;
+    let mut docs = [a["draft"].clone(), b["draft"].clone()];
+    for doc in &mut docs {
+        let second = json!({"id":Uuid::now_v7(),"part_of_speech":"noun","definitions":[],"equivalents":[{"id":Uuid::now_v7(),"locale":"zh-Hans","text":"第二义"}]});
+        doc["senses"].as_array_mut().unwrap().push(second);
+    }
+    let targets: Vec<_> = docs[1]["senses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| json!({"sense_id":s["id"],"usage":"en-US"}))
+        .collect();
+    let (ok, b) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &peer,
+        json!({"expected_revision":b["revision"],"draft":docs[1],"dialect_changes":targets}),
+    )
+    .await;
+    assert_eq!(ok, StatusCode::OK, "{b}");
+    let links:Vec<_>=docs[0]["senses"].as_array().unwrap().iter().zip(targets).map(|(s,t)|json!({"sense_id":s["id"],"usage":"en-GB","target":{"entry_id":b["id"],"sense_id":t["sense_id"],"revision":b["revision"]}})).collect();
+    let (ok, result) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &source,
+        json!({"expected_revision":a["revision"],"draft":docs[0],"dialect_changes":links}),
+    )
+    .await;
+    assert_eq!(ok, StatusCode::OK, "{result}");
+    for (i, link) in links.iter().enumerate() {
+        let row = result["dialect_senses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["sense_id"] == link["sense_id"])
+            .unwrap();
+        assert_eq!(row["target"]["sense_id"], link["target"]["sense_id"]);
+        assert_eq!(row["target"]["revision"], 4);
+        assert_eq!(
+            row["target"]["gloss"],
+            if i == 0 { "中心" } else { "第二义" }
+        );
+    }
+}
