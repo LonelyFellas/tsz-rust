@@ -273,25 +273,63 @@ pub(super) async fn apply(
             return Err(invalid("词义的方言、配对或说明无效"));
         }
         let mut endpoints = Vec::new();
+        let mut retain_pair = false;
         if let Some(pair) = own.get(&c.sense_id).and_then(|s| s.pair_id) {
             let (gb,gs,us,ss):(Uuid,Uuid,Uuid,Uuid)=sqlx::query_as("SELECT gb_entry,gb_sense,us_entry,us_sense FROM lexicon_next.dialect_pairs WHERE id=$1").bind(pair).fetch_one(&mut *conn).await.map_err(AppError::internal)?;
             let (id, sid) = if gb == entry.id { (us, ss) } else { (gb, gs) };
-            endpoints.push((
-                id,
-                sid,
-                c.previous_target_revision.ok_or_else(changed)?,
-                Some(pair),
-            ));
+            let previous_revision = c.previous_target_revision.ok_or_else(changed)?;
+            retain_pair = c
+                .target
+                .as_ref()
+                .is_some_and(|target| target.entry_id == id && target.sense_id == sid);
+            if retain_pair
+                && c.target
+                    .as_ref()
+                    .is_none_or(|target| target.revision != previous_revision)
+            {
+                return Err(changed());
+            }
+            endpoints.push((id, sid, previous_revision, Some(pair), retain_pair));
         } else if c.previous_target_revision.is_some() {
             return Err(changed());
         }
-        if let Some(target) = c.target.as_ref() {
-            endpoints.push((target.entry_id, target.sense_id, target.revision, None));
+        if let Some(target) = c.target.as_ref()
+            && !retain_pair
+        {
+            endpoints.push((
+                target.entry_id,
+                target.sense_id,
+                target.revision,
+                None,
+                false,
+            ));
         }
         let mut pair_id = None;
-        for (id, sid, rev, old) in endpoints {
+        for (id, sid, rev, old, keep) in endpoints {
             if id == entry.id {
                 return Err(invalid("请选择另一个词条的义项"));
+            }
+            if keep {
+                let peer = load_peer(
+                    conn,
+                    access,
+                    entry.medium_locale.as_deref().unwrap_or("zh-Hans"),
+                    id,
+                    rev,
+                )
+                .await?;
+                let other = peer
+                    .values
+                    .get(&sid)
+                    .ok_or_else(|| invalid("请先在对方义项设置相反的方言"))?;
+                if other.pair_id != old {
+                    return Err(changed());
+                }
+                if c.usage == other.usage || other.usage == NextDialectUsage::General {
+                    return Err(invalid("双方必须属于相反的方言"));
+                }
+                pair_id = old;
+                continue;
             }
             if let std::collections::btree_map::Entry::Vacant(slot) = peers.entry(id) {
                 slot.insert(
