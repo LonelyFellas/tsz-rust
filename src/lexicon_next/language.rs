@@ -17,6 +17,7 @@ pub(super) const POS: &[&str] = &[
     "numeral",
     "particle",
 ];
+pub const DRAFT_SCHEMA_VERSION: i32 = 1;
 pub(super) fn valid_pos(code: &str) -> bool {
     (POS.contains(&code) || code.starts_with("phrase_"))
         && crate::catalog::service::valid_part_code(code.to_owned()).is_ok()
@@ -48,6 +49,12 @@ pub fn capabilities() -> NextCapabilities {
         publishing: true,
         form_editor: None,
         sense_groups: None,
+    }
+}
+pub fn draft_schema_compatibility() -> NextDraftSchemaCompatibility {
+    NextDraftSchemaCompatibility {
+        draft_schema_version: DRAFT_SCHEMA_VERSION,
+        supported_draft_schema_versions: vec![DRAFT_SCHEMA_VERSION],
     }
 }
 pub fn unavailable() -> AppError {
@@ -98,10 +105,10 @@ pub(super) fn identity(ids: &mut HashSet<Uuid>, id: Uuid) -> Result<(), AppError
 
 pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
     require_language(language)?;
-    if draft.schema_version != 1 {
+    if draft.schema_version != DRAFT_SCHEMA_VERSION {
         return Err(AppError::unprocessable(
             ErrorCode::UnsupportedSchemaVersion,
-            "schema_version must be 1",
+            "schema_version must match the negotiated draft schema",
         ));
     }
     text(&draft.headword, 200)?;

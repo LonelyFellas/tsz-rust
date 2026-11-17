@@ -376,6 +376,15 @@ pub struct NextCapabilities {
     pub sense_groups: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextDraftSchemaCompatibility {
+    #[schema(minimum = 1)]
+    pub draft_schema_version: i32,
+    #[schema(min_items = 1)]
+    pub supported_draft_schema_versions: Vec<i32>,
+}
+
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
