@@ -1119,6 +1119,65 @@ async fn dialect_pairs_conflict_and_permissions_leave_both_sides_intact(pool: Pg
 }
 
 #[sqlx::test]
+async fn dialect_pair_reapplying_same_target_preserves_identity_and_peer_revision(pool: PgPool) {
+    let actor = admin(&pool, PUBLISH).await;
+    let state = AppState::for_test(pool.clone());
+    let (source_path, source) = fixture(&state, &pool, actor).await;
+    let (peer_path, peer) = fixture(&state, &pool, actor).await;
+
+    let (status, peer) = dialect_save(&state, actor, &peer_path, &peer, "en-US", None).await;
+    assert_eq!(status, StatusCode::OK, "{peer}");
+    let (status, source) =
+        dialect_save(&state, actor, &source_path, &source, "en-GB", Some(&peer)).await;
+    assert_eq!(status, StatusCode::OK, "{source}");
+
+    let source_id: Uuid = serde_json::from_value(source["id"].clone()).unwrap();
+    let (_, peer_after_pair) = full_call(&state, actor, "GET", &peer_path, Value::Null).await;
+    let pair_id_before: Uuid = sqlx::query_scalar(
+        "SELECT (item->>'pair_id')::uuid FROM lexicon_next.draft_revisions r, jsonb_array_elements(r.dialect_senses) item WHERE r.entry_id=$1 AND r.revision=$2",
+    )
+    .bind(source_id)
+    .bind(source["revision"].as_i64().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let pair_count_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon_next.dialect_pairs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let (status, repeated) = dialect_save(
+        &state,
+        actor,
+        &source_path,
+        &source,
+        "en-GB",
+        Some(&peer_after_pair),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+
+    let (_, peer_after_repeat) = full_call(&state, actor, "GET", &peer_path, Value::Null).await;
+    assert_eq!(peer_after_repeat["revision"], peer_after_pair["revision"]);
+    let pair_id_after: Uuid = sqlx::query_scalar(
+        "SELECT (item->>'pair_id')::uuid FROM lexicon_next.draft_revisions r, jsonb_array_elements(r.dialect_senses) item WHERE r.entry_id=$1 AND r.revision=$2",
+    )
+    .bind(source_id)
+    .bind(repeated["revision"].as_i64().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pair_id_after, pair_id_before);
+    let pair_count_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon_next.dialect_pairs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(pair_count_after, pair_count_before);
+}
+
+#[sqlx::test]
 async fn dialect_projects_distinct_senses_from_one_peer_revision(pool: PgPool) {
     let actor = admin(&pool, PUBLISH).await;
     let state = AppState::for_test(pool.clone());
