@@ -218,6 +218,7 @@ def prepare_runtime_images():
 
 def wait_for_baseline(host, *, seconds=600):
     deadline = time.monotonic() + seconds
+    stale_abort_attempted = False
     while True:
         try:
             baseline = host.baseline()
@@ -231,8 +232,17 @@ def wait_for_baseline(host, *, seconds=600):
             # Only an identified concurrent deployment is waitable. Unknown IO fails normally.
             if str(error) not in {"remote_deployment_busy", "frontend_deployment_busy", "deployment_in_progress"}:
                 raise
-            require(time.monotonic() < deadline, "deployment_queue_timeout")
-            print(json.dumps({"status": "waiting", "reason": str(error)}), file=sys.stderr, flush=True)
+            inspection = host.inspect()
+            print(json.dumps({"status": "waiting", "reason": str(error),
+                              "deployment": inspection}), file=sys.stderr, flush=True)
+            if time.monotonic() >= deadline:
+                if not stale_abort_attempted:
+                    stale_abort_attempted = True
+                    aborted = host.abort_stale()
+                    if aborted.get("aborted"):
+                        deadline = time.monotonic() + seconds
+                        continue
+                require(False, "deployment_queue_timeout")
             time.sleep(10)
 
 

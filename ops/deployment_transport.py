@@ -132,6 +132,12 @@ class SshHost:
             raise DeploymentError(result.get("stage", "remote_action_failed"))
         return result.get("result", {})
 
+    def inspect(self):
+        return self.request("inspect", None)
+
+    def abort_stale(self):
+        return self.request("abort_stale", None)
+
     def baseline(self):
         # Reuse the standalone read-only stage-B collector; it does not create remote files.
         source = (ROOT / "deployed_baseline.py").read_text()
