@@ -2,9 +2,11 @@ import copy
 import http.client
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from unittest.mock import Mock, patch
@@ -133,6 +135,50 @@ class HostOperationTests(unittest.TestCase):
                 (host.LOCK / "owner").write_text("another-owner")
                 with self.assertRaisesRegex(host.HostError, "owner_mismatch"):
                     host.dispatch("stop", plan, None)
+
+    def test_inspect_reports_and_aborts_old_unmutated_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root):
+                plan = self.prepare(root)
+                self.acquire(plan)
+                os.utime(host.state_path(plan), (time.time() - host.STALE_TRANSACTION_SECONDS - 1,) * 2)
+                observed = host.dispatch("inspect", None, None)
+                self.assertTrue(observed["safe_abort"])
+                result = host.dispatch("abort_stale", None, None)
+                self.assertEqual(result["owner"], plan["deployment_id"])
+                self.assertFalse(host.LOCK.exists())
+                self.assertEqual(host.state(plan)["status"], "blocked")
+
+    def test_stale_abort_refuses_recent_or_mutated_transaction(self):
+        for mutated, old in ((False, False), (True, True)):
+            with self.subTest(mutated=mutated, old=old), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with self.environment(root):
+                    plan = self.prepare(root)
+                    self.acquire(plan)
+                    value = host.state(plan)
+                    value["mutation_started"] = mutated
+                    host.atomic(host.state_path(plan), value)
+                    if old:
+                        os.utime(host.state_path(plan), (time.time() - host.STALE_TRANSACTION_SECONDS - 1,) * 2)
+                    with self.assertRaisesRegex(host.HostError, "stale_recovery_not_safe"):
+                        host.dispatch("abort_stale", None, None)
+
+    def test_stale_abort_fails_closed_on_corrupt_candidate_pid_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root):
+                plan = self.prepare(root)
+                self.acquire(plan)
+                (host.LOCK / "candidate_pid").write_text("not-a-pid")
+                os.utime(host.state_path(plan), (time.time() - host.STALE_TRANSACTION_SECONDS - 1,) * 2)
+                observed = host.dispatch("inspect", None, None)
+                self.assertTrue(observed["candidate_pid_invalid"])
+                self.assertFalse(observed["safe_abort"])
+                with self.assertRaisesRegex(host.HostError, "remote_candidate_pid_invalid"):
+                    host.dispatch("abort_stale", None, None)
+                self.assertTrue(host.LOCK.exists())
 
     def test_upload_is_owned_digest_checked_and_interrupt_leaves_no_live_change(self):
         with tempfile.TemporaryDirectory() as directory:

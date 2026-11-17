@@ -36,6 +36,7 @@ BINARY = ROOT / "target/release/tsz-rust"
 MANIFEST = Path("/opt/tsz-deploy-manifests/api.json")
 TRANSACTIONS = ROOT / "deployment-transactions"
 OPERATION_FDS = []
+STALE_TRANSACTION_SECONDS = 15 * 60
 
 
 class HostError(Exception):
@@ -117,6 +118,91 @@ def operation(plan):
 
 def state_path(plan):
     return transaction(plan) / "state.json"
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def inspect_deployment():
+    """Read the active deployment marker without requiring a candidate plan."""
+    if not LOCK.exists():
+        return {"owner": None, "active": False}
+    require(LOCK.is_dir(), "remote_lock_invalid")
+    owner_path = LOCK / "owner"
+    owner = owner_path.read_text().strip() if owner_path.is_file() else None
+    require(owner and re.fullmatch(r"[0-9a-f-]{36}", owner), "remote_owner_invalid")
+    folder = TRANSACTIONS / owner
+    state_file = folder / "state.json"
+    plan_file = folder / "plan.json"
+    require(state_file.is_file() and plan_file.is_file(), "remote_transaction_missing")
+    value = json.loads(state_file.read_text())
+    require(value.get("owner") == owner, "remote_state_owner_mismatch")
+    operation_busy = False
+    operation_file = folder / "operation.lock"
+    with operation_file.open("a+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            operation_busy = True
+        else:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    candidate_pid = None
+    candidate_pid_invalid = False
+    candidate_path = LOCK / "candidate_pid"
+    if candidate_path.is_file():
+        try:
+            candidate_pid = int(candidate_path.read_text().strip())
+        except ValueError:
+            candidate_pid_invalid = True
+    age_seconds = max(0, time.time() - state_file.stat().st_mtime)
+    mutation_started = bool(value.get("mutation_started"))
+    safe_abort = (
+        not operation_busy
+        and not mutation_started
+        and candidate_pid is None
+        and not candidate_pid_invalid
+        and age_seconds >= STALE_TRANSACTION_SECONDS
+    )
+    return {
+        "owner": owner,
+        "active": True,
+        "phase": value.get("phase"),
+        "pending": value.get("pending"),
+        "completed": value.get("completed", []),
+        "mutation_started": mutation_started,
+        "operation_busy": operation_busy,
+        "candidate_pid": candidate_pid,
+        "candidate_pid_invalid": candidate_pid_invalid,
+        "candidate_pid_alive": _pid_alive(candidate_pid) if candidate_pid else False,
+        "age_seconds": round(age_seconds, 3),
+        "safe_abort": safe_abort,
+    }
+
+
+def abort_stale_deployment():
+    """Release only an old, unmutated transaction whose operation is idle."""
+    observed = inspect_deployment()
+    require(not observed.get("candidate_pid_invalid"), "remote_candidate_pid_invalid")
+    require(observed.get("safe_abort") is True, "stale_recovery_not_safe")
+    owner = observed["owner"]
+    plan = json.loads((TRANSACTIONS / owner / "plan.json").read_text())
+    with (TRANSACTIONS / owner / "operation.lock").open("r+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise HostError("remote_operation_busy") from None
+        value = state(plan)
+        require(not value.get("mutation_started"), "stale_recovery_mutation_started")
+        value.update(status="blocked", phase="blocked", pending=None,
+                     failed_stage="stale_unmutated_transaction")
+        atomic(state_path(plan), value)
+        unlock(plan)
+    return {"aborted": True, "owner": owner, "reason": "stale_unmutated_transaction"}
 
 
 def state(plan):
@@ -614,6 +700,10 @@ def observe(plan):
 
 
 def dispatch(name, plan, credentials):
+    if name == "inspect":
+        return inspect_deployment()
+    if name == "abort_stale":
+        return abort_stale_deployment()
     if name in {"verify_existing", "baseline_artifact_manifest"}:
         with CROSS_DEPLOY_LOCK.open("r") as cross_lock:
             try:
