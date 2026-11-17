@@ -140,4 +140,39 @@ impl AudioAssetRepository {
             created_at: row.get("created_at"),
         }))
     }
+
+    pub async fn update_gender(
+        &self,
+        id: Uuid,
+        gender: AudioAssetGender,
+    ) -> Result<Option<AudioAsset>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"UPDATE lexicon.audio_assets
+               SET gender = $2
+               WHERE id = $1 AND reclamation_started_at IS NULL
+               RETURNING id, locale, gender, content_type, size_bytes, duration_ms,
+                         original_name, created_at"#,
+        )
+        .bind(id)
+        .bind(gender.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let decode = |value: String| sqlx::Error::Decode(format!("unexpected {value}").into());
+        let locale: String = row.get("locale");
+        let gender: String = row.get("gender");
+        Ok(Some(AudioAsset {
+            is_default: None,
+            id: row.get("id"),
+            locale: AudioAssetLocale::parse(&locale).ok_or_else(|| decode(locale))?,
+            gender: AudioAssetGender::parse(&gender).ok_or_else(|| decode(gender))?,
+            content_type: row.get("content_type"),
+            size_bytes: row.get("size_bytes"),
+            duration_ms: row.get("duration_ms"),
+            original_name: row.get("original_name"),
+            created_at: row.get("created_at"),
+        }))
+    }
 }

@@ -13,6 +13,7 @@ use crate::{
         dto::{
             AudioAssetPath, AudioAssetUrlResponse, ConfirmAudioAssetRequest,
             ConfirmAudioAssetResponse, CreateAudioUploadRequest, CreateAudioUploadResponse,
+            UpdateAudioAssetRequest,
         },
         repository::AudioAssetRepository,
         service::{AudioAssetService, AudioAssetServiceError},
@@ -93,6 +94,41 @@ pub async fn confirm_audio_asset(
         .await
         .map_err(map_error)?;
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/admin/lexicon/audio-assets/{id}",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(
+        AudioAssetPath,
+        ("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")
+    ),
+    request_body = UpdateAudioAssetRequest,
+    responses(
+        (status = 200, description = "音频资产元数据已更新", body = ConfirmAudioAssetResponse),
+        (status = 400, description = "性别非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "需要音频上传及词条或例句编辑权限"),
+        (status = 404, description = "音频资产不存在或不可编辑"),
+        (status = 501, description = "音频存储未开通")
+    )
+)]
+pub async fn update_audio_asset(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    headers: HeaderMap,
+    ApiPath(path): ApiPath<AudioAssetPath>,
+    ApiJson(request): ApiJson<UpdateAudioAssetRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    require_active_admin(&state, &auth).await?;
+    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    let response = service(&state)
+        .update_gender(auth.subject, path.id, request)
+        .await
+        .map_err(map_error)?;
+    Ok((StatusCode::OK, Json(response)))
 }
 
 #[utoipa::path(
