@@ -1,3 +1,9 @@
 [output]
 quiet = false
 deny = ["warnings"]
+
+[advisories]
+# chrono is still required by SQLx and the wire model. Track the planned
+# migration to a maintained time library separately; keep all other audit
+# warnings fail-closed.
+ignore = ["RUSTSEC-2026-0543"]
