@@ -90,6 +90,12 @@ pub struct ConfirmAudioAssetRequest {
     pub original_name: String,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAudioAssetRequest {
+    pub gender: AudioAssetGender,
+}
+
 /// 一条已登记的音频资产。既是 confirm 的响应体，也内嵌在 `GrammarVariantV3.audio_assets` 里。
 /// `is_default` 是当前正文的播放选择；其余元数据保存时按 id 从服务端重新灌入。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

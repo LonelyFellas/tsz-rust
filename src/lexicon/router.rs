@@ -1,4 +1,8 @@
-use axum::{Router, extract::DefaultBodyLimit, routing::get};
+use axum::{
+    Router,
+    extract::DefaultBodyLimit,
+    routing::{get, patch},
+};
 
 use crate::{
     lexicon::{handler, validation::MAX_STEP_CONTENT_BODY_BYTES},
@@ -187,6 +191,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/audio-assets",
             axum::routing::post(crate::lexicon::audio_assets::handler::confirm_audio_asset),
+        )
+        .route(
+            "/audio-assets/{id}",
+            patch(crate::lexicon::audio_assets::handler::update_audio_asset),
         )
         .route(
             "/audio-assets/{id}/content",

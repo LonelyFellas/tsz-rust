@@ -18,7 +18,7 @@ use super::{
         AUDIO_ASSET_CONTENT_TYPES, AudioAsset, AudioAssetGender, AudioAssetLocale,
         AudioAssetUrlResponse, AudioUploadTicket, ConfirmAudioAssetRequest,
         ConfirmAudioAssetResponse, CreateAudioUploadRequest, CreateAudioUploadResponse,
-        audio_extension,
+        UpdateAudioAssetRequest, audio_extension,
     },
     repository::{AudioAssetRecord, AudioAssetRepository, NewAudioAsset, SOURCE_KEY_UNIQUE},
 };
@@ -238,6 +238,36 @@ impl AudioAssetService {
             .instrument(tracing::Span::current()),
         );
         promotion.await?
+    }
+
+    pub async fn update_gender(
+        &self,
+        admin_id: Uuid,
+        asset_id: Uuid,
+        request: UpdateAudioAssetRequest,
+    ) -> Result<ConfirmAudioAssetResponse, AudioAssetServiceError> {
+        self.authorize(admin_id, true).await?;
+        if request.gender == AudioAssetGender::Neutral {
+            return Err(crate::error::AppError::bad_request(
+                crate::error::ErrorCode::InvalidRequestBody,
+                "上传录音性别须为 female 或 male",
+            )
+            .into());
+        }
+        let record = self
+            .repository
+            .find(asset_id)
+            .await?
+            .ok_or(AudioAssetServiceError::NotFound)?;
+        if record.created_by_admin_id != admin_id {
+            return Err(AudioAssetServiceError::NotFound);
+        }
+        let asset = self
+            .repository
+            .update_gender(asset_id, request.gender)
+            .await?
+            .ok_or(AudioAssetServiceError::NotFound)?;
+        Ok(ConfirmAudioAssetResponse { asset })
     }
 
     #[allow(clippy::too_many_arguments)]

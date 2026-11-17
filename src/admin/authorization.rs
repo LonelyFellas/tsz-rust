@@ -961,6 +961,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::All(&["speech.upload_audio"]),
     ),
     (
+        "PATCH",
+        "/lexicon/audio-assets/{id}",
+        RoutePolicy::All(&["speech.upload_audio"]),
+    ),
+    (
         "GET",
         "/lexicon/audio-assets/{id}/content",
         RoutePolicy::Any(&[

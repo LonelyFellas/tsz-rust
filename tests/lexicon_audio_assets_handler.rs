@@ -325,6 +325,41 @@ async fn confirm_promotes_the_object_and_registers_the_asset(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn creator_can_update_audio_gender_but_other_admin_cannot(pool: PgPool) {
+    let owner_id = seed_admin(&pool).await;
+    let other_id = seed_admin(&pool).await;
+    let mut state = AppState::for_test(pool);
+    let store = configure_audio(&mut state);
+    let owner_token = token(&state, owner_id);
+    let other_token = token(&state, other_id);
+    let asset = upload_asset(&state, &store, &owner_token, vec![1, 2, 3]).await;
+    let asset_id = asset["asset"]["id"].as_str().unwrap();
+    let path = format!("{ASSETS_URL}/{asset_id}");
+
+    let (status, body, _) = call(
+        &state,
+        Method::PATCH,
+        &path,
+        Some(&owner_token),
+        Some(json!({"gender": "male"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["asset"]["gender"], "male");
+
+    let (status, body, _) = call(
+        &state,
+        Method::PATCH,
+        &path,
+        Some(&other_token),
+        Some(json!({"gender": "female"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "audio_asset_not_found");
+}
+
+#[sqlx::test]
 async fn confirm_rejects_foreign_keys_and_incomplete_uploads(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let mut state = AppState::for_test(pool);
