@@ -13,7 +13,7 @@ cargo audit --deny warnings
 
 ## JWT 加密后端与当前例外
 
-当前没有忽略的安全公告。
+当前仅忽略 `RUSTSEC-2026-0543`：`chrono 0.4.45` 已被 RustSec 标为 unmaintained，仍被根 crate、SQLx 及 `maker/ip2region` 使用。例外只针对该 advisory；其他审计警告继续阻断 CI。后续迁移到受维护的 `time` 或 `jiff` 时应删除该例外并重新验证时间、数据库和 wire 序列化契约。
 
 2026-10-24 将 `jsonwebtoken 10.4.0` 的加密后端从 `rust_crypto` 切换为上游支持的 `aws_lc_rs`，复用 TLS 依赖中已有的 `aws-lc-rs`。`rust_crypto` 引入的 `p256/p384 → elliptic-curve → crypto-bigint 0.5.5` 命中 [RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html)；当前最新 `jsonwebtoken 11.1.0` 的 `rust_crypto` 仍使用同一代曲线依赖，不能靠直接升级 JWT 大版本解除。
 
