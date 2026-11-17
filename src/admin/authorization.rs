@@ -161,6 +161,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::All(&["words.access"]),
     ),
     (
+        "POST",
+        "/lexicon-next/test-fixtures/dialect-pair",
+        RoutePolicy::All(&["words.access", "words.create"]),
+    ),
+    (
         "GET",
         "/lexicon-next/equivalent-catalog",
         RoutePolicy::All(&["words.access"]),

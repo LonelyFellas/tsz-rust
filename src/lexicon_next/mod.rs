@@ -18,6 +18,7 @@ mod sentence_details;
 mod sentence_drafts;
 pub mod sentence_model;
 pub mod sentences;
+pub mod test_fixtures;
 mod workspace;
 
 use crate::{
@@ -52,6 +53,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/capabilities", get(capabilities))
         .route("/draft-schema", get(draft_schema))
+        .route(
+            "/test-fixtures/dialect-pair",
+            axum::routing::post(test_fixtures::create),
+        )
         .route("/equivalent-catalog", get(equivalent_catalog))
         .route("/sentences", get(sentences::list).post(sentences::create))
         .route("/sentences/{id}", get(sentences::read).put(sentences::save))
