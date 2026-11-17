@@ -51,6 +51,7 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(workspace_command),
         )
         .route("/capabilities", get(capabilities))
+        .route("/draft-schema", get(draft_schema))
         .route("/equivalent-catalog", get(equivalent_catalog))
         .route("/sentences", get(sentences::list).post(sentences::create))
         .route("/sentences/{id}", get(sentences::read).put(sentences::save))
@@ -153,6 +154,17 @@ pub async fn capabilities(
         capability.medium_ownership = Some(true);
     }
     Ok(Json(capability))
+}
+
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/draft-schema", tag="admin-lexicon-next", security(("bearer_auth"=[])), responses((status=200, body=NextDraftSchemaCompatibility), (status=401), (status=403)))]
+pub async fn draft_schema(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+) -> Result<Json<NextDraftSchemaCompatibility>, AppError> {
+    permissions::load(&state, &auth)
+        .await?
+        .require("words.access")?;
+    Ok(Json(language::draft_schema_compatibility()))
 }
 
 #[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(NextListQuery), responses((status=200, body=NextEntryList), (status=401), (status=403), (status=422)))]

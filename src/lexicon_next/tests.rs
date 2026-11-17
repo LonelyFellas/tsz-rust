@@ -105,6 +105,9 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
     assert_eq!(caps.languages.len(), 1);
     assert_eq!(caps.languages[0].target_language, "en");
     assert!(!caps.generation && caps.publishing);
+    let draft_schema = language::draft_schema_compatibility();
+    assert_eq!(draft_schema.draft_schema_version, 1);
+    assert_eq!(draft_schema.supported_draft_schema_versions, vec![1]);
 }
 
 #[test]
@@ -131,6 +134,11 @@ fn openapi_declares_closed_drafts_and_distinct_endpoints() {
     assert!(paths["/api/v1/admin/lexicon-next/entries/{id}"]["put"].is_object());
     assert!(
         paths["/api/v1/admin/lexicon-next/entries/{id}"]["put"]["responses"]["409"].is_object()
+    );
+    assert!(paths["/api/v1/admin/lexicon-next/draft-schema"]["get"].is_object());
+    assert_eq!(
+        spec["components"]["schemas"]["NextDraftSchemaCompatibility"]["additionalProperties"],
+        false
     );
 }
 
