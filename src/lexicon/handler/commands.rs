@@ -222,7 +222,7 @@ pub async fn save_forms(
     path = "/api/v1/admin/lexicon/entries/{id}/audio",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本及正式音频引用。", example = "v1"), ("X-TSZ-Voice-Locales" = Option<String>, Header, description = "v1 支持英语地区音色。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回句子格式。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 表单内容。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header), ("X-TSZ-Multiple-Spellings" = Option<String>, Header, description = "v1 支持多条英美拼写。", example = "v1")),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Spelling-Speech" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Phoneme-Speech" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Voice-Models" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Voice-Versions" = String, Header, description = "必须为 v6。", example = "v6"), ("X-TSZ-Voice-Locales" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Sentence-Formatting" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Form-Contents" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Multiple-Spellings" = String, Header, description = "必须为 v1。", example = "v1")),
     request_body = UpdateEntryAudioInputV3,
     responses(
         (status = 200, description = "保存正式配音资产与音色配置", body = AdminWordV3Envelope),
@@ -242,6 +242,7 @@ pub async fn update_audio(
     ApiJson(input): ApiJson<Value>,
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
+    require_audio_update_capabilities(&headers)?;
     v3_contract::require_schema_version_3(&input)?;
     let input: UpdateEntryAudioInputV3 = v3_contract::decode_request(input)?;
     v3_contract::require_positive_revision("base_revision", input.base_revision)?;
@@ -286,6 +287,28 @@ pub async fn update_audio(
     );
     project_spelling_markup(&headers, &mut response.word.forms);
     spelling_markup_response(&headers, StatusCode::OK, response)
+}
+
+fn require_audio_update_capabilities(headers: &HeaderMap) -> Result<(), AppError> {
+    let required = [
+        ("x-tsz-form-contents", "v1"),
+        ("x-tsz-form-content-reassignment", "v1"),
+        ("x-tsz-multiple-spellings", "v1"),
+        ("x-tsz-phoneme-speech", "v1"),
+        ("x-tsz-sentence-formatting", "v1"),
+        ("x-tsz-spelling-markup", "v1"),
+        ("x-tsz-spelling-speech", "v1"),
+        ("x-tsz-voice-locales", "v1"),
+        ("x-tsz-voice-models", "v1"),
+        ("x-tsz-voice-versions", "v6"),
+    ];
+    if required
+        .iter()
+        .any(|(name, value)| !headers.get(*name).is_some_and(|actual| actual == *value))
+    {
+        return Err(crate::lexicon::shared_forms::upgrade_error());
+    }
+    Ok(())
 }
 
 #[utoipa::path(

@@ -262,6 +262,32 @@ pub(crate) fn ensure_audio_profile_only(
     Ok(())
 }
 
+pub(crate) fn preserve_audio_profile_fields(
+    before: &serde_json::Value,
+    after: &mut serde_json::Value,
+) {
+    match (before, after) {
+        (serde_json::Value::Object(before), serde_json::Value::Object(after)) => {
+            for key in ["voice_profile", "audio_assets", "source", "use_spelling"] {
+                if let Some(value) = before.get(key) {
+                    after.entry(key).or_insert_with(|| value.clone());
+                }
+            }
+            for (key, value) in before {
+                if let Some(after) = after.get_mut(key) {
+                    preserve_audio_profile_fields(value, after);
+                }
+            }
+        }
+        (serde_json::Value::Array(before), serde_json::Value::Array(after)) => {
+            for (before, after) in before.iter().zip(after.iter_mut()) {
+                preserve_audio_profile_fields(before, after);
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn settings_on(conn: &mut PgConnection) -> Result<DubbingUpdateSettings, AppError> {
     let row = sqlx::query(
         "SELECT wait_seconds,revision FROM speech.dubbing_update_settings WHERE singleton",

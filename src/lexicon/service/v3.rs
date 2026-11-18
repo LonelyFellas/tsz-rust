@@ -2853,7 +2853,9 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        let value = serde_json::json!([input.forms, record.meanings]);
+        let before = serde_json::json!([record.forms, record.meanings]);
+        let mut value = serde_json::json!([input.forms, before[1].clone()]);
+        crate::speech::audio_updates::preserve_audio_profile_fields(&before, &mut value);
         replace_dubbing_audio_with_voice_changes(
             &mut transaction,
             actor_id,
