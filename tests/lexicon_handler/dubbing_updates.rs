@@ -23,8 +23,12 @@ async fn request(
         .header("X-TSZ-Voice-Versions", version)
         .header("X-TSZ-Voice-Locales", "v1")
         .header("X-TSZ-Voice-Models", "v1")
+        .header("X-TSZ-Sentence-Formatting", "v1")
+        .header("X-TSZ-Spelling-Markup", "v1")
         .header("X-TSZ-Spelling-Speech", "v1")
         .header("X-TSZ-Phoneme-Speech", "v1")
+        .header("X-TSZ-Form-Content-Reassignment", "v1")
+        .header("X-TSZ-Multiple-Spellings", "v1")
         .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
         .unwrap();
     let response = tsz_rust::router(state.clone())
@@ -286,8 +290,12 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
         .header("X-TSZ-Voice-Versions", "v6")
         .header("X-TSZ-Voice-Locales", "v1")
         .header("X-TSZ-Voice-Models", "v1")
+        .header("X-TSZ-Sentence-Formatting", "v1")
+        .header("X-TSZ-Spelling-Markup", "v1")
         .header("X-TSZ-Spelling-Speech", "v1")
         .header("X-TSZ-Phoneme-Speech", "v1")
+        .header("X-TSZ-Form-Content-Reassignment", "v1")
+        .header("X-TSZ-Multiple-Spellings", "v1")
         .body(Body::from(
             json!({
                 "schema_version": 3,
