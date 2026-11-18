@@ -1,0 +1,10 @@
+.git
+.github
+.cargo
+target
+.env
+.env.*
+!.env.production.example
+*.log
+docs
+tests
