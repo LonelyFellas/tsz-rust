@@ -253,7 +253,32 @@ pub async fn update_audio(
         .await
         .map_err(map_error)?;
     let mut response = AdminWordV3Envelope {
-        word: service(&state).get_v3(path.id).await.map_err(map_error)?,
+        word: service(&state)
+            .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+            .with_multiple_spellings_support(
+                headers
+                    .get("x-tsz-multiple-spellings")
+                    .is_some_and(|value| value == "v1"),
+            )
+            .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(
+                &headers,
+            ))
+            .with_voice_versions_support(crate::lexicon::voice_versions::supported(&headers))
+            .with_dubbing_support(crate::lexicon::voice_versions::dubbing_supported(&headers))
+            .with_voice_pool_support(crate::lexicon::voice_versions::pool_supported(&headers))
+            .with_multi_recommendations_support(
+                crate::lexicon::voice_versions::multi_recommendations_supported(&headers),
+            )
+            .with_voice_models_support(crate::lexicon::voice_versions::models_supported(&headers))
+            .with_extended_voice_locales_support(
+                crate::lexicon::voice_versions::extended_supported(&headers),
+            )
+            .with_generated_audio_support(crate::lexicon::voice_versions::generated_supported(
+                &headers,
+            ))
+            .get_v3(path.id)
+            .await
+            .map_err(map_error)?,
     };
     apply_capability_flags(
         &mut response.word.capabilities,

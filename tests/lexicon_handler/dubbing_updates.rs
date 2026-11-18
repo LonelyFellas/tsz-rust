@@ -292,8 +292,7 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
             json!({
                 "schema_version": 3,
                 "base_revision": fresh["word"]["revision"],
-                "forms": audio_forms,
-                "meanings": fresh["word"]["meanings"]
+                "forms": audio_forms
             })
             .to_string(),
         ))

@@ -2085,8 +2085,6 @@ pub struct UpdateEntryAudioInputV3 {
     pub base_revision: i64,
     #[schema(value_type = FormsStepRepresentationV3)]
     pub forms: DraftFormsStepContentV3,
-    #[schema(value_type = DraftMeaningsStepContentWritableV3)]
-    pub meanings: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
