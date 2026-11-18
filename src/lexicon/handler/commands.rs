@@ -219,6 +219,52 @@ pub async fn save_forms(
 
 #[utoipa::path(
     put,
+    path = "/api/v1/admin/lexicon/entries/{id}/audio",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(EntryPath),
+    request_body = UpdateEntryAudioInputV3,
+    responses(
+        (status = 200, description = "保存正式配音资产与音色配置", body = AdminWordV3Envelope),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或无词条编辑权限"),
+        (status = 404, description = "词条不存在"),
+        (status = 409, description = "revision 或非音频字段已变化"),
+        (status = 422, description = "请求结构或音频资产无效")
+    )
+)]
+pub async fn update_audio(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    ApiPath(path): ApiPath<EntryPath>,
+    ApiJson(input): ApiJson<Value>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    v3_contract::require_schema_version_3(&input)?;
+    let input: UpdateEntryAudioInputV3 = v3_contract::decode_request(input)?;
+    v3_contract::require_positive_revision("base_revision", input.base_revision)?;
+    if !state.smart_lexicon_v3_flags.edit || !state.smart_lexicon_v3_flags.projection {
+        return Err(v3_storage_unavailable());
+    }
+    service(&state)
+        .update_audio_v3(admin.id, request_id.as_uuid(), path.id, input)
+        .await
+        .map_err(map_error)?;
+    let mut response = AdminWordV3Envelope {
+        word: service(&state).get_v3(path.id).await.map_err(map_error)?,
+    };
+    apply_capability_flags(
+        &mut response.word.capabilities,
+        state.smart_lexicon_v3_flags,
+    );
+    project_spelling_markup(&headers, &mut response.word.forms);
+    spelling_markup_response(&headers, StatusCode::OK, response)
+}
+
+#[utoipa::path(
+    put,
     path = "/api/v1/admin/lexicon/entries/{id}/steps/meanings",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),

@@ -24,11 +24,12 @@ use crate::lexicon::dto::{
     PhraseComponentUsageV3, PresenceAwareVec, PreviewFormsImpactInputV3,
     PronunciationNormalizationVersionV3, PronunciationStyle, RetiredStableNodeV3,
     RichTextVariantV3, SaveFormsStepInputV3, SaveMeaningsStepInputV3, SpellingSpeechV3,
-    SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3, UsDialectV3,
-    V3PublicationCapability, V3RetiredNodeRole, V3ValidationIssueCode, ValidateAdminWordV3Input,
-    WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3, WordEntryKindV3,
-    WordFormGroupMemberV3, WordFormGroupV3, WordHeadwordsV2, WordPosFormsV3, WordPosMeaningsV3,
-    WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
+    SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3,
+    UpdateEntryAudioInputV3, UsDialectV3, V3PublicationCapability, V3RetiredNodeRole,
+    V3ValidationIssueCode, ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3,
+    WordDefinitionV3, WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordHeadwordsV2,
+    WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3, WordRegionalVariantsV3,
+    WordUkFormVariantV3, WordUsFormVariantV3,
 };
 use crate::lexicon::model::{ComponentTargetDraftRecord, NodeIdentityRecord, RegionEvidenceRecord};
 use crate::lexicon::v3_contract::normalize_pronunciation_text;
@@ -2833,6 +2834,33 @@ impl LexiconService {
         }
         let word = self.get_v3(entry_id).await?;
         Ok(AdminWordV3Envelope { word })
+    }
+
+    pub async fn update_audio_v3(
+        &self,
+        actor_id: Uuid,
+        request_id: Uuid,
+        entry_id: Uuid,
+        input: UpdateEntryAudioInputV3,
+    ) -> Result<(), LexiconServiceError> {
+        let value = serde_json::json!([input.forms, input.meanings]);
+        let mut transaction = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        replace_dubbing_audio_with_voice_changes(
+            &mut transaction,
+            actor_id,
+            request_id,
+            entry_id,
+            input.base_revision,
+            &value,
+        )
+        .await
+        .map_err(LexiconServiceError::Authorization)?;
+        transaction.commit().await.map_err(database_error)
     }
 
     pub async fn save_meanings_v3(
@@ -5894,6 +5922,29 @@ pub(crate) async fn replace_dubbing_audio(
     revision: i64,
     value: &Value,
 ) -> Result<(), crate::error::AppError> {
+    replace_dubbing_audio_internal(tx, actor, request, entry, revision, value, false).await
+}
+
+pub(crate) async fn replace_dubbing_audio_with_voice_changes(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: Uuid,
+    request: Uuid,
+    entry: Uuid,
+    revision: i64,
+    value: &Value,
+) -> Result<(), crate::error::AppError> {
+    replace_dubbing_audio_internal(tx, actor, request, entry, revision, value, true).await
+}
+
+async fn replace_dubbing_audio_internal(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: Uuid,
+    request: Uuid,
+    entry: Uuid,
+    revision: i64,
+    value: &Value,
+    allow_voice_changes: bool,
+) -> Result<(), crate::error::AppError> {
     let map = crate::lexicon::handler::map_error;
     let authorization = crate::admin::permissions::lock(tx, actor).await?;
     LexiconRepository::lock_surface_contexts(tx, &[entry])
@@ -5913,7 +5964,11 @@ pub(crate) async fn replace_dubbing_audio(
         }));
     }
     let before = serde_json::json!([record.forms, record.meanings]);
-    crate::speech::audio_updates::ensure_audio_only(&before, value)?;
+    if allow_voice_changes {
+        crate::speech::audio_updates::ensure_audio_profile_only(&before, value)?;
+    } else {
+        crate::speech::audio_updates::ensure_audio_only(&before, value)?;
+    }
     let forms: DraftFormsStepContentV3 =
         serde_json::from_value(value[0].clone()).map_err(crate::error::AppError::internal)?;
     let meanings: DraftMeaningsStepContentV3 =

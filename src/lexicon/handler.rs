@@ -26,7 +26,7 @@ use crate::{
             RollbackPublicationV3Input, SaveFormsStepInputV3, SaveMeaningsStepInputV3,
             SearchComponentTargetsV3Input, SearchComponentTargetsV3Response, StepSaveIntent,
             SurfaceMatchPageV3, SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2,
-            ValidateAdminWordV3Input,
+            UpdateEntryAudioInputV3, ValidateAdminWordV3Input,
         },
         impact_store::ImpactStore,
         repository::LexiconRepository,
@@ -49,7 +49,7 @@ use spelling_markup::{project_spelling_markup, spelling_markup_response};
 
 pub use commands::{
     create, detect, preview_forms_impact, publish, restore_draft_from_publication,
-    rollback_publication, save_forms, save_meanings, validate,
+    rollback_publication, save_forms, save_meanings, update_audio, validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
 pub use query::{

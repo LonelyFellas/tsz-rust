@@ -270,6 +270,60 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
             "{suffix}: {fresh}"
         );
     }
+    let mut audio_forms = fresh["word"]["forms"].clone();
+    audio_forms
+        .pointer_mut(&format!(
+            "{path}/spelling_speech/voice_profile/voices/0/rate_percent"
+        ))
+        .unwrap()
+        .clone_from(&json!(-15));
+    let audio_request = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("{ROOT}/entries/{id}/audio"))
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("X-TSZ-Form-Contents", "v1")
+        .header("X-TSZ-Voice-Versions", "v6")
+        .header("X-TSZ-Voice-Locales", "v1")
+        .header("X-TSZ-Voice-Models", "v1")
+        .header("X-TSZ-Spelling-Speech", "v1")
+        .header("X-TSZ-Phoneme-Speech", "v1")
+        .body(Body::from(
+            json!({
+                "schema_version": 3,
+                "base_revision": fresh["word"]["revision"],
+                "forms": audio_forms,
+                "meanings": fresh["word"]["meanings"]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let audio_response = tsz_rust::router(state.clone())
+        .oneshot(audio_request)
+        .await
+        .unwrap();
+    assert_eq!(audio_response.status(), StatusCode::OK);
+    let audio_saved: Value = serde_json::from_slice(
+        &audio_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        audio_saved["word"]["revision"],
+        fresh["word"]["revision"].as_i64().unwrap() + 1
+    );
+    assert_eq!(
+        audio_saved["word"]["forms"]
+            .pointer(&format!(
+                "{path}/spelling_speech/voice_profile/voices/0/rate_percent"
+            ))
+            .unwrap(),
+        -15
+    );
     let stored: Value = sqlx::query_scalar(
         "SELECT content FROM lexicon.v3_form_contents WHERE entry_id=$1 AND id=$2",
     )

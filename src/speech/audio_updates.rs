@@ -234,6 +234,34 @@ pub(crate) fn ensure_audio_only(
     Ok(())
 }
 
+pub(crate) fn ensure_audio_profile_only(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> Result<(), AppError> {
+    fn stripped(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(fields) => serde_json::Value::Object(
+                fields
+                    .iter()
+                    .filter(|(key, _)| {
+                        *key != "voice_profile"
+                            && *key != "audio_assets"
+                            && *key != "source"
+                            && *key != "use_spelling"
+                    })
+                    .map(|(key, value)| (key.clone(), stripped(value)))
+                    .collect(),
+            ),
+            serde_json::Value::Array(items) => items.iter().map(stripped).collect(),
+            _ => value.clone(),
+        }
+    }
+    if stripped(before) != stripped(after) {
+        return Err(conflict());
+    }
+    Ok(())
+}
+
 async fn settings_on(conn: &mut PgConnection) -> Result<DubbingUpdateSettings, AppError> {
     let row = sqlx::query(
         "SELECT wait_seconds,revision FROM speech.dubbing_update_settings WHERE singleton",
@@ -438,5 +466,23 @@ mod side_protection_tests {
         assert!(ensure_audio_only(&original, &local).is_err());
         inherited["text"] = json!("Changed");
         assert!(ensure_audio_only(&original, &inherited).is_err());
+    }
+
+    #[test]
+    fn foreground_audio_save_allows_voice_profiles_and_assets_but_not_text() {
+        let original = json!({
+            "text": "Hello",
+            "audio_assets": [],
+            "synthesis": {"source": "ipa", "ipa": "ipa-value"},
+            "voice_profile": {"voices": [{"voice_id": "sonia", "rate_percent": 0}]}
+        });
+        let mut changed = original.clone();
+        changed["voice_profile"]["voices"][0]["rate_percent"] = json!(-20);
+        changed["voice_profile"]["voices"][0]["audio_asset_id"] = json!("asset-1");
+        changed["audio_assets"] = json!([{"id": "recording-1"}]);
+        changed["synthesis"]["source"] = json!("upload");
+        assert!(ensure_audio_profile_only(&original, &changed).is_ok());
+        changed["text"] = json!("Changed");
+        assert!(ensure_audio_profile_only(&original, &changed).is_err());
     }
 }
