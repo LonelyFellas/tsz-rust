@@ -222,7 +222,7 @@ pub async fn save_forms(
     path = "/api/v1/admin/lexicon/entries/{id}/audio",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置。", example = "v1"), ("X-TSZ-Voice-Models" = Option<String>, Header), ("X-TSZ-Voice-Versions" = Option<String>, Header, description = "v1 返回命名版本及正式音频引用。", example = "v1"), ("X-TSZ-Voice-Locales" = Option<String>, Header, description = "v1 支持英语地区音色。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回句子格式。", example = "v1"), ("X-TSZ-Form-Contents" = Option<String>, Header, description = "v1 使用 shared_v1 表单内容。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = Option<String>, Header), ("X-TSZ-Multiple-Spellings" = Option<String>, Header, description = "v1 支持多条英美拼写。", example = "v1")),
     request_body = UpdateEntryAudioInputV3,
     responses(
         (status = 200, description = "保存正式配音资产与音色配置", body = AdminWordV3Envelope),

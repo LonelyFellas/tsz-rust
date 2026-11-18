@@ -5994,6 +5994,15 @@ async fn replace_dubbing_audio_internal(
     hydrate_audio_asset_metadata(tx, &mut meanings)
         .await
         .map_err(map)?;
+    let form_issues = crate::lexicon::v3_contract::validate_forms(&forms, StepSaveIntent::Save);
+    if !form_issues.is_empty() {
+        return Err(map(v3_validation_failed(form_issues)));
+    }
+    let meaning_issues =
+        crate::lexicon::v3_contract::validate_meanings(&meanings, StepSaveIntent::Save);
+    if !meaning_issues.is_empty() {
+        return Err(map(v3_validation_failed(meaning_issues)));
+    }
     let forms_value = serde_json::to_value(&forms).map_err(crate::error::AppError::internal)?;
     let meanings_value =
         serde_json::to_value(&meanings).map_err(crate::error::AppError::internal)?;
