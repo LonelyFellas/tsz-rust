@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: tsz_rust
     ports:
-      - "5433:5432" # 避开 tsz-go 的 5432
+      - "5433:5432" # 本地开发使用 5433，避免占用宿主机默认 PostgreSQL 端口
     volumes:
       - tsz_rust_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,7 +18,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379" # 对齐 .env 的 REDIS_URL；tsz-go 暂无 redis，不冲突
+      - "6379:6379" # 对齐本地 .env 的 REDIS_URL
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
