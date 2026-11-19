@@ -18,6 +18,29 @@ async fn run() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&deployment_migrations::info())?);
             return Ok(());
         }
+        if command == "lexicon-rich-text-repair" {
+            let operation = arguments
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("repair operation is required"))?;
+            anyhow::ensure!(arguments.next().is_none(), "too many arguments");
+            let database_url = std::env::var("DATABASE_URL")?;
+            let pool = platform::connect_db(&database_url).await?;
+            let report = match operation.as_str() {
+                "dry-run" => serde_json::to_value(
+                    tsz_rust::lexicon::rich_text_repair_scan::dry_run(&pool).await?,
+                )?,
+                "apply" => serde_json::to_value(
+                    tsz_rust::lexicon::rich_text_repair_scan::apply(
+                        &pool,
+                        &std::env::var("MIGRATION_MANIFEST_DIGEST")?,
+                    )
+                    .await?,
+                )?,
+                _ => anyhow::bail!("unknown repair operation: {operation}"),
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
         anyhow::ensure!(
             command == "deploy-undo-migrations",
             "unknown command: {command}"
