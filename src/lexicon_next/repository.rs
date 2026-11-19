@@ -208,6 +208,9 @@ pub async fn save(
         return Err(language::invalid());
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
+    crate::lexicon::rich_text_repair::lock_transaction(&mut tx)
+        .await
+        .map_err(AppError::internal)?;
     permissions::lock_session(&mut tx, auth, "words.edit").await?;
     lock_list_writers(&mut tx).await?;
     let (language, owner, revision, status): (String, Uuid, i64, String) = sqlx::query_as(
@@ -237,6 +240,9 @@ pub async fn save(
     let conn = &mut *tx;
     let draft = &mut input.draft;
     let actor = auth.subject;
+    if let Some(editor) = draft.form_editor.as_mut() {
+        crate::lexicon::rich_text_repair::repair_shared_forms(editor);
+    }
     language::validate(&language, draft)?;
     let previous = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
         .bind(id)

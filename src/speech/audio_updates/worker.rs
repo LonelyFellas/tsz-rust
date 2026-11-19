@@ -373,6 +373,9 @@ async fn run(
         return Err(stale());
     }
     if claim.kind == "entry" {
+        crate::lexicon::rich_text_repair::lock_transaction(&mut tx)
+            .await
+            .map_err(AppError::internal)?;
         crate::lexicon::repository::LexiconRepository::lock_surface_contexts(
             &mut tx,
             &[claim.owner],

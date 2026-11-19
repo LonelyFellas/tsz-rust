@@ -12,6 +12,8 @@ pub(crate) mod provenance;
 pub mod published;
 pub mod repository;
 pub mod rich_text;
+pub mod rich_text_repair;
+pub mod rich_text_repair_scan;
 pub mod router;
 pub(crate) mod sentence_association;
 pub(crate) mod sentence_formatting;
