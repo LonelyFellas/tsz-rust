@@ -82,10 +82,11 @@ jobs:
       - name: Run rich-text repair
         run: |
           set -euo pipefail
-          remote="cd /opt/tsz-rust && set -a && . ./.env && set +a && ./tsz-rust lexicon-rich-text-repair $OPERATION"
+          remote="cd /opt/tsz-rust && set -a && . ./.env && set +a &&"
           if [[ "$OPERATION" == apply ]]; then
-            remote="MIGRATION_MANIFEST_DIGEST=$MANIFEST_DIGEST $remote"
+            remote="$remote export MIGRATION_MANIFEST_DIGEST=$MANIFEST_DIGEST &&"
           fi
+          remote="$remote ./tsz-rust lexicon-rich-text-repair $OPERATION"
           ssh tshb-test "$remote" | tee repair-report.json
 
       - name: Upload repair report
