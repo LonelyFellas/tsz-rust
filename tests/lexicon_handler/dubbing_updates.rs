@@ -274,13 +274,7 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
             "{suffix}: {fresh}"
         );
     }
-    let mut audio_forms = fresh["word"]["forms"].clone();
-    audio_forms
-        .pointer_mut(&format!(
-            "{path}/spelling_speech/voice_profile/voices/0/rate_percent"
-        ))
-        .unwrap()
-        .clone_from(&json!(-15));
+    let audio_forms = fresh["word"]["forms"].clone();
     let audio_request = Request::builder()
         .method(Method::PUT)
         .uri(format!("{ROOT}/entries/{id}/audio"))
@@ -309,7 +303,7 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
         .oneshot(audio_request)
         .await
         .unwrap();
-    assert_eq!(audio_response.status(), StatusCode::OK);
+    let audio_status = audio_response.status();
     let audio_saved: Value = serde_json::from_slice(
         &audio_response
             .into_body()
@@ -319,6 +313,7 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
             .to_bytes(),
     )
     .unwrap();
+    assert_eq!(audio_status, StatusCode::OK, "{audio_saved}");
     assert_eq!(
         audio_saved["word"]["revision"],
         fresh["word"]["revision"].as_i64().unwrap() + 1
@@ -326,10 +321,10 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
     assert_eq!(
         audio_saved["word"]["forms"]
             .pointer(&format!(
-                "{path}/spelling_speech/voice_profile/voices/0/rate_percent"
+                "{path}/spelling_speech/voice_profile/voices/0/audio_asset_id"
             ))
             .unwrap(),
-        -15
+        &variant["spelling_speech"]["voice_profile"]["voices"][0]["audio_asset_id"]
     );
     let stored: Value = sqlx::query_scalar(
         "SELECT content FROM lexicon.v3_form_contents WHERE entry_id=$1 AND id=$2",
@@ -377,10 +372,10 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
     let recording = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$2,'audio/wav',48,'en-GB','female','recording.wav',$3)")
         .bind(recording).bind(format!("assets/{recording}.wav")).bind(actor).execute(&pool).await.unwrap();
-    let mut forms = fresh["word"]["forms"].clone();
+    let mut forms = audio_saved["word"]["forms"].clone();
     let variant = forms.pointer_mut(path).unwrap();
     variant["spelling_speech"]["audio_assets"] = json!([{"id":recording,"locale":"en-US","gender":"male","content_type":"audio/mpeg","size_bytes":1,"duration_ms":null,"original_name":"forged.mp3","created_at":"2026-10-27T00:00:00Z"}]);
-    let request=Request::builder().method(Method::PUT).uri(format!("{ROOT}/entries/{id}/steps/forms")).header(header::AUTHORIZATION,format!("Bearer {bearer}")).header(header::CONTENT_TYPE,"application/json").header("X-TSZ-Form-Contents","v1").header("X-TSZ-Voice-Versions","v6").header("X-TSZ-Voice-Locales","v1").header("X-TSZ-Voice-Models","v1").header("X-TSZ-Spelling-Speech","v1").header("X-TSZ-Phoneme-Speech","v1").body(Body::from(json!({"schema_version":3,"base_revision":fresh["word"]["revision"],"intent":"save","content":forms}).to_string())).unwrap();
+    let request=Request::builder().method(Method::PUT).uri(format!("{ROOT}/entries/{id}/steps/forms")).header(header::AUTHORIZATION,format!("Bearer {bearer}")).header(header::CONTENT_TYPE,"application/json").header("X-TSZ-Form-Contents","v1").header("X-TSZ-Voice-Versions","v6").header("X-TSZ-Voice-Locales","v1").header("X-TSZ-Voice-Models","v1").header("X-TSZ-Spelling-Speech","v1").header("X-TSZ-Phoneme-Speech","v1").body(Body::from(json!({"schema_version":3,"base_revision":audio_saved["word"]["revision"],"intent":"save","content":forms}).to_string())).unwrap();
     let response = tsz_rust::router(state.clone())
         .oneshot(request)
         .await
