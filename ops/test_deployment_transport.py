@@ -103,6 +103,25 @@ class GateTests(unittest.TestCase):
         self.assertEqual(host._upload_once.call_count, 2)
         sleep.assert_called_once_with(10)
 
+    def test_upload_bounds_remote_receiver_and_allows_it_to_release_the_lock(self):
+        process = Mock(returncode=0)
+        process.communicate.return_value = (b'{"ok": true}', b"")
+        host = transport.SshHost()
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact"
+            artifact.write_bytes(b"artifact")
+            with patch.object(transport.subprocess, "Popen", return_value=process) as popen:
+                host._upload_once({"artifact_path": str(artifact)})
+        command = popen.call_args.args[0]
+        remote_command = command[-1]
+        self.assertIn("/usr/bin/timeout", remote_command)
+        self.assertIn("--kill-after=5s", remote_command)
+        self.assertIn("180s python3", remote_command)
+        self.assertEqual(
+            process.communicate.call_args.kwargs["timeout"],
+            transport.REMOTE_UPLOAD_TIMEOUT_SECONDS + transport.LOCAL_UPLOAD_GRACE_SECONDS,
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
