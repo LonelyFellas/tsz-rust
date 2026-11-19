@@ -695,6 +695,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "PUT",
+        "/lexicon/entries/{id}/audio",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "PUT",
         "/lexicon/entries/{id}/steps/meanings",
         RoutePolicy::Any(&["words.edit", "words.associate"]),
     ),

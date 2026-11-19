@@ -172,6 +172,11 @@ pub fn router() -> Router<AppState> {
                 .layer(DefaultBodyLimit::max(MAX_STEP_CONTENT_BODY_BYTES)),
         )
         .route(
+            "/entries/{id}/audio",
+            axum::routing::put(handler::update_audio)
+                .layer(DefaultBodyLimit::max(MAX_STEP_CONTENT_BODY_BYTES)),
+        )
+        .route(
             "/entries/{id}/steps/meanings",
             axum::routing::put(handler::save_meanings)
                 .layer(DefaultBodyLimit::max(MAX_STEP_CONTENT_BODY_BYTES)),

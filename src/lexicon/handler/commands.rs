@@ -219,6 +219,100 @@ pub async fn save_forms(
 
 #[utoipa::path(
     put,
+    path = "/api/v1/admin/lexicon/entries/{id}/audio",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Spelling-Speech" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Phoneme-Speech" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Voice-Models" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Voice-Versions" = String, Header, description = "必须为 v6。", example = "v6"), ("X-TSZ-Voice-Locales" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Sentence-Formatting" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Form-Contents" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Form-Content-Reassignment" = String, Header, description = "必须为 v1。", example = "v1"), ("X-TSZ-Multiple-Spellings" = String, Header, description = "必须为 v1。", example = "v1")),
+    request_body = UpdateEntryAudioInputV3,
+    responses(
+        (status = 200, description = "保存正式配音资产与音色配置", body = AdminWordV3Envelope),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或无词条编辑权限"),
+        (status = 404, description = "词条不存在"),
+        (status = 409, description = "revision 或非音频字段已变化"),
+        (status = 422, description = "请求结构或音频资产无效")
+    )
+)]
+pub async fn update_audio(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    headers: HeaderMap,
+    Extension(request_id): Extension<RequestId>,
+    ApiPath(path): ApiPath<EntryPath>,
+    ApiJson(input): ApiJson<Value>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    require_audio_update_capabilities(&headers)?;
+    v3_contract::require_schema_version_3(&input)?;
+    let input: UpdateEntryAudioInputV3 = v3_contract::decode_request(input)?;
+    v3_contract::require_positive_revision("base_revision", input.base_revision)?;
+    if !state.smart_lexicon_v3_flags.edit || !state.smart_lexicon_v3_flags.projection {
+        return Err(v3_storage_unavailable());
+    }
+    service(&state)
+        .update_audio_v3(admin.id, request_id.as_uuid(), path.id, input)
+        .await
+        .map_err(map_error)?;
+    let mut response = AdminWordV3Envelope {
+        word: service(&state)
+            .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
+            .with_multiple_spellings_support(
+                headers
+                    .get("x-tsz-multiple-spellings")
+                    .is_some_and(|value| value == "v1"),
+            )
+            .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(
+                &headers,
+            ))
+            .with_voice_versions_support(crate::lexicon::voice_versions::supported(&headers))
+            .with_dubbing_support(crate::lexicon::voice_versions::dubbing_supported(&headers))
+            .with_voice_pool_support(crate::lexicon::voice_versions::pool_supported(&headers))
+            .with_multi_recommendations_support(
+                crate::lexicon::voice_versions::multi_recommendations_supported(&headers),
+            )
+            .with_voice_models_support(crate::lexicon::voice_versions::models_supported(&headers))
+            .with_extended_voice_locales_support(
+                crate::lexicon::voice_versions::extended_supported(&headers),
+            )
+            .with_generated_audio_support(crate::lexicon::voice_versions::generated_supported(
+                &headers,
+            ))
+            .get_v3(path.id)
+            .await
+            .map_err(map_error)?,
+    };
+    apply_capability_flags(
+        &mut response.word.capabilities,
+        state.smart_lexicon_v3_flags,
+    );
+    project_spelling_markup(&headers, &mut response.word.forms);
+    spelling_markup_response(&headers, StatusCode::OK, response)
+}
+
+fn require_audio_update_capabilities(headers: &HeaderMap) -> Result<(), AppError> {
+    let required = [
+        ("x-tsz-form-contents", "v1"),
+        ("x-tsz-form-content-reassignment", "v1"),
+        ("x-tsz-multiple-spellings", "v1"),
+        ("x-tsz-phoneme-speech", "v1"),
+        ("x-tsz-sentence-formatting", "v1"),
+        ("x-tsz-spelling-markup", "v1"),
+        ("x-tsz-spelling-speech", "v1"),
+        ("x-tsz-voice-locales", "v1"),
+        ("x-tsz-voice-models", "v1"),
+        ("x-tsz-voice-versions", "v6"),
+    ];
+    if required
+        .iter()
+        .any(|(name, value)| !headers.get(*name).is_some_and(|actual| actual == *value))
+    {
+        return Err(crate::lexicon::shared_forms::upgrade_error());
+    }
+    Ok(())
+}
+
+#[utoipa::path(
+    put,
     path = "/api/v1/admin/lexicon/entries/{id}/steps/meanings",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),

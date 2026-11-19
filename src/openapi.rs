@@ -334,6 +334,7 @@ use utoipa::{
         crate::lexicon::handler::lifecycle::restore,
         crate::lexicon::handler::commands::preview_forms_impact,
         crate::lexicon::handler::commands::save_forms,
+        crate::lexicon::handler::commands::update_audio,
         crate::lexicon::handler::commands::save_meanings,
         crate::lexicon::handler::commands::validate,
         crate::lexicon::handler::audio_publication::check,

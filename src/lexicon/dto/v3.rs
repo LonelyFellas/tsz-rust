@@ -2077,6 +2077,18 @@ pub struct SaveFormsStepInputV3 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct UpdateEntryAudioInputV3 {
+    #[serde(deserialize_with = "deserialize_schema_version_3")]
+    #[schema(schema_with = schema_version_3_schema)]
+    pub schema_version: u8,
+    #[schema(minimum = 1)]
+    pub base_revision: i64,
+    #[schema(value_type = FormsStepRepresentationV3)]
+    pub forms: DraftFormsStepContentV3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SaveMeaningsStepInputV3 {
     #[serde(deserialize_with = "deserialize_schema_version_3")]
     #[schema(schema_with = schema_version_3_schema)]
