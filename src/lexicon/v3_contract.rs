@@ -152,7 +152,7 @@ pub(crate) fn validate_forms(
             location_for(node_id, None, None, None, None, None, None),
         ));
     }
-    issues.extend(validate_dialect_rules(content));
+    issues.extend(validate_dialect_rules(content, intent));
 
     for pos in &content.pos {
         register_node(
@@ -369,6 +369,7 @@ pub(crate) fn validate_forms(
 
 pub(crate) fn validate_dialect_rules(
     content: &DraftFormsStepContentV3,
+    intent: StepSaveIntent,
 ) -> Vec<DraftValidationIssue> {
     let mut issues = Vec::new();
     for pos in &content.pos {
@@ -407,7 +408,9 @@ pub(crate) fn validate_dialect_rules(
             else {
                 continue;
             };
-            if !regional_variants_match_rules(&form.regional_variants, rules) {
+            if intent == StepSaveIntent::Complete
+                && !regional_variants_match_rules(&form.regional_variants, rules)
+            {
                 issues.push(issue(
                     V3ValidationIssueCode::InvalidRegionalVariantShape,
                     "regional_variants",
@@ -2288,8 +2291,15 @@ mod tests {
             json!("colour");
         request["content"]["pos"][0]["form_groups"][0]["dialect_rules"]["spelling_mode"] =
             json!("unified");
-        assert!(has_code(
+        assert!(!has_code(
             &validate_forms(&decode_valid(request.clone()).content, StepSaveIntent::Save),
+            V3ValidationIssueCode::InvalidRegionalVariantShape
+        ));
+        assert!(has_code(
+            &validate_forms(
+                &decode_valid(request.clone()).content,
+                StepSaveIntent::Complete
+            ),
             V3ValidationIssueCode::InvalidRegionalVariantShape
         ));
         request["content"]["pos"][0]["forms"][0]["regional_variants"]["us"]["is_regular"] =
@@ -2484,7 +2494,13 @@ mod tests {
             "phonetic_mode": "distinguish"
         });
         let mismatched_spelling = decode_valid(mismatched_spelling);
-        let issue = validate_forms(&mismatched_spelling.content, StepSaveIntent::Save)
+        assert!(
+            validate_forms(&mismatched_spelling.content, StepSaveIntent::Save)
+                .iter()
+                .all(|issue| issue.code != "invalid_regional_variant_shape"),
+            "草稿保存允许暂存英美词形结构不一致"
+        );
+        let issue = validate_forms(&mismatched_spelling.content, StepSaveIntent::Complete)
             .into_iter()
             .find(|issue| issue.code == "invalid_regional_variant_shape")
             .expect("unified/distinguish 组必须拒绝 UK/US 异拼写");
@@ -2512,27 +2528,31 @@ mod tests {
             preserved["pos"][0]["forms"][1]["regional_variants"]["mode"],
             "uk_us"
         );
-        let issues = validate_forms(&mixed.content, StepSaveIntent::Save);
-        let mode_issues = issues
-            .iter()
+        let save_mode_issues = validate_forms(&mixed.content, StepSaveIntent::Save)
+            .into_iter()
             .filter(|issue| issue.code == "invalid_regional_variant_shape")
             .collect::<Vec<_>>();
-        assert_eq!(mode_issues.len(), 1);
-        assert_eq!(mode_issues[0].field, "regional_variants");
+        assert!(save_mode_issues.is_empty());
+        let complete_mode_issues = validate_forms(&mixed.content, StepSaveIntent::Complete)
+            .into_iter()
+            .filter(|issue| issue.code == "invalid_regional_variant_shape")
+            .collect::<Vec<_>>();
+        assert_eq!(complete_mode_issues.len(), 1);
+        assert_eq!(complete_mode_issues[0].field, "regional_variants");
         assert_eq!(
-            mode_issues[0].node_id.to_string(),
+            complete_mode_issues[0].node_id.to_string(),
             "019d2a80-0000-7000-8000-000000000011"
         );
-        let location = mode_issues[0].node_location.as_ref().unwrap();
+        let location = complete_mode_issues[0].node_location.as_ref().unwrap();
         assert_eq!(location.pos_id, Some(mixed.content.pos[0].pos_id));
-        assert_eq!(location.form_id, Some(mode_issues[0].node_id));
+        assert_eq!(location.form_id, Some(complete_mode_issues[0].node_id));
         assert_eq!(location.form_group_id, None);
         assert!(
             validate_forms(&mixed.content, StepSaveIntent::Complete)
                 .iter()
                 .any(|issue| {
                     issue.code == "invalid_regional_variant_shape"
-                        && issue.node_id == mode_issues[0].node_id
+                        && issue.node_id == complete_mode_issues[0].node_id
                 })
         );
 

@@ -10050,6 +10050,23 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
             "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
             "members": [{"id": Uuid::now_v7(), "form_id": mixed_form_id}]
         }));
+    let mut mixed_regional_modes_save = mixed_regional_modes.clone();
+    mixed_regional_modes_save["intent"] = json!("save");
+    let (status, _, response) = call_problem(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        mixed_regional_modes_save,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "草稿保存应越过英美结构一致性校验：{response}"
+    );
+    assert_eq!(response["code"], "smart_lexicon_v3_storage_unavailable");
     let (status, _, response) = call_problem(
         &state,
         Method::PUT,
