@@ -912,7 +912,10 @@ impl LexiconService {
             .ok_or(LexiconServiceError::PublicationNotFound)?;
         ensure_publication_snapshot_identity(&publication, entry_id)?;
         if let Some(forms) = publication_forms_for_activation(&publication)? {
-            let issues = crate::lexicon::v3_contract::validate_dialect_rules(&forms);
+            let issues = crate::lexicon::v3_contract::validate_dialect_rules(
+                &forms,
+                StepSaveIntent::Complete,
+            );
             if !issues.is_empty() {
                 return Err(v3_validation_failed(issues));
             }
