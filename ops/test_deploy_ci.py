@@ -267,7 +267,7 @@ class DeploymentTests(unittest.TestCase):
 
     def test_workflow_retries_busy_backend_uploads(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/deploy-tshb-test.yml").read_text()
-        self.assertIn("for retry in 1 2 3", workflow)
+        self.assertIn("for retry in 1 2", workflow)
         self.assertIn('$recovery_error" != "remote_operation_busy"', workflow)
         self.assertIn('$failed_stage" != "artifact_upload_failed"', workflow)
 

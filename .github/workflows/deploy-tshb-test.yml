@@ -24,7 +24,7 @@ jobs:
       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       GH_TOKEN: ${{ github.token }}
       DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -73,7 +73,7 @@ jobs:
           set -euo pipefail
           root="$RUNNER_TEMP/backend-deploy"
           mkdir -p "$root"
-          for retry in 1 2 3; do
+          for retry in 1 2; do
             directory="$root/attempt-$retry"
             mkdir -p "$directory"
             set +e
