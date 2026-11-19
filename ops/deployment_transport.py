@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
+import time
 
 from deploy_test import DeploymentError
 from migration_compatibility import migration_interval
@@ -115,6 +117,48 @@ class GithubGate:
 class SshHost:
     credentials = None
 
+    def _upload_once(self, plan):
+        artifact = Path(plan["artifact_path"])
+        modules = {name: (ROOT / (name + ".py")).read_text() for name in MODULES}
+        receiver = "import json,sys,types; p=json.loads(sys.stdin.buffer.readline()); " \
+                   "[(sys.modules.setdefault(n,types.ModuleType(n))) for n in p['modules']]; " \
+                   "[(exec(compile(s,n+'.py','exec'),sys.modules[n].__dict__)) for n,s in p['modules'].items()]; " \
+                   "sys.modules['deployment_host'].receive(p['plan'],sys.stdin.buffer)"
+        import shlex
+        try:
+            process = subprocess.Popen(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o",
+                                        "StrictHostKeyChecking=yes", "tshb-test", "python3 -I -c " + shlex.quote(receiver)],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                payload = (json.dumps({"plan": plan, "modules": modules}) + "\n").encode() + artifact.read_bytes()
+                stdout, _ = process.communicate(input=payload, timeout=180)
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+        except (OSError, subprocess.TimeoutExpired):
+            raise DeploymentError("artifact_upload_failed") from None
+        try:
+            result = json.loads(stdout)
+        except (TypeError, ValueError):
+            result = {}
+        if process.returncode or result.get("ok") is not True:
+            raise DeploymentError(result.get("stage", "artifact_upload_failed"))
+
+    def _upload(self, plan):
+        deadline = time.monotonic() + 10 * 60
+        while True:
+            try:
+                self._upload_once(plan)
+                return
+            except DeploymentError as error:
+                if str(error) not in {"remote_operation_busy", "artifact_upload_failed"}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+                print(json.dumps({"status": "waiting", "reason": str(error)}), file=sys.stderr, flush=True)
+                time.sleep(min(10, max(0, deadline - time.monotonic())))
+
     def request(self, action, plan=None):
         payload = {"action": action, "plan": plan, "credentials": self.credentials,
                    "modules": {name: (ROOT / (name + ".py")).read_text() for name in MODULES}}
@@ -181,30 +225,9 @@ class SshHost:
 
     def action(self, step, plan):
         if step == "upload":
-            artifact = Path(plan["artifact_path"])
             # Stream trusted modules separately from the artifact bytes. Receiver imports
             # are satisfied in memory; downloaded files are never Python import sources.
-            modules = {name: (ROOT / (name + ".py")).read_text() for name in MODULES}
-            receiver = "import json,sys,types; p=json.loads(sys.stdin.buffer.readline()); " \
-                       "[(sys.modules.setdefault(n,types.ModuleType(n))) for n in p['modules']]; " \
-                       "[(exec(compile(s,n+'.py','exec'),sys.modules[n].__dict__)) for n,s in p['modules'].items()]; " \
-                       "sys.modules['deployment_host'].receive(p['plan'],sys.stdin.buffer)"
-            import shlex
-            try:
-                process = subprocess.Popen(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o",
-                                            "StrictHostKeyChecking=yes", "tshb-test", "python3 -I -c " + shlex.quote(receiver)],
-                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                try:
-                    payload = (json.dumps({"plan": plan, "modules": modules}) + "\n").encode() + artifact.read_bytes()
-                    stdout, _ = process.communicate(input=payload, timeout=180)
-                except BaseException:
-                    process.kill()
-                    process.wait()
-                    raise
-                if process.returncode or json.loads(stdout).get("ok") is not True:
-                    raise DeploymentError("artifact_upload_failed")
-            except (OSError, subprocess.TimeoutExpired, ValueError):
-                raise DeploymentError("artifact_upload_failed") from None
+            self._upload(plan)
         else:
             self.request(step, plan)
 
