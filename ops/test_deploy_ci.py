@@ -222,6 +222,27 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(result, baseline)
         host.abort_stale.assert_called_once_with()
 
+    def test_wait_for_baseline_retries_when_stale_abort_is_still_busy(self):
+        host = Mock()
+        baseline = {"deployment_manifest": {"source": {"git_sha": "a" * 40}}}
+        host.baseline.side_effect = [
+            DeploymentError("deployment_in_progress"),
+            DeploymentError("deployment_in_progress"),
+            baseline,
+        ]
+        host.verify_existing.return_value = {"verified": True, "git_sha": "a" * 40}
+        host.inspect.return_value = {"owner": "old", "safe_abort": True}
+        host.abort_stale.side_effect = [DeploymentError("remote_operation_busy"), {"aborted": True}]
+        with (
+            patch.object(ci, "validate_deployment"),
+            patch.object(ci.time, "monotonic", side_effect=[0, 1, 1, 1, 2, 2, 2, 3]),
+            patch.object(ci.time, "sleep") as sleep,
+        ):
+            result = ci.wait_for_baseline(host, seconds=0)
+        self.assertEqual(result, baseline)
+        self.assertEqual(host.abort_stale.call_count, 2)
+        self.assertIn(10, [call.args[0] for call in sleep.call_args_list])
+
     def test_summary_failure_does_not_replace_real_publication_outcome(self):
         with tempfile.TemporaryDirectory() as directory:
             for status in ('accepted', 'recovered'):
@@ -243,6 +264,12 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("include-hidden-files: true", workflow)
         self.assertIn("python3 -u ops/deploy_ci.py deploy", workflow)
+
+    def test_workflow_retries_busy_backend_uploads(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/deploy-tshb-test.yml").read_text()
+        self.assertIn("for retry in 1 2 3", workflow)
+        self.assertIn('$recovery_error" != "remote_operation_busy"', workflow)
+        self.assertIn('$failed_stage" != "artifact_upload_failed"', workflow)
 
 
 if __name__ == "__main__":

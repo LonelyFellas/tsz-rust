@@ -6,7 +6,7 @@ import shlex
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -89,6 +89,19 @@ class GateTests(unittest.TestCase):
         bootstrap=shlex.split(argv[-1])[-1]
         compile(bootstrap,'bootstrap','exec')
         self.assertNotIn('source /opt',bootstrap)
+
+    def test_upload_retries_remote_operation_busy(self):
+        host = transport.SshHost()
+        host._upload_once = Mock(
+            side_effect=[DeploymentError("remote_operation_busy"), None]
+        )
+        with (
+            patch.object(transport.time, "monotonic", side_effect=[0, 1, 2, 3]),
+            patch.object(transport.time, "sleep") as sleep,
+        ):
+            host._upload({"artifact_path": "/tmp/unused"})
+        self.assertEqual(host._upload_once.call_count, 2)
+        sleep.assert_called_once_with(10)
 
 
 if __name__ == '__main__':

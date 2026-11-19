@@ -197,6 +197,19 @@ class HostOperationTests(unittest.TestCase):
                 self.assertFalse(host.LOCK.exists())
                 self.assertTrue((host.transaction(plan) / "incoming").is_file())
 
+    def test_upload_retry_is_idempotent_after_remote_ack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root):
+                plan = self.prepare(root)
+                self.acquire(plan)
+                host.dispatch("backup", plan, None)
+                with patch.object(host.sys, "stdout", io.StringIO()):
+                    host.receive(plan, io.BytesIO(Path(plan["artifact_path"]).read_bytes()))
+                    host.receive(plan, io.BytesIO(Path(plan["artifact_path"]).read_bytes()))
+                self.assertEqual(host.state(plan)["completed"], ["backup", "upload"])
+                self.assertEqual(host.sha(host.transaction(plan) / "incoming"), plan["artifact_sha256"])
+
     def test_backup_and_atomic_install_bind_original_and_ci_digest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

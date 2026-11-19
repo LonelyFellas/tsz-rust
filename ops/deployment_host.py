@@ -828,10 +828,20 @@ def receive(plan, source):
     try:
         with operation(plan):
             value = state(plan)
-            require(not value["mutation_started"] and value["completed"] == ["backup"], "upload_out_of_order")
+            require(
+                not value["mutation_started"]
+                and value["completed"] in (["backup"], ["backup", "upload"]),
+                "upload_out_of_order",
+            )
+            if value["completed"] == ["backup", "upload"]:
+                while source.read(1048576):
+                    pass
+                print(json.dumps({"ok": True}))
+                return
             value["pending"] = "upload"
             atomic(state_path(plan), value)
             output = transaction(plan) / "incoming"
+            output.unlink(missing_ok=True)
             with output.open("xb") as destination:
                 shutil.copyfileobj(source, destination)
                 destination.flush()

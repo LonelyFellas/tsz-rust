@@ -216,7 +216,7 @@ def prepare_runtime_images():
         require(result.returncode == 0, "migration_runtime_image_unavailable")
 
 
-def wait_for_baseline(host, *, seconds=600):
+def wait_for_baseline(host, *, seconds=15 * 60):
     deadline = time.monotonic() + seconds
     stale_abort_attempted = False
     while True:
@@ -238,7 +238,15 @@ def wait_for_baseline(host, *, seconds=600):
             if time.monotonic() >= deadline:
                 if not stale_abort_attempted:
                     stale_abort_attempted = True
-                    aborted = host.abort_stale()
+                    try:
+                        aborted = host.abort_stale()
+                    except DeploymentError as error:
+                        if str(error) != "remote_operation_busy":
+                            raise
+                        stale_abort_attempted = False
+                        deadline = time.monotonic() + seconds
+                        time.sleep(10)
+                        continue
                     if aborted.get("aborted"):
                         deadline = time.monotonic() + seconds
                         continue
