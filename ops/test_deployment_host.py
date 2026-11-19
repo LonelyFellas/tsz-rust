@@ -1,4 +1,5 @@
 import copy
+import gzip
 import http.client
 import io
 import json
@@ -208,6 +209,18 @@ class HostOperationTests(unittest.TestCase):
                     host.receive(plan, io.BytesIO(Path(plan["artifact_path"]).read_bytes()))
                     host.receive(plan, io.BytesIO(Path(plan["artifact_path"]).read_bytes()))
                 self.assertEqual(host.state(plan)["completed"], ["backup", "upload"])
+                self.assertEqual(host.sha(host.transaction(plan) / "incoming"), plan["artifact_sha256"])
+
+    def test_compressed_upload_is_decompressed_before_digest_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root):
+                plan = self.prepare(root)
+                self.acquire(plan)
+                host.dispatch("backup", plan, None)
+                payload = Path(plan["artifact_path"]).read_bytes()
+                with patch.object(host.sys, "stdout", io.StringIO()):
+                    host.receive(plan, io.BytesIO(gzip.compress(payload, mtime=0)), "gzip")
                 self.assertEqual(host.sha(host.transaction(plan) / "incoming"), plan["artifact_sha256"])
 
     def test_backup_and_atomic_install_bind_original_and_ci_digest(self):

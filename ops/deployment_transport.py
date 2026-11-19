@@ -1,6 +1,7 @@
 """Fixed GitHub/tshb-test adapters. Controllers pass JSON, never shell-expanded values."""
 
 import hashlib
+import gzip
 import json
 from pathlib import Path
 import subprocess
@@ -14,9 +15,9 @@ from migration_compatibility import migration_interval
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = "LonelyFellas/tsz-rust"
 MODULES = ("deployment_manifest", "deployment_auth_smoke", "deployment_business_smoke", "postgresql_backup_job", "deployment_host")
-REMOTE_UPLOAD_TIMEOUT_SECONDS = 180
+REMOTE_UPLOAD_TIMEOUT_SECONDS = 30 * 60
 REMOTE_UPLOAD_KILL_GRACE_SECONDS = 5
-LOCAL_UPLOAD_GRACE_SECONDS = 15
+LOCAL_UPLOAD_GRACE_SECONDS = 30
 
 
 def command(arguments, *, data=None, timeout=60, failure_stages=()):
@@ -126,7 +127,7 @@ class SshHost:
         receiver = "import json,sys,types; p=json.loads(sys.stdin.buffer.readline()); " \
                    "[(sys.modules.setdefault(n,types.ModuleType(n))) for n in p['modules']]; " \
                    "[(exec(compile(s,n+'.py','exec'),sys.modules[n].__dict__)) for n,s in p['modules'].items()]; " \
-                   "sys.modules['deployment_host'].receive(p['plan'],sys.stdin.buffer)"
+                   "sys.modules['deployment_host'].receive(p['plan'],sys.stdin.buffer,p.get('compression'))"
         import shlex
         try:
             remote_command = (
@@ -137,7 +138,11 @@ class SshHost:
                                         "StrictHostKeyChecking=yes", "tshb-test", remote_command],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
-                payload = (json.dumps({"plan": plan, "modules": modules}) + "\n").encode() + artifact.read_bytes()
+                compressed = gzip.compress(artifact.read_bytes(), compresslevel=6, mtime=0)
+                payload = (
+                    json.dumps({"plan": plan, "modules": modules, "compression": "gzip"})
+                    + "\n"
+                ).encode() + compressed
                 stdout, _ = process.communicate(
                     input=payload,
                     timeout=REMOTE_UPLOAD_TIMEOUT_SECONDS + LOCAL_UPLOAD_GRACE_SECONDS,
@@ -162,7 +167,7 @@ class SshHost:
                 self._upload_once(plan)
                 return
             except DeploymentError as error:
-                if str(error) not in {"remote_operation_busy", "artifact_upload_failed"}:
+                if str(error) != "remote_operation_busy":
                     raise
                 if time.monotonic() >= deadline:
                     raise

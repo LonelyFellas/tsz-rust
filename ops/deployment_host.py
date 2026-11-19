@@ -2,6 +2,7 @@
 
 import contextlib
 import fcntl
+import gzip
 import hashlib
 import http.client
 import http.cookiejar
@@ -824,7 +825,7 @@ def observe_unlocked_acceptance(plan):
     return accepted_identity(plan, m, state(plan))
 
 
-def receive(plan, source):
+def receive(plan, source, compression=None):
     try:
         with operation(plan):
             value = state(plan)
@@ -842,10 +843,13 @@ def receive(plan, source):
             atomic(state_path(plan), value)
             output = transaction(plan) / "incoming"
             output.unlink(missing_ok=True)
+            input_stream = gzip.GzipFile(fileobj=source, mode="rb") if compression == "gzip" else source
             with output.open("xb") as destination:
-                shutil.copyfileobj(source, destination)
+                shutil.copyfileobj(input_stream, destination)
                 destination.flush()
                 os.fsync(destination.fileno())
+            if input_stream is not source:
+                input_stream.close()
             output.chmod(0o755)
             require(sha(output) == plan["artifact_sha256"], "uploaded_digest_mismatch")
             value["completed"].append("upload")
