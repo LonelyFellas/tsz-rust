@@ -2410,6 +2410,9 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        crate::lexicon::rich_text_repair::lock_transaction(&mut transaction)
+            .await
+            .map_err(database_error)?;
         let authorization = lock_action(&mut transaction, actor_id, "words.edit").await?;
         let record = LexiconRepository::entry_by_id_on(&mut *transaction, entry_id)
             .await
@@ -2428,6 +2431,8 @@ impl LexiconService {
         crate::lexicon::shared_forms::ensure_write(&compatibility_forms, &input.content)?;
         preserve_missing_component_usages(&mut input.content, &compatibility_forms)?;
         preserve_missing_spelling_rich(&mut input.content, &compatibility_forms);
+        crate::lexicon::rich_text_repair::repair_expanded_forms(&mut compatibility_forms);
+        crate::lexicon::rich_text_repair::repair_expanded_forms(&mut input.content);
         // Preserve omission state before any provenance backfill needs a DTO round trip.
         let mut raw = serde_json::to_value(&input.content).map_err(serialization_error)?;
         if crate::lexicon::voice_versions::preserve_legacy_dubbing(
@@ -2847,6 +2852,9 @@ impl LexiconService {
             .repository
             .pool()
             .begin()
+            .await
+            .map_err(database_error)?;
+        crate::lexicon::rich_text_repair::lock_transaction(&mut transaction)
             .await
             .map_err(database_error)?;
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
