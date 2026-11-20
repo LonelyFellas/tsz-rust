@@ -143,6 +143,45 @@ fn openapi_declares_closed_drafts_and_distinct_endpoints() {
 }
 
 #[test]
+fn creation_detection_snapshot_round_trips_as_entry_evidence() {
+    let raw = json!({
+        "surface": "Colour",
+        "kind": "word",
+        "matches": [{
+            "id": "dictionary:colour:noun",
+            "term": "colour",
+            "part_of_speech": "noun",
+            "glosses": ["visible hue"],
+            "forms": [{"text": "colours", "tags": ["plural"]}],
+            "phonetics": [{"ipa": "/ˈkʌlə/", "tags": ["UK"]}],
+            "source_name": "fixture",
+            "source_version": "v1"
+        }]
+    });
+    let detection: super::detection::NextDetection = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(detection.surface, "Colour");
+    assert_eq!(serde_json::to_value(detection).unwrap(), raw);
+
+    let entry: NextEntry = serde_json::from_value(json!({
+        "id": Uuid::now_v7(),
+        "target_language": "en",
+        "kind": "word",
+        "owner_id": Uuid::now_v7(),
+        "revision": 1,
+        "updated_at": "2026-11-20T00:00:00Z",
+        "creation_detection": raw,
+        "draft": {
+            "schema_version": 1,
+            "headword": "Colour",
+            "forms": [],
+            "senses": []
+        }
+    }))
+    .unwrap();
+    assert_eq!(entry.creation_detection.unwrap().surface, "Colour");
+}
+
+#[test]
 fn sense_groups_keep_draft_names_and_validate_identity_membership_and_closed_wire() {
     let group = Uuid::now_v7();
     let sense = Uuid::now_v7();

@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+use super::detection::NextDetection;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NextEntryKind {
     Word,
@@ -276,6 +278,12 @@ pub struct NextDraft {
     pub form_editor: Option<crate::lexicon::dto::SharedFormsStepContentV3>,
 }
 
+pub(super) fn strip_legacy_creation_detection(value: &mut serde_json::Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.remove("creation_detection");
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextEntry {
@@ -284,6 +292,10 @@ pub struct NextEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sentence_resources: Option<Vec<super::sentence_model::NextSentence>>,
+    /// Immutable snapshot of the create-step detection result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub creation_detection: Option<super::detection::NextDetection>,
     pub id: Uuid,
     /// Immutable draft ownership, negotiated by x-tsz-next-medium-ownership: v1.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -306,6 +318,10 @@ pub struct CreateNextEntry {
     pub medium_locale: String,
     pub kind: NextEntryKind,
     pub headword: String,
+    /// Optional create-step snapshot, accepted only with the v1 capability header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub creation_detection: Option<NextDetection>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -336,6 +352,9 @@ pub struct NextLanguageCapability {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub creation_snapshot: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dialect_pairs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

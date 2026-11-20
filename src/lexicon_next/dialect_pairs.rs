@@ -1,6 +1,10 @@
 //! Pair identities are immutable. Under the existing list-writer lock, one
 //! save advances the source and all affected peer revisions atomically.
-use super::{language, model::NextDraft, repository};
+use super::{
+    language,
+    model::{NextDraft, strip_legacy_creation_detection},
+    repository,
+};
 use crate::{
     admin::permissions::AdminAuthorization,
     error::{AppError, ErrorCode},
@@ -124,7 +128,13 @@ pub(super) async fn project(
         .await
         .map_err(AppError::internal)?
     {
-        let doc = row.get::<Option<Json<NextDraft>>, _>("document");
+        let doc = row
+            .get::<Option<serde_json::Value>, _>("document")
+            .map(|mut value| {
+                strip_legacy_creation_detection(&mut value);
+                serde_json::from_value::<NextDraft>(value).map_err(AppError::internal)
+            })
+            .transpose()?;
         let bindings: Bindings = row
             .get::<Option<Json<Vec<Binding>>>, _>("dialect_senses")
             .into_iter()

@@ -15,13 +15,28 @@ struct EntryRow {
     owner_id: Uuid,
     revision: i64,
     updated_at: chrono::DateTime<chrono::Utc>,
+    creation_detection: Option<serde_json::Value>,
     document: serde_json::Value,
 }
 impl EntryRow {
     fn entry(self) -> Result<NextEntry, AppError> {
+        let mut document = self.document;
+        let legacy_detection = document
+            .as_object_mut()
+            .and_then(|object| object.remove("creation_detection"))
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(AppError::internal)?;
+        super::model::strip_legacy_creation_detection(&mut document);
         Ok(NextEntry {
             dialect_senses: None,
             sentence_resources: None,
+            creation_detection: self
+                .creation_detection
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(AppError::internal)?
+                .or(legacy_detection),
             id: self.id,
             target_language: self.target_language,
             medium_locale: Some(self.medium_locale),
@@ -30,11 +45,11 @@ impl EntryRow {
             owner_id: self.owner_id,
             revision: self.revision,
             updated_at: self.updated_at,
-            draft: serde_json::from_value(self.document).map_err(AppError::internal)?,
+            draft: serde_json::from_value(document).map_err(AppError::internal)?,
         })
     }
 }
-const SELECT_ENTRY: &str = "SELECT e.id,e.target_language,e.medium_locale,e.kind,e.owner_id,e.revision,e.updated_at,r.document FROM lexicon_next.entries e JOIN lexicon_next.draft_revisions r ON r.entry_id=e.id AND r.revision=e.revision WHERE e.id=$1";
+const SELECT_ENTRY: &str = "SELECT e.id,e.target_language,e.medium_locale,e.kind,e.owner_id,e.revision,e.updated_at,e.creation_detection,r.document FROM lexicon_next.entries e JOIN lexicon_next.draft_revisions r ON r.entry_id=e.id AND r.revision=e.revision WHERE e.id=$1";
 
 pub(super) async fn lock_list_writers(conn: &mut PgConnection) -> Result<(), AppError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('lexicon_next.list-writer',0))")
@@ -116,7 +131,7 @@ pub(super) async fn get_on(conn: &mut PgConnection, id: Uuid) -> Result<NextEntr
 pub async fn create(
     pool: &PgPool,
     auth: &AdminAuth,
-    input: CreateNextEntry,
+    mut input: CreateNextEntry,
 ) -> Result<NextEntry, AppError> {
     language::require_language(&input.target_language)?;
     language::require_medium(&input.medium_locale)?;
@@ -125,12 +140,18 @@ pub async fn create(
     permissions::lock_session(&mut tx, auth, "words.create").await?;
     lock_list_writers(&mut tx).await?;
     let id = Uuid::now_v7();
+    let creation_detection = input
+        .creation_detection
+        .take()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(AppError::internal)?;
     let kind = match input.kind {
         NextEntryKind::Word => "word",
         NextEntryKind::Phrase => "phrase",
     };
-    sqlx::query("INSERT INTO lexicon_next.entries(id,target_language,medium_locale,kind,headword,owner_id,revision) VALUES($1,$2,$3,$4,$5,$6,1)")
-        .bind(id).bind(&input.target_language).bind(&input.medium_locale).bind(kind).bind(&input.headword).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO lexicon_next.entries(id,target_language,medium_locale,kind,headword,owner_id,revision,creation_detection) VALUES($1,$2,$3,$4,$5,$6,1,$7)")
+        .bind(id).bind(&input.target_language).bind(&input.medium_locale).bind(kind).bind(&input.headword).bind(auth.subject).bind(creation_detection).execute(&mut *tx).await.map_err(AppError::internal)?;
     let draft = NextDraft {
         grammar_structures: None,
         sense_groups: None,
@@ -400,8 +421,14 @@ pub async fn save(
         super::dialect_pairs::apply(conn, &access, &previous, draft, input.dialect_changes).await?;
     snapshot(conn, id, next_revision, actor, draft, &dialects).await?;
     super::equivalents::persist_refs(conn, id, next_revision, taxonomy_refs).await?;
-    sqlx::query("UPDATE lexicon_next.entries SET headword=$2,revision=$3,updated_at=clock_timestamp() WHERE id=$1")
-        .bind(id).bind(&draft.headword).bind(next_revision).execute(&mut *conn).await.map_err(AppError::internal)?;
+    let legacy_detection = previous
+        .creation_detection
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(AppError::internal)?;
+    sqlx::query("UPDATE lexicon_next.entries SET headword=$2,revision=$3,updated_at=clock_timestamp(),creation_detection=COALESCE(creation_detection,$4) WHERE id=$1")
+        .bind(id).bind(&draft.headword).bind(next_revision).bind(legacy_detection).execute(&mut *conn).await.map_err(AppError::internal)?;
     let mut result = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
         .bind(id)
         .fetch_one(&mut *conn)

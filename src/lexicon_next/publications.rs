@@ -25,6 +25,10 @@ fn issue(id: Uuid, field: &str, message: &str) -> NextPublicationIssue {
 }
 const SELECT_PUBLICATION: &str = "SELECT id,entry_id,revision,lifecycle_revision,published_by_admin_id,published_at,snapshot FROM lexicon_next.publications WHERE entry_id=$1 ORDER BY lifecycle_revision DESC LIMIT 1";
 fn decode(row: sqlx::postgres::PgRow) -> Result<NextPublication, AppError> {
+    let mut snapshot: serde_json::Value = row.get("snapshot");
+    if let Some(draft) = snapshot.get_mut("draft") {
+        super::model::strip_legacy_creation_detection(draft);
+    }
     Ok(NextPublication {
         id: row.get("id"),
         entry_id: row.get("entry_id"),
@@ -32,7 +36,7 @@ fn decode(row: sqlx::postgres::PgRow) -> Result<NextPublication, AppError> {
         lifecycle_revision: row.get("lifecycle_revision"),
         published_by_admin_id: row.get("published_by_admin_id"),
         published_at: row.get("published_at"),
-        snapshot: serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?,
+        snapshot: serde_json::from_value(snapshot).map_err(AppError::internal)?,
     })
 }
 
@@ -237,8 +241,12 @@ async fn prepare(
             {
                 let target_publication = sqlx::query("SELECT p.id,p.snapshot FROM lexicon_next.entries e JOIN LATERAL (SELECT id,snapshot FROM lexicon_next.publications WHERE entry_id=e.id ORDER BY lifecycle_revision DESC LIMIT 1) p ON true WHERE e.id=$1 AND e.status='published' AND e.target_language=$2 AND e.medium_locale=$3").bind(target).bind(&entry.target_language).bind(&entry.medium_locale).fetch_optional(&mut **tx).await.map_err(AppError::internal)?;
                 if let Some(row) = target_publication {
+                    let mut snapshot_value: serde_json::Value = row.get("snapshot");
+                    if let Some(draft) = snapshot_value.get_mut("draft") {
+                        super::model::strip_legacy_creation_detection(draft);
+                    }
                     let snapshot: NextPublicationSnapshot =
-                        serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?;
+                        serde_json::from_value(snapshot_value).map_err(AppError::internal)?;
                     if snapshot.draft.senses.iter().any(|s| s.id == target_sense) {
                         let sense = snapshot
                             .draft

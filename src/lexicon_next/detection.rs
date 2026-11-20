@@ -9,14 +9,14 @@ use sqlx::PgPool;
 use std::collections::BTreeSet;
 use utoipa::ToSchema;
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextDetectionInput {
     pub target_language: String,
     pub surface: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextDictionaryMatch {
     pub id: String,
@@ -29,21 +29,21 @@ pub struct NextDictionaryMatch {
     pub source_version: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextDictionaryForm {
     pub text: String,
     pub tags: Vec<String>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextDictionaryPhonetic {
     pub ipa: String,
     pub tags: Vec<String>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextDetection {
     /// Display input, never replaced with a dictionary record's term.

@@ -24,6 +24,7 @@ pub(super) fn valid_pos(code: &str) -> bool {
 }
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
+        creation_snapshot: None,
         sentence_drafts: None,
         relations: None,
         dialect_pairs: None,
