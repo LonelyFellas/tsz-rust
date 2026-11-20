@@ -76,7 +76,7 @@ jobs:
       - name: Verify deployed SHA
         run: |
           set -euo pipefail
-          actual="$(ssh tshb-test 'cd /opt/tsz-rust && ./tsz-rust deploy-info' | python3 -c 'import json,sys; print(json.load(sys.stdin)["git_sha"])')"
+          actual="$(ssh tshb-test 'cat /opt/tsz-deploy-manifests/api.json' | python3 -c 'import json,sys; print(json.load(sys.stdin)["source"]["git_sha"])')"
           test "$actual" = "$EXPECTED_SHA"
 
       - name: Run rich-text repair
@@ -86,7 +86,7 @@ jobs:
           if [[ "$OPERATION" == apply ]]; then
             remote="$remote export MIGRATION_MANIFEST_DIGEST=$MANIFEST_DIGEST &&"
           fi
-          remote="$remote ./tsz-rust lexicon-rich-text-repair $OPERATION"
+          remote="$remote ./target/release/tsz-rust lexicon-rich-text-repair $OPERATION"
           ssh tshb-test "$remote" | tee repair-report.json
 
       - name: Upload repair report
