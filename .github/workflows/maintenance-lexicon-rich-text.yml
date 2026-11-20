@@ -1,0 +1,99 @@
+name: Lexicon rich-text maintenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "维护操作"
+        required: true
+        type: choice
+        options: [dry-run, apply]
+      expected_sha:
+        description: "必须与测试服当前部署 SHA 一致"
+        required: true
+        type: string
+      manifest_digest:
+        description: "apply 使用 dry-run 返回的 manifest_digest"
+        required: false
+        type: string
+      confirm_apply:
+        description: "仅 apply 必须明确确认"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    if: >-
+      github.repository == 'LonelyFellas/tsz-rust' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DEPLOY_HOST: ${{ secrets.TSHB_TEST_SSH_HOST }}
+      DEPLOY_USER: ${{ secrets.TSHB_TEST_SSH_USER }}
+      DEPLOY_KEY: ${{ secrets.TSHB_TEST_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.TSHB_TEST_SSH_KNOWN_HOSTS }}
+      OPERATION: ${{ inputs.operation }}
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MANIFEST_DIGEST: ${{ inputs.manifest_digest }}
+      CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+    steps:
+      - name: Check out maintenance tools
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate maintenance request
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$OPERATION" == dry-run || "$OPERATION" == apply ]]
+          if [[ "$OPERATION" == apply ]]; then
+            [[ "$CONFIRM_APPLY" == true ]]
+            [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          fi
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9.:-]+$ ]]
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          [[ -n "$DEPLOY_KEY" && -n "$DEPLOY_KNOWN_HOSTS" ]]
+
+      - name: Configure deployment SSH
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/tshb-test-key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/tshb-test-key" "$HOME/.ssh/known_hosts"
+          printf 'Host tshb-test\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/tshb-test-key\n  IdentitiesOnly yes\n  BatchMode yes\n  ConnectTimeout 10\n  StrictHostKeyChecking yes\n' \
+            "$DEPLOY_HOST" "$DEPLOY_USER" > "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config"
+
+      - name: Verify deployed SHA
+        run: |
+          set -euo pipefail
+          actual="$(ssh tshb-test 'cat /opt/tsz-deploy-manifests/api.json' | python3 -c 'import json,sys; print(json.load(sys.stdin)["source"]["git_sha"])')"
+          test "$actual" = "$EXPECTED_SHA"
+
+      - name: Run rich-text repair
+        run: |
+          set -euo pipefail
+          remote="cd /opt/tsz-rust && set -a && . ./.env && set +a &&"
+          if [[ "$OPERATION" == apply ]]; then
+            remote="$remote export MIGRATION_MANIFEST_DIGEST=$MANIFEST_DIGEST &&"
+          fi
+          remote="$remote ./target/release/tsz-rust lexicon-rich-text-repair $OPERATION"
+          ssh tshb-test "$remote" | tee repair-report.json
+
+      - name: Upload repair report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: lexicon-rich-text-repair-${{ github.run_id }}
+          path: repair-report.json
+          if-no-files-found: ignore
+          retention-days: 30

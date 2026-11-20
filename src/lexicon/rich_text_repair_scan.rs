@@ -1,5 +1,6 @@
 use anyhow::{Context, ensure};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashSet;
@@ -39,6 +40,12 @@ struct Candidate {
     old: Value,
     new: Value,
     counts: RepairCounts,
+}
+
+fn deserialize_legacy_compatible<T: DeserializeOwned>(
+    value: Value,
+) -> Result<T, serde_json::Error> {
+    serde_json::from_value(super::voice_versions::stored_dubbing(value))
 }
 
 fn digest_bytes(value: &impl Serialize) -> anyhow::Result<String> {
@@ -182,7 +189,7 @@ async fn candidates(
     .fetch_all(&mut **tx)
     .await?;
     for (entry_id, content_id, old) in rows {
-        let mut content: FormContentV3 = match serde_json::from_value(old.clone()) {
+        let mut content: FormContentV3 = match deserialize_legacy_compatible(old.clone()) {
             Ok(content) => content,
             Err(error) => {
                 blockers.push(RepairScanBlocker {
@@ -225,7 +232,7 @@ async fn candidates(
     .await?;
     for (entry_id, old) in rows {
         let mut representation: FormsStepRepresentationV3 =
-            match serde_json::from_value(old.clone()) {
+            match deserialize_legacy_compatible(old.clone()) {
                 Ok(value) => value,
                 Err(error) => {
                     blockers.push(RepairScanBlocker {
@@ -264,7 +271,7 @@ async fn candidates(
     .fetch_all(&mut **tx)
     .await?;
     for (entry_id, old) in rows {
-        let mut draft: NextDraft = match serde_json::from_value(old.clone()) {
+        let mut draft: NextDraft = match deserialize_legacy_compatible(old.clone()) {
             Ok(value) => value,
             Err(error) => {
                 blockers.push(RepairScanBlocker {
@@ -407,4 +414,30 @@ async fn run(
         manifest_digest,
         blockers,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deserialize_legacy_compatible;
+    use crate::lexicon::dto::{DubbingAreaV3, VoiceProfileModeV3, VoiceProfileV3};
+    use serde_json::json;
+
+    #[test]
+    fn scanner_accepts_legacy_dubbing_shape_before_repair() {
+        let legacy = json!({
+            "voices": [],
+            "dubbing": {
+                "mode": "local",
+                "area": "word",
+                "recommendation": {"pair_id": "original"}
+            }
+        });
+
+        let profile: VoiceProfileV3 = deserialize_legacy_compatible(legacy).unwrap();
+
+        assert_eq!(profile.area(), Some(DubbingAreaV3::Word));
+        assert_eq!(profile.mode("gb"), Some(VoiceProfileModeV3::Local));
+        assert_eq!(profile.legacy_dubbing.as_deref().unwrap()["mode"], "local");
+        assert_eq!(profile.legacy_dubbing.as_deref().unwrap()["area"], "word");
+    }
 }
