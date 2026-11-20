@@ -97,6 +97,11 @@ pub(super) fn filter(sql: &mut QueryBuilder<Postgres>, query: &NextWorkspaceQuer
     if let Some(owner) = query.created_by {
         sql.push(" AND e.owner_id=").push_bind(owner);
     }
+    if let Some(updater) = query.updated_by {
+        sql.push(" AND EXISTS(SELECT 1 FROM lexicon_next.draft_revisions updated_revision WHERE updated_revision.entry_id=e.id AND updated_revision.revision=e.revision AND updated_revision.actor_id=")
+            .push_bind(updater)
+            .push(")");
+    }
     if let Some(from) = query.created_from {
         sql.push(" AND e.created_at>=").push_bind(from);
     }
@@ -222,6 +227,22 @@ pub async fn creators(
     validate(&query)?;
     let mut sql = QueryBuilder::new(
         "SELECT DISTINCT a.id,a.display_name FROM admins a JOIN lexicon_next.entries e ON e.owner_id=a.id",
+    );
+    filter(&mut sql, &query);
+    sql.push(" ORDER BY a.display_name,a.id")
+        .build_query_as()
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::internal)
+}
+
+pub async fn updaters(
+    pool: &PgPool,
+    query: NextWorkspaceQuery,
+) -> Result<Vec<NextWorkspaceCreator>, AppError> {
+    validate(&query)?;
+    let mut sql = QueryBuilder::new(
+        "SELECT DISTINCT a.id,a.display_name FROM admins a JOIN lexicon_next.draft_revisions current ON current.actor_id=a.id JOIN lexicon_next.entries e ON e.id=current.entry_id AND e.revision=current.revision",
     );
     filter(&mut sql, &query);
     sql.push(" ORDER BY a.display_name,a.id")

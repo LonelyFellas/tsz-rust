@@ -136,6 +136,14 @@ fn openapi_declares_closed_drafts_and_distinct_endpoints() {
         paths["/api/v1/admin/lexicon-next/entries/{id}"]["put"]["responses"]["409"].is_object()
     );
     assert!(paths["/api/v1/admin/lexicon-next/draft-schema"]["get"].is_object());
+    assert!(paths["/api/v1/admin/lexicon-next/workspace/updaters"]["get"].is_object());
+    assert!(
+        paths["/api/v1/admin/lexicon-next/workspace/entries"]["get"]["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|parameter| parameter["name"] == "updated_by")
+    );
     assert_eq!(
         spec["components"]["schemas"]["NextDraftSchemaCompatibility"]["additionalProperties"],
         false
