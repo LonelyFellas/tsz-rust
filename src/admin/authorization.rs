@@ -116,6 +116,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::All(&["words.access"]),
     ),
     (
+        "GET",
+        "/lexicon-next/workspace/updaters",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
         "PATCH",
         "/lexicon-next/workspace/entries/{id}/annotation",
         RoutePolicy::All(&["words.edit"]),
