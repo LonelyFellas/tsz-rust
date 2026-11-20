@@ -332,6 +332,7 @@ pub async fn save(
                 pairs: supports_pairs(&headers),
                 relations: supports_relations(&headers),
                 grammar_audio: supports_grammar_audio(&headers),
+                grammar_form_links: supports_grammar_form_links(&headers),
                 sense_metadata: supports_sense_metadata(&headers),
                 equivalent_metadata: supports_equivalent_metadata(&headers),
                 definition_details: supports_definitions(&headers),

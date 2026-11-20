@@ -275,6 +275,12 @@ pub(super) async fn persist(
             };
             super::repository::node(conn, variant.id, entry, kind, Some(grammar.id)).await?;
             if let Some(links) = &variant.form_links {
+                if !crate::lexicon::service::grammar_form_links::valid_reading_ranges(
+                    variant.content.text(),
+                    links,
+                ) {
+                    return Err(language::invalid());
+                }
                 sqlx::query(
                     "DELETE FROM lexicon_next.grammar_form_links WHERE source_variant_id=$1",
                 )
@@ -413,7 +419,7 @@ async fn validate_form_target(
     );
     let valid: bool = if next {
         sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM lexicon_next.entries e WHERE e.id=$1) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$2 AND entry_id=$1 AND role='pos') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$3 AND entry_id=$1 AND role='form') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$4 AND entry_id=$1 AND role='variant')",
+            "SELECT EXISTS(SELECT 1 FROM lexicon_next.entries e WHERE e.id=$1) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$2 AND entry_id=$1 AND role='pos') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$3 AND entry_id=$1 AND role='form' AND parent_id=$2) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$4 AND entry_id=$1 AND role='variant' AND parent_id=$3)",
         )
         .bind(entry)
         .bind(pos)
@@ -460,6 +466,28 @@ pub(super) fn has_form_links(draft: &NextDraft) -> bool {
         .flatten()
         .flat_map(|grammar| &grammar.variants)
         .any(|variant| variant.form_links.is_some())
+}
+
+pub(super) fn preserve_form_links(draft: &mut NextDraft, previous: &NextDraft) {
+    let old: HashMap<_, _> = previous
+        .grammar_structures
+        .iter()
+        .flatten()
+        .flat_map(|grammar| &grammar.variants)
+        .map(|variant| (variant.id, variant))
+        .collect();
+    for variant in draft
+        .grammar_structures
+        .iter_mut()
+        .flatten()
+        .flat_map(|grammar| &mut grammar.variants)
+    {
+        if variant.form_links.is_none()
+            && let Some(previous) = old.get(&variant.id)
+        {
+            variant.form_links = previous.form_links.clone();
+        }
+    }
 }
 
 pub(super) fn strip_audio(grammars: Option<&mut Vec<NextGrammarStructure>>) {

@@ -49,6 +49,50 @@ fn require_details(
     Ok(())
 }
 
+fn valid_source_segments(text: &str, associations: &[NextSentenceAnnotation]) -> bool {
+    if associations.len() > 100 {
+        return false;
+    }
+    let chars: Vec<_> = text.chars().collect();
+    let tokens = crate::lexicon::text_tokenization::tokenize(text);
+    let mut ids = HashSet::new();
+    let mut occupied = HashSet::new();
+    associations.iter().all(|association| {
+        if association.id.is_nil()
+            || !ids.insert(association.id)
+            || association.source_segments.is_empty()
+            || association.source_segments.len() > 20
+        {
+            return false;
+        }
+        let mut previous_end = 0;
+        for segment in &association.source_segments {
+            let start = segment.start;
+            let end = segment.end;
+            if start >= end
+                || start < previous_end
+                || end > chars.len()
+                || segment.surface.trim().is_empty()
+                || !tokens.iter().any(|token| token.range.start == start)
+                || !tokens.iter().any(|token| token.range.end == end)
+                || chars[start..end].iter().collect::<String>() != segment.surface
+                || chars[start..end]
+                    .iter()
+                    .any(|character| matches!(character, '\n' | '\r'))
+                || (start..end).any(|index| !occupied.insert(index))
+            {
+                return false;
+            }
+            previous_end = end;
+        }
+        let first = association.source_segments.first().unwrap().start;
+        let last = association.source_segments.last().unwrap().end;
+        !chars[first..last]
+            .iter()
+            .any(|character| matches!(character, '\n' | '\r'))
+    })
+}
+
 const LEVELS: &[&str] = &["A1", "A2", "B1", "B2", "C1", "C2"];
 const SELECT: &str = "SELECT s.id,s.target_language,s.owner_id,s.revision,s.updated_at,s.document,(SELECT count(*) FROM lexicon_next.sentence_references r WHERE r.sentence_id=s.id) AS reference_count FROM lexicon_next.sentences s";
 
@@ -147,12 +191,12 @@ async fn validate_target(
     conn: &mut PgConnection,
     target: &NextSentenceTarget,
 ) -> Result<(), AppError> {
-    let (source, entry, pos, sense, form, variant) = match target {
+    let (source, entry, pos, sense, base_form, form, variant) = match target {
         NextSentenceTarget::Linked {
             target_source,
             target_entry_id,
             target_pos_id,
-            target_base_form_id: _,
+            target_base_form_id,
             target_form_id,
             target_variant_id,
             target_sense_id,
@@ -162,6 +206,7 @@ async fn validate_target(
             Some(*target_entry_id),
             Some(*target_pos_id),
             Some(*target_sense_id),
+            Some(*target_base_form_id),
             Some(*target_form_id),
             Some(*target_variant_id),
         ),
@@ -175,6 +220,7 @@ async fn validate_target(
             None,
             None,
             None,
+            None,
         ),
         NextSentenceTarget::Pending { .. } => return Ok(()),
     };
@@ -183,9 +229,11 @@ async fn validate_target(
         Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
     );
     let valid = if next {
-        if let (Some(pos), Some(sense), Some(form), Some(variant)) = (pos, sense, form, variant) {
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries WHERE id=$1) AND EXISTS(SELECT 1 FROM lexicon_next.nodes WHERE id=$2 AND entry_id=$1 AND kind='sense') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$3 AND entry_id=$1 AND role='pos') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$4 AND entry_id=$1 AND role='form') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$5 AND entry_id=$1 AND role='variant')")
-                .bind(entry).bind(sense).bind(pos).bind(form).bind(variant)
+        if let (Some(pos), Some(sense), Some(base_form), Some(form), Some(variant)) =
+            (pos, sense, base_form, form, variant)
+        {
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries WHERE id=$1) AND EXISTS(SELECT 1 FROM lexicon_next.nodes WHERE id=$2 AND entry_id=$1 AND kind='sense') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$3 AND entry_id=$1 AND role='pos') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$4 AND entry_id=$1 AND role='form' AND parent_id=$3) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$5 AND entry_id=$1 AND role='form' AND parent_id=$3) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$6 AND entry_id=$1 AND role='variant' AND parent_id=$5)")
+                .bind(entry).bind(sense).bind(pos).bind(base_form).bind(form).bind(variant)
                 .fetch_one(&mut *conn).await.map_err(AppError::internal)?
         } else {
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries WHERE id=$1)")
@@ -353,6 +401,9 @@ pub(super) async fn prepare(
         // Associations belong to the variant and must be persisted even when
         // the sentence has no translations in the current medium.
         if let Some(associations) = &variant.associations {
+            if !valid_source_segments(variant.content.text(), associations) {
+                return Err(language::invalid());
+            }
             sqlx::query(
                 "DELETE FROM lexicon_next.sentence_associations WHERE source_variant_id=$1",
             )
