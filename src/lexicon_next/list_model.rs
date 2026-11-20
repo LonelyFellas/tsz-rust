@@ -19,6 +19,7 @@ pub struct NextWorkspaceQuery {
     pub level: Option<String>,
     pub status: Option<String>,
     pub created_by: Option<Uuid>,
+    pub updated_by: Option<Uuid>,
     pub created_from: Option<DateTime<Utc>>,
     pub created_to: Option<DateTime<Utc>>,
     pub page: Option<u32>,

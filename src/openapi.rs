@@ -292,6 +292,7 @@ use utoipa::{
         crate::lexicon_next::workspace_read,
         crate::lexicon_next::workspace_stats,
         crate::lexicon_next::workspace_creators,
+        crate::lexicon_next::workspace_updaters,
         crate::lexicon_next::workspace_annotation,
         crate::lexicon_next::workspace_command,
         crate::lexicon_next::capabilities,
