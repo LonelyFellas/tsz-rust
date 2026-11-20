@@ -76,7 +76,7 @@ jobs:
       - name: Verify deployed SHA
         run: |
           set -euo pipefail
-          actual="$(ssh tshb-test 'cd /opt/tsz-rust && ./target/release/tsz-rust deploy-info' | python3 -c 'import json,sys; print(json.load(sys.stdin)["git_sha"])')"
+          actual="$(ssh tshb-test 'cat /opt/tsz-deploy-manifests/api.json' | python3 -c 'import json,sys; print(json.load(sys.stdin)["source"]["git_sha"])')"
           test "$actual" = "$EXPECTED_SHA"
 
       - name: Run rich-text repair
