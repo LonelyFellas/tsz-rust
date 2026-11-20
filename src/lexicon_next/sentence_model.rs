@@ -86,6 +86,46 @@ pub struct NextSentenceTranslation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NextSentenceTarget {
+    Linked {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_source: Option<crate::lexicon::dto::AssociationTargetSource>,
+        target_entry_id: Uuid,
+        target_pos_id: Uuid,
+        target_base_form_id: Uuid,
+        target_form_id: Uuid,
+        target_variant_id: Uuid,
+        target_sense_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_dialect: Option<crate::lexicon::dto::Dialect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_publication_id: Option<Uuid>,
+    },
+    EntryOnly {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_source: Option<crate::lexicon::dto::AssociationTargetSource>,
+        target_entry_id: Uuid,
+    },
+    Pending {
+        kind: String,
+        headword: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gloss: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextSentenceAnnotation {
+    pub id: Uuid,
+    pub source_dialect: String,
+    #[schema(min_items = 1, max_items = 20)]
+    pub source_segments: Vec<crate::lexicon::dto::SentenceSourceRangeV1>,
+    pub target: NextSentenceTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextSentenceVariant {
     pub id: Uuid,
@@ -94,6 +134,13 @@ pub struct NextSentenceVariant {
     pub level: String,
     pub content: RichTextV3,
     pub translations: Vec<NextSentenceTranslation>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_associations"
+    )]
+    #[schema(nullable = false, max_items = 100)]
+    pub associations: Option<Vec<NextSentenceAnnotation>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -194,4 +241,10 @@ pub struct NextSentenceDraftChange {
     pub target_locale: String,
     pub medium_locale: String,
     pub variant: NextSentenceVariant,
+}
+
+fn non_null_associations<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<NextSentenceAnnotation>>, D::Error> {
+    Vec::<NextSentenceAnnotation>::deserialize(deserializer).map(Some)
 }

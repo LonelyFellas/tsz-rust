@@ -42,6 +42,35 @@ async fn call(
 ) -> (StatusCode, Value) {
     call_with_groups(state, actor, method, path, body, false).await
 }
+
+async fn call_associations(
+    state: &AppState,
+    actor: Uuid,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(format!("{ROOT}{path}"))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                state.admin_token_manager.generate(actor, "admin").unwrap()
+            ),
+        )
+        .header("x-tsz-next-forms", "v1")
+        .header("x-tsz-next-sentence-associations", "v1")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = tsz_rust::router(state.clone()).oneshot(req).await.unwrap();
+    let status = response.status();
+    let data =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    (status, data)
+}
 async fn call_with_groups(
     state: &AppState,
     actor: Option<Uuid>,
@@ -2602,6 +2631,36 @@ async fn call_grammar(
     call_client(state, Some(actor), method, path, body, (true, true, true)).await
 }
 
+async fn call_grammar_links(
+    state: &AppState,
+    actor: Uuid,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(format!("{ROOT}{path}"))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                state.admin_token_manager.generate(actor, "admin").unwrap()
+            ),
+        )
+        .header("x-tsz-next-forms", "v1")
+        .header("x-tsz-next-grammar", "v1")
+        .header("x-tsz-next-grammar-form-links", "v1")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = tsz_rust::router(state.clone()).oneshot(req).await.unwrap();
+    let status = response.status();
+    let data =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    (status, data)
+}
+
 #[sqlx::test]
 async fn grammar_rich_variants_bind_subcategories_and_protect_legacy_drafts(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
@@ -2812,6 +2871,108 @@ async fn grammar_rich_variants_bind_subcategories_and_protect_legacy_drafts(pool
         .execute(&pool)
         .await
         .is_err()
+    );
+}
+
+#[sqlx::test]
+async fn grammar_links_survive_legacy_save_and_reject_invalid_ranges(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool, EDIT).await;
+    let target = create(&state, actor).await;
+    let target_entry = Uuid::parse_str(target["id"].as_str().unwrap()).unwrap();
+    let target_pos = Uuid::now_v7();
+    let target_form = Uuid::now_v7();
+    let target_variant = Uuid::now_v7();
+    for (id, role, parent) in [
+        (target_pos, "pos", None),
+        (target_form, "form", Some(target_pos)),
+        (target_variant, "variant", Some(target_form)),
+    ] {
+        sqlx::query("INSERT INTO lexicon_next.form_editor_nodes(id,entry_id,role,parent_id) VALUES($1,$2,$3,$4)")
+            .bind(id)
+            .bind(target_entry)
+            .bind(role)
+            .bind(parent)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let source = create(&state, actor).await;
+    let path = format!("/entries/{}", source["id"].as_str().unwrap());
+    let grammar_id = Uuid::now_v7();
+    let gb_variant = Uuid::now_v7();
+    let us_variant = Uuid::now_v7();
+    let link_id = Uuid::now_v7();
+    let mut content = draft();
+    content["grammar_structures"] = json!([{
+        "id":grammar_id,
+        "part_of_speech":"noun",
+        "variants":[
+            {"id":gb_variant,"locale":"en-GB","content":{"version":2,"text":"target","annotations":[]},"form_links":[{
+                "id":link_id,
+                "source_segments":[{"start":0,"end":6,"surface":"target"}],
+                "target_source":"lexicon_next",
+                "target_word_id":target_entry,
+                "target_pos_id":target_pos,
+                "target_form_id":target_form,
+                "target_variant_id":target_variant,
+                "target_dialect":"common"
+            }]},
+            {"id":us_variant,"locale":"en-US","content":{"version":2,"text":"target","annotations":[]}}
+        ]
+    }]);
+    let (status, saved) = call_grammar_links(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["draft"]["grammar_structures"][0]["variants"][0]["form_links"][0]["target_source"],
+        "lexicon_next"
+    );
+    let (_, reopened) = call_grammar_links(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(reopened["draft"], saved["draft"]);
+
+    let mut invalid = content.clone();
+    invalid["grammar_structures"][0]["variants"][0]["form_links"][0]["source_segments"][0]["start"] =
+        json!(1);
+    assert_eq!(
+        call_grammar_links(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":2,"draft":invalid}),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let mut legacy = saved["draft"].clone();
+    for variant in legacy["grammar_structures"][0]["variants"]
+        .as_array_mut()
+        .unwrap()
+    {
+        variant.as_object_mut().unwrap().remove("form_links");
+    }
+    let (status, legacy_saved) = call_grammar(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":legacy}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{legacy_saved}");
+    let (_, retained) = call_grammar_links(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(
+        retained["draft"]["grammar_structures"][0]["variants"][0]["form_links"][0]["id"],
+        link_id.to_string()
     );
 }
 
@@ -4859,6 +5020,127 @@ async fn unified_sentence_drafts_are_atomic_scoped_and_permission_checked(pool: 
             .iter()
             .any(|v| v["locale"] == "zh-Hant")
     );
+}
+
+#[sqlx::test]
+async fn next_sentence_association_roundtrips_to_a_next_entry_target(pool: PgPool) {
+    let actor = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "sentences.access",
+            "sentences.create",
+            "sentences.edit",
+        ],
+    )
+    .await;
+    let state = AppState::for_test(pool.clone());
+    let target_entry = Uuid::now_v7();
+    let target_pos = Uuid::now_v7();
+    let target_form = Uuid::now_v7();
+    let target_variant = Uuid::now_v7();
+    let target_sense = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon_next.entries(id,target_language,medium_locale,kind,headword,owner_id,revision) VALUES($1,'en','zh-Hans','word','target',$2,1)")
+        .bind(target_entry)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO lexicon_next.draft_revisions(entry_id,revision,actor_id,document) VALUES($1,1,$2,$3)")
+        .bind(target_entry)
+        .bind(actor)
+        .bind(json!({"schema_version":1,"headword":"target","forms":[],"senses":[],"form_editor":null}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO lexicon_next.nodes(id,entry_id,kind,parent_id) VALUES($1,$2,'sense',NULL)",
+    )
+    .bind(target_sense)
+    .bind(target_entry)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (id, role, parent) in [
+        (target_pos, "pos", None),
+        (target_form, "form", Some(target_pos)),
+        (target_variant, "variant", Some(target_form)),
+    ] {
+        sqlx::query("INSERT INTO lexicon_next.form_editor_nodes(id,entry_id,role,parent_id) VALUES($1,$2,$3,$4)")
+            .bind(id)
+            .bind(target_entry)
+            .bind(role)
+            .bind(parent)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let sentence = Uuid::now_v7();
+    let variant = Uuid::now_v7();
+    let body = json!({
+        "id": sentence,
+        "target_language": "en",
+        "target_locale": "en-GB",
+        "medium_locale": "zh-Hans",
+        "variant": {
+            "id": variant,
+            "locale": "en-GB",
+            "level": "A1",
+            "content": {"version":2,"text":"target","annotations":[]},
+            "translations": [],
+            "associations": [{
+                "id": Uuid::now_v7(),
+                "source_dialect": "uk",
+                "source_segments": [{"start":0,"end":6,"surface":"target"}],
+                "target": {
+                    "state":"linked",
+                    "target_source":"lexicon_next",
+                    "target_entry_id": target_entry,
+                    "target_pos_id": target_pos,
+                    "target_base_form_id": target_form,
+                    "target_form_id": target_form,
+                    "target_variant_id": target_variant,
+                    "target_sense_id": target_sense,
+                    "target_dialect":"common"
+                }
+            }]
+        }
+    });
+    let mut invalid = body.clone();
+    invalid["variant"]["associations"][0]["source_segments"][0]["end"] = json!(99);
+    assert_eq!(
+        call_associations(&state, actor, "POST", "/sentences", invalid)
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (status, saved) = call_associations(&state, actor, "POST", "/sentences", body).await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(
+        saved["draft"]["variants"][0]["associations"][0]["target"]["target_source"],
+        "lexicon_next"
+    );
+    let (status, read) = call_associations(
+        &state,
+        actor,
+        "GET",
+        &format!("/sentences/{sentence}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(
+        read["draft"]["variants"][0]["associations"][0]["target"]["target_entry_id"],
+        target_entry.to_string()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.sentence_associations WHERE sentence_id=$1 AND target_source='lexicon_next'")
+        .bind(sentence)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
 }
 #[path = "lexicon_next/relations.rs"]
 mod relations;

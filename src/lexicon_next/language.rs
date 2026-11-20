@@ -34,6 +34,8 @@ pub fn capabilities() -> NextCapabilities {
         sense_metadata: None,
         grammar_audio: None,
         grammar_structures: None,
+        grammar_form_links: None,
+        sentence_associations: None,
         medium_ownership: None,
         schema_version: 1,
         language_rules_version: "lexicon-next-en-zh-1".into(),

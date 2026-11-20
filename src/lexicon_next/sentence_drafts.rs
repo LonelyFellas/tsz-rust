@@ -17,6 +17,12 @@ use uuid::Uuid;
 fn invalid(message: &str) -> AppError {
     AppError::unprocessable(ErrorCode::InvalidRequestBody, message)
 }
+
+pub(super) fn has_associations(changes: &[NextSentenceDraftChange]) -> bool {
+    changes
+        .iter()
+        .any(|change| change.variant.associations.as_ref().is_some())
+}
 pub(super) async fn resources(
     conn: &mut PgConnection,
     draft: &NextDraft,
@@ -34,11 +40,17 @@ pub(super) async fn resources(
     }
     let ids: Vec<_> = ids.into_iter().collect();
     let rows = sqlx::query("SELECT s.id,s.target_language,s.owner_id,s.revision,s.updated_at,s.document,(SELECT count(*) FROM lexicon_next.sentence_references r WHERE r.sentence_id=s.id) AS reference_count FROM lexicon_next.sentences s WHERE s.id=ANY($1) ORDER BY s.id")
-        .bind(&ids).fetch_all(conn).await.map_err(AppError::internal)?;
+        .bind(&ids).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
     if rows.len() != ids.len() {
         return Err(invalid("部分关联例句不存在，请重新加载词条"));
     }
-    rows.into_iter().map(sentences::decode).collect()
+    let mut result = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut sentence = sentences::decode(row)?;
+        sentences::hydrate(conn, &mut sentence).await?;
+        result.push(sentence);
+    }
+    Ok(result)
 }
 
 pub(super) async fn save_changes(

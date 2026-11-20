@@ -49,6 +49,50 @@ fn require_details(
     Ok(())
 }
 
+fn valid_source_segments(text: &str, associations: &[NextSentenceAnnotation]) -> bool {
+    if associations.len() > 100 {
+        return false;
+    }
+    let chars: Vec<_> = text.chars().collect();
+    let tokens = crate::lexicon::text_tokenization::tokenize(text);
+    let mut ids = HashSet::new();
+    let mut occupied = HashSet::new();
+    associations.iter().all(|association| {
+        if association.id.is_nil()
+            || !ids.insert(association.id)
+            || association.source_segments.is_empty()
+            || association.source_segments.len() > 20
+        {
+            return false;
+        }
+        let mut previous_end = 0;
+        for segment in &association.source_segments {
+            let start = segment.start;
+            let end = segment.end;
+            if start >= end
+                || start < previous_end
+                || end > chars.len()
+                || segment.surface.trim().is_empty()
+                || !tokens.iter().any(|token| token.range.start == start)
+                || !tokens.iter().any(|token| token.range.end == end)
+                || chars[start..end].iter().collect::<String>() != segment.surface
+                || chars[start..end]
+                    .iter()
+                    .any(|character| matches!(character, '\n' | '\r'))
+                || (start..end).any(|index| !occupied.insert(index))
+            {
+                return false;
+            }
+            previous_end = end;
+        }
+        let first = association.source_segments.first().unwrap().start;
+        let last = association.source_segments.last().unwrap().end;
+        !chars[first..last]
+            .iter()
+            .any(|character| matches!(character, '\n' | '\r'))
+    })
+}
+
 const LEVELS: &[&str] = &["A1", "A2", "B1", "B2", "C1", "C2"];
 const SELECT: &str = "SELECT s.id,s.target_language,s.owner_id,s.revision,s.updated_at,s.document,(SELECT count(*) FROM lexicon_next.sentence_references r WHERE r.sentence_id=s.id) AS reference_count FROM lexicon_next.sentences s";
 
@@ -64,6 +108,162 @@ pub(super) fn decode(row: sqlx::postgres::PgRow) -> Result<NextSentence, AppErro
     })
 }
 
+pub(super) async fn hydrate(
+    conn: &mut PgConnection,
+    sentence: &mut NextSentence,
+) -> Result<(), AppError> {
+    let rows = sqlx::query(
+        "SELECT id,source_variant_id,source_dialect,source_segments,state,target_kind,target_source,target_word_id,target_publication_id,target_pos_id,target_base_form_id,target_sense_id,target_form_id,target_variant_id,target_dialect,pending_headword,pending_gloss FROM lexicon_next.sentence_associations WHERE sentence_id=$1 ORDER BY source_variant_id,source_start",
+    )
+    .bind(sentence.id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(AppError::internal)?;
+    for variant in &mut sentence.draft.variants {
+        let associations = rows
+            .iter()
+            .filter(|row| row.get::<Uuid, _>("source_variant_id") == variant.id)
+            .map(|row| {
+                let segments =
+                    serde_json::from_value(row.get::<serde_json::Value, _>("source_segments"))
+                        .map_err(AppError::internal)?;
+                let target = match row.get::<String, _>("state").as_str() {
+                    "linked" => NextSentenceTarget::Linked {
+                        target_source: match row.get::<String, _>("target_source").as_str() {
+                            "v3" => None,
+                            "lexicon_next" => {
+                                Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
+                            }
+                            _ => return Err(language::invalid()),
+                        },
+                        target_entry_id: row.get("target_word_id"),
+                        target_pos_id: row.get("target_pos_id"),
+                        target_base_form_id: row.get("target_base_form_id"),
+                        target_form_id: row.get("target_form_id"),
+                        target_variant_id: row.get("target_variant_id"),
+                        target_sense_id: row.get("target_sense_id"),
+                        target_dialect: row
+                            .get::<Option<String>, _>("target_dialect")
+                            .map(|value| {
+                                crate::lexicon::dto::Dialect::parse(&value)
+                                    .ok_or_else(language::invalid)
+                            })
+                            .transpose()?,
+                        target_publication_id: row.get("target_publication_id"),
+                    },
+                    "entry_only" => NextSentenceTarget::EntryOnly {
+                        target_source: match row.get::<String, _>("target_source").as_str() {
+                            "v3" => None,
+                            "lexicon_next" => {
+                                Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
+                            }
+                            _ => return Err(language::invalid()),
+                        },
+                        target_entry_id: row.get("target_word_id"),
+                    },
+                    "pending" => NextSentenceTarget::Pending {
+                        kind: row.get::<String, _>("target_kind"),
+                        headword: row.get::<String, _>("pending_headword"),
+                        gloss: row.get("pending_gloss"),
+                    },
+                    _ => {
+                        return Err(AppError::internal(anyhow::anyhow!(
+                            "invalid sentence association state"
+                        )));
+                    }
+                };
+                Ok(NextSentenceAnnotation {
+                    id: row.get("id"),
+                    source_dialect: row.get("source_dialect"),
+                    source_segments: segments,
+                    target,
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        if !associations.is_empty() {
+            variant.associations = Some(associations);
+        }
+    }
+    Ok(())
+}
+
+async fn validate_target(
+    conn: &mut PgConnection,
+    target: &NextSentenceTarget,
+) -> Result<(), AppError> {
+    let (source, entry, pos, sense, base_form, form, variant) = match target {
+        NextSentenceTarget::Linked {
+            target_source,
+            target_entry_id,
+            target_pos_id,
+            target_base_form_id,
+            target_form_id,
+            target_variant_id,
+            target_sense_id,
+            ..
+        } => (
+            target_source.as_ref(),
+            Some(*target_entry_id),
+            Some(*target_pos_id),
+            Some(*target_sense_id),
+            Some(*target_base_form_id),
+            Some(*target_form_id),
+            Some(*target_variant_id),
+        ),
+        NextSentenceTarget::EntryOnly {
+            target_source,
+            target_entry_id,
+        } => (
+            target_source.as_ref(),
+            Some(*target_entry_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        NextSentenceTarget::Pending { .. } => return Ok(()),
+    };
+    let next = matches!(
+        source,
+        Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
+    );
+    let valid = if next {
+        if let (Some(pos), Some(sense), Some(base_form), Some(form), Some(variant)) =
+            (pos, sense, base_form, form, variant)
+        {
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries WHERE id=$1) AND EXISTS(SELECT 1 FROM lexicon_next.nodes WHERE id=$2 AND entry_id=$1 AND kind='sense') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$3 AND entry_id=$1 AND role='pos') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$4 AND entry_id=$1 AND role='form' AND parent_id=$3) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$5 AND entry_id=$1 AND role='form' AND parent_id=$3) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$6 AND entry_id=$1 AND role='variant' AND parent_id=$5)")
+                .bind(entry).bind(sense).bind(pos).bind(base_form).bind(form).bind(variant)
+                .fetch_one(&mut *conn).await.map_err(AppError::internal)?
+        } else {
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries WHERE id=$1)")
+                .bind(entry)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(AppError::internal)?
+        }
+    } else if let (Some(pos), Some(sense), Some(form), Some(variant)) = (pos, sense, form, variant)
+    {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$2 AND entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$3 AND entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$4 AND entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$5 AND entry_id=$1)")
+            .bind(entry).bind(pos).bind(sense).bind(form).bind(variant)
+            .fetch_one(&mut *conn).await.map_err(AppError::internal)?
+    } else {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id=$1)")
+            .bind(entry)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(AppError::internal)?
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::unprocessable(
+            ErrorCode::InvalidRequestBody,
+            "例句关联目标词条或词义不存在，请重新选择",
+        ))
+    }
+}
+
 async fn get(pool: &PgPool, id: Uuid) -> Result<NextSentence, AppError> {
     let mut query = QueryBuilder::<Postgres>::new(SELECT);
     query.push(" WHERE s.id=").push_bind(id);
@@ -73,7 +273,10 @@ async fn get(pool: &PgPool, id: Uuid) -> Result<NextSentence, AppError> {
         .await
         .map_err(AppError::internal)?
         .ok_or_else(|| AppError::not_found("例句不存在"))?;
-    decode(row)
+    let mut sentence = decode(row)?;
+    let mut conn = pool.acquire().await.map_err(AppError::internal)?;
+    hydrate(&mut conn, &mut sentence).await?;
+    Ok(sentence)
 }
 
 fn target(locale: &str) -> Result<(), AppError> {
@@ -194,6 +397,159 @@ pub(super) async fn prepare(
                 Some(variant.id),
             )
             .await?;
+        }
+        // Associations belong to the variant and must be persisted even when
+        // the sentence has no translations in the current medium.
+        if let Some(associations) = &variant.associations {
+            if !valid_source_segments(variant.content.text(), associations) {
+                return Err(language::invalid());
+            }
+            sqlx::query(
+                "DELETE FROM lexicon_next.sentence_associations WHERE source_variant_id=$1",
+            )
+            .bind(variant.id)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::internal)?;
+            for association in associations {
+                if association.source_segments.is_empty()
+                    || association.source_dialect
+                        != match variant.locale.as_str() {
+                            "en-GB" => "uk",
+                            "en-US" => "us",
+                            _ => "common",
+                        }
+                {
+                    return Err(language::invalid());
+                }
+                let first = association.source_segments.first().unwrap();
+                let (
+                    state,
+                    target_kind,
+                    target_source,
+                    target_word_id,
+                    target_publication_id,
+                    target_pos_id,
+                    target_base_form_id,
+                    target_sense_id,
+                    target_form_id,
+                    target_variant_id,
+                    target_dialect,
+                    pending_headword,
+                    pending_gloss,
+                ) = match &association.target {
+                    NextSentenceTarget::Linked {
+                        target_source,
+                        target_entry_id,
+                        target_pos_id,
+                        target_base_form_id,
+                        target_form_id,
+                        target_variant_id,
+                        target_sense_id,
+                        target_dialect,
+                        target_publication_id,
+                    } => (
+                        "linked",
+                        Some("word"),
+                        Some(
+                            target_source
+                                .as_ref()
+                                .map(|source| match source {
+                                    crate::lexicon::dto::AssociationTargetSource::V3 => "v3",
+                                    crate::lexicon::dto::AssociationTargetSource::LexiconNext => {
+                                        "lexicon_next"
+                                    }
+                                })
+                                .unwrap_or("v3"),
+                        ),
+                        Some(*target_entry_id),
+                        *target_publication_id,
+                        Some(*target_pos_id),
+                        Some(*target_base_form_id),
+                        Some(*target_sense_id),
+                        Some(*target_form_id),
+                        Some(*target_variant_id),
+                        target_dialect.map(|v| v.as_str().to_string()),
+                        None,
+                        None,
+                    ),
+                    NextSentenceTarget::EntryOnly {
+                        target_source,
+                        target_entry_id,
+                    } => (
+                        "entry_only",
+                        Some("word"),
+                        Some(
+                            target_source
+                                .as_ref()
+                                .map(|source| match source {
+                                    crate::lexicon::dto::AssociationTargetSource::V3 => "v3",
+                                    crate::lexicon::dto::AssociationTargetSource::LexiconNext => {
+                                        "lexicon_next"
+                                    }
+                                })
+                                .unwrap_or("v3"),
+                        ),
+                        Some(*target_entry_id),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                    NextSentenceTarget::Pending {
+                        kind,
+                        headword,
+                        gloss,
+                    } => (
+                        "pending",
+                        Some(kind.as_str()),
+                        Some("v3"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(headword.as_str()),
+                        gloss.as_deref(),
+                    ),
+                };
+                validate_target(conn, &association.target).await?;
+                sqlx::query(
+                    "INSERT INTO lexicon_next.sentence_associations (id,sentence_id,source_variant_id,source_dialect,source_segments,source_start,source_end,source_surface,state,target_kind,target_source,target_word_id,target_publication_id,target_pos_id,target_base_form_id,target_sense_id,target_form_id,target_variant_id,target_dialect,pending_headword,pending_gloss) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+                )
+                .bind(association.id)
+                .bind(id)
+                .bind(variant.id)
+                .bind(&association.source_dialect)
+                .bind(serde_json::to_value(&association.source_segments).map_err(AppError::internal)?)
+                .bind(first.start as i32)
+                .bind(association.source_segments.last().unwrap().end as i32)
+                .bind(&first.surface)
+                .bind(state)
+                .bind(target_kind)
+                .bind(target_source)
+                .bind(target_word_id)
+                .bind(target_publication_id)
+                .bind(target_pos_id)
+                .bind(target_base_form_id)
+                .bind(target_sense_id)
+                .bind(target_form_id)
+                .bind(target_variant_id)
+                .bind(target_dialect)
+                .bind(pending_headword)
+                .bind(pending_gloss)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::internal)?;
+            }
         }
     }
     let mut serialized = serde_json::to_value(&draft).map_err(AppError::internal)?;

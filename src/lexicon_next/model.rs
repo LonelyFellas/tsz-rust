@@ -205,6 +205,13 @@ pub struct NextGrammarVariant {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_form_links"
+    )]
+    #[schema(nullable = false, max_items = 100)]
+    pub form_links: Option<Vec<crate::lexicon::dto::GrammarFormLinkV3>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         deserialize_with = "non_null_voice_profile"
     )]
     #[schema(nullable = false)]
@@ -360,6 +367,12 @@ pub struct NextCapabilities {
     pub grammar_structures: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub grammar_form_links: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sentence_associations: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub medium_ownership: Option<bool>,
     #[schema(minimum = 1, maximum = 1)]
     pub schema_version: i32,
@@ -512,6 +525,12 @@ fn non_null_grammars<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Vec<NextGrammarStructure>>, D::Error> {
     Vec::<NextGrammarStructure>::deserialize(deserializer).map(Some)
+}
+
+fn non_null_form_links<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<crate::lexicon::dto::GrammarFormLinkV3>>, D::Error> {
+    Vec::<crate::lexicon::dto::GrammarFormLinkV3>::deserialize(deserializer).map(Some)
 }
 
 fn non_null_sub_pos<'de, D: serde::Deserializer<'de>>(

@@ -1,6 +1,6 @@
 use super::{language, model::*};
 use crate::error::{AppError, ErrorCode};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, Row};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -236,7 +236,22 @@ pub(super) async fn persist(
         ));
     }
     // The shared speech validator uses owner dialect to scope inherited recommendations.
-    let mut audio = serde_json::to_value(&draft.grammar_structures).map_err(AppError::internal)?;
+    let mut audio_grammars = draft.grammar_structures.clone();
+    for variant in audio_grammars
+        .iter_mut()
+        .flatten()
+        .flat_map(|grammar| &mut grammar.variants)
+    {
+        if let Some(links) = &mut variant.form_links {
+            links.retain(|link| {
+                !matches!(
+                    link.target_source,
+                    Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
+                )
+            });
+        }
+    }
+    let mut audio = serde_json::to_value(&audio_grammars).map_err(AppError::internal)?;
     if let Some(grammars) = audio.as_array_mut() {
         for grammar in grammars {
             for variant in grammar["variants"].as_array_mut().into_iter().flatten() {
@@ -259,9 +274,180 @@ pub(super) async fn persist(
                 _ => "grammar_en_us",
             };
             super::repository::node(conn, variant.id, entry, kind, Some(grammar.id)).await?;
+            if let Some(links) = &variant.form_links {
+                if !crate::lexicon::service::grammar_form_links::valid_reading_ranges(
+                    variant.content.text(),
+                    links,
+                ) {
+                    return Err(language::invalid());
+                }
+                sqlx::query(
+                    "DELETE FROM lexicon_next.grammar_form_links WHERE source_variant_id=$1",
+                )
+                .bind(variant.id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::internal)?;
+                for link in links {
+                    if link.source_segments.len() != 1
+                        || link.target_word_id == entry
+                        || link.target_dialect.as_str().is_empty()
+                    {
+                        return Err(language::invalid());
+                    }
+                    validate_form_target(
+                        conn,
+                        link.target_source.as_ref(),
+                        link.target_word_id,
+                        link.target_pos_id,
+                        link.target_form_id,
+                        link.target_variant_id,
+                    )
+                    .await?;
+                    let segment = &link.source_segments[0];
+                    sqlx::query(
+                        "INSERT INTO lexicon_next.grammar_form_links (id,entry_id,source_variant_id,source_start,source_end,source_surface,target_source,target_word_id,target_publication_id,target_pos_id,target_form_id,target_variant_id,target_dialect,reading_reference) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+                    )
+                    .bind(link.id)
+                    .bind(entry)
+                    .bind(variant.id)
+                    .bind(segment.start as i32)
+                    .bind(segment.end as i32)
+                    .bind(&segment.surface)
+                    .bind(
+                        link
+                            .target_source
+                            .as_ref()
+                            .map(|source| match source {
+                                crate::lexicon::dto::AssociationTargetSource::V3 => "v3",
+                                crate::lexicon::dto::AssociationTargetSource::LexiconNext => {
+                                    "lexicon_next"
+                                }
+                            })
+                            .unwrap_or("v3"),
+                    )
+                    .bind(link.target_word_id)
+                    .bind(link.target_publication_id)
+                    .bind(link.target_pos_id)
+                    .bind(link.target_form_id)
+                    .bind(link.target_variant_id)
+                    .bind(link.target_dialect.as_str())
+                    .bind(link.reading_reference.as_ref().map(serde_json::to_value).transpose().map_err(AppError::internal)?)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::internal)?;
+                }
+            }
         }
     }
     Ok(())
+}
+
+pub(super) async fn hydrate(
+    conn: &mut PgConnection,
+    entry: Uuid,
+    draft: &mut NextDraft,
+) -> Result<(), AppError> {
+    let rows = sqlx::query(
+        "SELECT source_variant_id,id,source_start,source_end,source_surface,target_source,target_word_id,target_publication_id,target_pos_id,target_form_id,target_variant_id,target_dialect,reading_reference FROM lexicon_next.grammar_form_links WHERE entry_id=$1 ORDER BY source_variant_id,source_start",
+    )
+    .bind(entry)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(AppError::internal)?;
+    for variant in draft
+        .grammar_structures
+        .iter_mut()
+        .flatten()
+        .flat_map(|grammar| &mut grammar.variants)
+    {
+        let links = rows
+            .iter()
+            .filter(|row| row.get::<Uuid, _>("source_variant_id") == variant.id)
+            .map(|row| {
+                let target_dialect = crate::lexicon::dto::Dialect::parse(
+                    row.get::<String, _>("target_dialect").as_str(),
+                )
+                .ok_or_else(language::invalid)?;
+                let reading_reference = row
+                    .get::<Option<serde_json::Value>, _>("reading_reference")
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(AppError::internal)?;
+                Ok(crate::lexicon::dto::GrammarFormLinkV3 {
+                    id: row.get("id"),
+                    source_segments: vec![crate::lexicon::dto::SentenceSourceRangeV1 {
+                        start: row.get::<i32, _>("source_start") as usize,
+                        end: row.get::<i32, _>("source_end") as usize,
+                        surface: row.get("source_surface"),
+                    }],
+                    target_word_id: row.get("target_word_id"),
+                    target_source: match row.get::<String, _>("target_source").as_str() {
+                        "v3" => None,
+                        "lexicon_next" => {
+                            Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
+                        }
+                        _ => return Err(language::invalid()),
+                    },
+                    target_publication_id: row.get("target_publication_id"),
+                    target_pos_id: row.get("target_pos_id"),
+                    target_form_id: row.get("target_form_id"),
+                    target_variant_id: row.get("target_variant_id"),
+                    target_dialect,
+                    reading_reference,
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        if !links.is_empty() {
+            variant.form_links = Some(links);
+        }
+    }
+    Ok(())
+}
+
+async fn validate_form_target(
+    conn: &mut PgConnection,
+    source: Option<&crate::lexicon::dto::AssociationTargetSource>,
+    entry: Uuid,
+    pos: Uuid,
+    form: Uuid,
+    variant: Uuid,
+) -> Result<(), AppError> {
+    let next = matches!(
+        source,
+        Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
+    );
+    let valid: bool = if next {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM lexicon_next.entries e WHERE e.id=$1) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$2 AND entry_id=$1 AND role='pos') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$3 AND entry_id=$1 AND role='form' AND parent_id=$2) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$4 AND entry_id=$1 AND role='variant' AND parent_id=$3)",
+        )
+        .bind(entry)
+        .bind(pos)
+        .bind(form)
+        .bind(variant)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(AppError::internal)?
+    } else {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM lexicon.entries e WHERE e.id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$2 AND entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$3 AND entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$4 AND entry_id=$1)",
+        )
+        .bind(entry)
+        .bind(pos)
+        .bind(form)
+        .bind(variant)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(AppError::internal)?
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::unprocessable(
+            ErrorCode::InvalidRequestBody,
+            "语法关联目标词形不存在，请重新选择",
+        ))
+    }
 }
 
 pub(super) fn has_audio(draft: &NextDraft) -> bool {
@@ -271,6 +457,37 @@ pub(super) fn has_audio(draft: &NextDraft) -> bool {
         .flatten()
         .flat_map(|grammar| &grammar.variants)
         .any(|variant| variant.voice_profile.is_some() || !variant.audio_assets.is_empty())
+}
+
+pub(super) fn has_form_links(draft: &NextDraft) -> bool {
+    draft
+        .grammar_structures
+        .iter()
+        .flatten()
+        .flat_map(|grammar| &grammar.variants)
+        .any(|variant| variant.form_links.is_some())
+}
+
+pub(super) fn preserve_form_links(draft: &mut NextDraft, previous: &NextDraft) {
+    let old: HashMap<_, _> = previous
+        .grammar_structures
+        .iter()
+        .flatten()
+        .flat_map(|grammar| &grammar.variants)
+        .map(|variant| (variant.id, variant))
+        .collect();
+    for variant in draft
+        .grammar_structures
+        .iter_mut()
+        .flatten()
+        .flat_map(|grammar| &mut grammar.variants)
+    {
+        if variant.form_links.is_none()
+            && let Some(previous) = old.get(&variant.id)
+        {
+            variant.form_links = previous.form_links.clone();
+        }
+    }
 }
 
 pub(super) fn strip_audio(grammars: Option<&mut Vec<NextGrammarStructure>>) {

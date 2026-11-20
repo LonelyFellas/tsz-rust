@@ -91,22 +91,27 @@ pub async fn list(pool: &PgPool, query: NextListQuery) -> Result<NextEntryList, 
 }
 
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<NextEntry, AppError> {
-    sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
+    let mut conn = pool.acquire().await.map_err(AppError::internal)?;
+    let mut entry = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(AppError::internal)?
         .ok_or_else(|| AppError::not_found("lexicon-next entry not found"))?
-        .entry()
+        .entry()?;
+    super::grammar::hydrate(&mut conn, id, &mut entry.draft).await?;
+    Ok(entry)
 }
 pub(super) async fn get_on(conn: &mut PgConnection, id: Uuid) -> Result<NextEntry, AppError> {
-    sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
+    let mut entry = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
         .bind(id)
-        .fetch_optional(conn)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(AppError::internal)?
         .ok_or_else(|| AppError::not_found("lexicon-next entry not found"))?
-        .entry()
+        .entry()?;
+    super::grammar::hydrate(conn, id, &mut entry.draft).await?;
+    Ok(entry)
 }
 pub async fn create(
     pool: &PgPool,
@@ -188,6 +193,7 @@ pub(super) struct SaveCapabilities {
     pub relations: bool,
     pub pairs: bool,
     pub grammar_audio: bool,
+    pub grammar_form_links: bool,
     pub sense_metadata: bool,
     pub equivalent_metadata: bool,
     pub definition_details: bool,
@@ -250,6 +256,9 @@ pub async fn save(
         .await
         .map_err(AppError::internal)?
         .entry()?;
+    if !capabilities.grammar_form_links {
+        super::grammar::preserve_form_links(draft, &previous.draft);
+    }
     if !capabilities.definition_details {
         super::definitions::preserve(draft, &previous.draft);
     }
@@ -399,6 +408,7 @@ pub async fn save(
         .await
         .map_err(AppError::internal)?
         .entry()?;
+    super::grammar::hydrate(conn, id, &mut result.draft).await?;
     if capabilities.pairs {
         result.dialect_senses =
             Some(super::dialect_pairs::project(conn, id, next_revision, false).await?);
