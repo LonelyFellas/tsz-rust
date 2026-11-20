@@ -1345,6 +1345,9 @@ pub struct GrammarFormLinkV3 {
     pub id: Uuid,
     #[schema(min_items = 1, max_items = 1)]
     pub source_segments: Vec<SentenceSourceRangeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_source: Option<AssociationTargetSource>,
     pub target_word_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -1355,6 +1358,13 @@ pub struct GrammarFormLinkV3 {
     pub target_dialect: Dialect,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reading_reference: Option<ReadingReferenceV3>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AssociationTargetSource {
+    V3,
+    LexiconNext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

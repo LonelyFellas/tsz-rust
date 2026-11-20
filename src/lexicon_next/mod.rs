@@ -106,7 +106,7 @@ pub async fn detect(
     Ok(Json(detection::detect(&state.pool, input).await?))
 }
 
-#[utoipa::path(get, path="/api/v1/admin/lexicon-next/capabilities", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=200, body=NextCapabilities), (status=401), (status=403)))]
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/capabilities", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-sentence-associations"=Option<String>, Header, description="v1 negotiates normalized sentence word/phrase associations."),("x-tsz-next-grammar-form-links"=Option<String>, Header, description="v1 negotiates normalized grammar form links."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=200, body=NextCapabilities), (status=401), (status=403)))]
 pub async fn capabilities(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -151,6 +151,12 @@ pub async fn capabilities(
         if supports_grammar_audio(&headers) {
             capability.grammar_audio = Some(true);
         }
+        if supports_grammar_form_links(&headers) {
+            capability.grammar_form_links = Some(true);
+        }
+    }
+    if supports_sentence_associations(&headers) {
+        capability.sentence_associations = Some(true);
     }
     if supports_sense_groups(&headers) {
         capability.sense_groups = Some(true);
@@ -264,6 +270,14 @@ pub async fn save(
             "sentence references require x-tsz-next-sentences: v1",
         ));
     }
+    if !supports_sentence_associations(&headers)
+        && sentence_drafts::has_associations(&input.sentence_changes)
+    {
+        return Err(AppError::unprocessable(
+            crate::error::ErrorCode::CapabilityUnavailable,
+            "sentence associations require x-tsz-next-sentence-associations: v1",
+        ));
+    }
     if !supports_definitions(&headers) && definitions::has_details(&input.draft) {
         return Err(AppError::unprocessable(
             crate::error::ErrorCode::CapabilityUnavailable,
@@ -290,6 +304,12 @@ pub async fn save(
         return Err(AppError::unprocessable(
             crate::error::ErrorCode::CapabilityUnavailable,
             "grammar structures require x-tsz-next-grammar: v1",
+        ));
+    }
+    if !supports_grammar_form_links(&headers) && grammar::has_form_links(&input.draft) {
+        return Err(AppError::unprocessable(
+            crate::error::ErrorCode::CapabilityUnavailable,
+            "grammar form links require x-tsz-next-grammar-form-links: v1",
         ));
     }
     if !supports_grammar_audio(&headers) && grammar::has_audio(&input.draft) {
@@ -450,6 +470,20 @@ fn supports_grammar_audio(headers: &axum::http::HeaderMap) -> bool {
             .is_some_and(|value| value == "v1")
 }
 
+fn supports_grammar_form_links(headers: &axum::http::HeaderMap) -> bool {
+    supports_grammar(headers)
+        && headers
+            .get("x-tsz-next-grammar-form-links")
+            .is_some_and(|value| value == "v1")
+}
+
+fn supports_sentence_associations(headers: &axum::http::HeaderMap) -> bool {
+    supports_sentences(headers)
+        && headers
+            .get("x-tsz-next-sentence-associations")
+            .is_some_and(|value| value == "v1")
+}
+
 fn supports_grammar(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("x-tsz-next-grammar")
@@ -500,6 +534,13 @@ fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> Ne
             sense.sentence_ids = None;
         }
     }
+    if !supports_sentence_associations(headers) {
+        for sentence in entry.sentence_resources.iter_mut().flatten() {
+            for variant in &mut sentence.draft.variants {
+                variant.associations = None;
+            }
+        }
+    }
     if !supports_definitions(headers) {
         for row in entry
             .draft
@@ -527,6 +568,17 @@ fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> Ne
             for definition in &mut sense.definitions {
                 definition.grammar_structure_id = None;
             }
+        }
+    }
+    if !supports_grammar_form_links(headers) {
+        for variant in entry
+            .draft
+            .grammar_structures
+            .iter_mut()
+            .flatten()
+            .flat_map(|grammar| &mut grammar.variants)
+        {
+            variant.form_links = None;
         }
     }
     if !supports_grammar_audio(headers) {

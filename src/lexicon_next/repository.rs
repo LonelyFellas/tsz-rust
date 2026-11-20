@@ -100,13 +100,15 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<NextEntry, AppError> {
         .entry()
 }
 pub(super) async fn get_on(conn: &mut PgConnection, id: Uuid) -> Result<NextEntry, AppError> {
-    sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
+    let mut entry = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
         .bind(id)
-        .fetch_optional(conn)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(AppError::internal)?
         .ok_or_else(|| AppError::not_found("lexicon-next entry not found"))?
-        .entry()
+        .entry()?;
+    super::grammar::hydrate(conn, id, &mut entry.draft).await?;
+    Ok(entry)
 }
 pub async fn create(
     pool: &PgPool,
