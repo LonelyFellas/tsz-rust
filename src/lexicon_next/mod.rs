@@ -25,6 +25,7 @@ use crate::{
     admin::{AdminAuth, permissions},
     api::{ApiJson, ApiPath, ApiQuery},
     error::AppError,
+    lexicon::normalization::normalize_headword,
     state::AppState,
 };
 use axum::{
@@ -106,7 +107,7 @@ pub async fn detect(
     Ok(Json(detection::detect(&state.pool, input).await?))
 }
 
-#[utoipa::path(get, path="/api/v1/admin/lexicon-next/capabilities", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-sentence-associations"=Option<String>, Header, description="v1 negotiates normalized sentence word/phrase associations."),("x-tsz-next-grammar-form-links"=Option<String>, Header, description="v1 negotiates normalized grammar form links."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=200, body=NextCapabilities), (status=401), (status=403)))]
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/capabilities", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-sentence-associations"=Option<String>, Header, description="v1 negotiates normalized sentence word/phrase associations."),("x-tsz-next-grammar-form-links"=Option<String>, Header, description="v1 negotiates normalized grammar form links."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=200, body=NextCapabilities), (status=401), (status=403)))]
 pub async fn capabilities(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -116,6 +117,9 @@ pub async fn capabilities(
         .await?
         .require("words.access")?;
     let mut capability = language::capabilities();
+    if supports_creation_snapshot(&headers) {
+        capability.creation_snapshot = Some(true);
+    }
     if supports_sentence_drafts(&headers) {
         capability.sentence_drafts = Some(true);
     }
@@ -189,7 +193,7 @@ pub async fn list(
         .require("words.access")?;
     Ok(Json(repository::list(&state.pool, query).await?))
 }
-#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=CreateNextEntry, params(("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=201, body=NextEntry), (status=401), (status=403), (status=422)))]
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=CreateNextEntry, params(("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=201, body=NextEntry), (status=401), (status=403), (status=422)))]
 pub async fn create(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -199,6 +203,22 @@ pub async fn create(
     permissions::load(&state, &auth)
         .await?
         .require("words.create")?;
+    if let Some(snapshot) = &input.creation_detection
+        && (!supports_creation_snapshot(&headers) || snapshot.kind != input.kind)
+    {
+        return Err(language::invalid());
+    }
+    if let Some(snapshot) = &input.creation_detection {
+        let input_key = normalize_headword(&input.headword)
+            .map_err(|_| language::invalid())?
+            .key;
+        let snapshot_key = normalize_headword(&snapshot.surface)
+            .map_err(|_| language::invalid())?
+            .key;
+        if input_key != snapshot_key {
+            return Err(language::invalid());
+        }
+    }
     Ok((
         StatusCode::CREATED,
         Json(entry_for_client(
@@ -207,7 +227,7 @@ pub async fn create(
         )),
     ))
 }
-#[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save."), ("id"=Uuid, Path)), responses((status=200, body=NextEntry), (status=401), (status=403), (status=404)))]
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save."), ("id"=Uuid, Path)), responses((status=200, body=NextEntry), (status=401), (status=403), (status=404)))]
 pub async fn read(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -233,7 +253,7 @@ pub async fn read(
     }
     Ok(Json(entry_for_client(entry, &headers)))
 }
-#[utoipa::path(put, path="/api/v1/admin/lexicon-next/entries/{id}", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save."), ("id"=Uuid, Path)), request_body=SaveNextDraft, responses((status=200, body=NextEntry), (status=401), (status=403), (status=404), (status=409, description="revision_conflict or stable_node_id_changed"), (status=422)))]
+#[utoipa::path(put, path="/api/v1/admin/lexicon-next/entries/{id}", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save."), ("id"=Uuid, Path)), request_body=SaveNextDraft, responses((status=200, body=NextEntry), (status=401), (status=403), (status=404), (status=409, description="revision_conflict or stable_node_id_changed"), (status=422)))]
 pub async fn save(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -522,6 +542,9 @@ fn supports_relations(headers: &axum::http::HeaderMap) -> bool {
 }
 
 fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> NextEntry {
+    if !supports_creation_snapshot(headers) {
+        entry.creation_detection = None;
+    }
     if !supports_sentence_drafts(headers) {
         entry.sentence_resources = None;
     }
@@ -595,6 +618,12 @@ fn entry_for_client(mut entry: NextEntry, headers: &axum::http::HeaderMap) -> Ne
         }
     }
     entry
+}
+
+fn supports_creation_snapshot(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-tsz-next-creation-snapshot")
+        .is_some_and(|value| value == "v1")
 }
 
 fn supports_sentences(headers: &axum::http::HeaderMap) -> bool {
