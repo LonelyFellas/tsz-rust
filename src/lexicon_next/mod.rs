@@ -105,6 +105,9 @@ pub async fn match_entries(
     let mut result =
         entry_matches::find(&state.pool, input, annotation_rule, annotation_kind).await?;
     publication_statuses(&headers, &mut result.items);
+    if let Some(annotation_items) = result.annotation_items.as_mut() {
+        publication_statuses(&headers, annotation_items);
+    }
     Ok(Json(result))
 }
 
