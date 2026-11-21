@@ -1,4 +1,4 @@
-use super::{language, list_model::NextWorkspaceEntry};
+use super::{language, list_model::NextWorkspaceEntry, model::NextEntryKind};
 use crate::{error::AppError, lexicon::normalization::NormalizedHeadword};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, QueryBuilder};
@@ -22,6 +22,10 @@ pub struct NextEntryMatches {
     pub surface: String,
     pub items: Vec<NextWorkspaceEntry>,
     pub pagination: crate::api::PaginationMeta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotation_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotation_items: Option<Vec<NextWorkspaceEntry>>,
 }
 
 // Same effective spellings as the list: current forms, or the input headword
@@ -50,7 +54,12 @@ fn filter(sql: &mut QueryBuilder<Postgres>, surface: &str, language: &str, mediu
     }
 }
 
-pub async fn find(pool: &PgPool, input: NextEntryMatchInput) -> Result<NextEntryMatches, AppError> {
+pub async fn find(
+    pool: &PgPool,
+    input: NextEntryMatchInput,
+    include_annotation_rule: bool,
+    annotation_kind: Option<NextEntryKind>,
+) -> Result<NextEntryMatches, AppError> {
     language::require_language(&input.target_language)?;
     if let Some(locale) = &input.medium_locale {
         language::require_medium(locale)?;
@@ -96,10 +105,43 @@ pub async fn find(pool: &PgPool, input: NextEntryMatchInput) -> Result<NextEntry
         .fetch_all(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+    let annotation_items = if include_annotation_rule {
+        let mut rows = super::workspace::select(input.medium_locale.as_deref());
+        rows.push(" WHERE e.status<>'archived' AND e.target_language=")
+            .push_bind(&input.target_language)
+            .push(
+                r#" AND lower(translate(btrim(regexp_replace(normalize(e.headword,NFKC) COLLATE "und-x-icu",
+                    '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")
+                    = lower("#,
+            )
+            .push_bind(&surface.key)
+            .push(" COLLATE \"und-x-icu\")");
+        if let Some(locale) = &input.medium_locale {
+            rows.push(" AND e.medium_locale=").push_bind(locale);
+        }
+        if let Some(kind) = &annotation_kind {
+            rows.push(" AND e.kind=").push_bind(match kind {
+                NextEntryKind::Word => "word",
+                NextEntryKind::Phrase => "phrase",
+            });
+        }
+        rows.push(" ORDER BY e.updated_at DESC,e.id DESC LIMIT 100");
+        Some(
+            rows.build_query_as()
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(AppError::internal)?,
+        )
+    } else {
+        None
+    };
+    let annotation_required = annotation_items.as_ref().map(|items| !items.is_empty());
     tx.commit().await.map_err(AppError::internal)?;
     Ok(NextEntryMatches {
         surface: surface.display,
         items,
         pagination,
+        annotation_required,
+        annotation_items,
     })
 }
