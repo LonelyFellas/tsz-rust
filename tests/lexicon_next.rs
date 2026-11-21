@@ -2976,6 +2976,128 @@ async fn grammar_links_survive_legacy_save_and_reject_invalid_ranges(pool: PgPoo
     );
 }
 
+#[sqlx::test]
+async fn grammar_links_reject_phrase_targets(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool, EDIT).await;
+    let target = create(&state, actor).await;
+    let target_entry = Uuid::parse_str(target["id"].as_str().unwrap()).unwrap();
+    sqlx::query("UPDATE lexicon_next.entries SET kind='phrase' WHERE id=$1")
+        .bind(target_entry)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target_pos = Uuid::now_v7();
+    let target_form = Uuid::now_v7();
+    let target_variant = Uuid::now_v7();
+    for (id, role, parent) in [
+        (target_pos, "pos", None),
+        (target_form, "form", Some(target_pos)),
+        (target_variant, "variant", Some(target_form)),
+    ] {
+        sqlx::query("INSERT INTO lexicon_next.form_editor_nodes(id,entry_id,role,parent_id) VALUES($1,$2,$3,$4)")
+            .bind(id)
+            .bind(target_entry)
+            .bind(role)
+            .bind(parent)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let source = create(&state, actor).await;
+    let path = format!("/entries/{}", source["id"].as_str().unwrap());
+    let mut content = draft();
+    content["grammar_structures"] = json!([{
+        "id":Uuid::now_v7(),
+        "part_of_speech":"noun",
+        "variants":[
+            {"id":Uuid::now_v7(),"locale":"en-GB","content":{"version":2,"text":"target","annotations":[]},"form_links":[{
+                "id":Uuid::now_v7(),
+                "source_segments":[{"start":0,"end":6,"surface":"target"}],
+                "target_source":"lexicon_next",
+                "target_word_id":target_entry,
+                "target_pos_id":target_pos,
+                "target_form_id":target_form,
+                "target_variant_id":target_variant,
+                "target_dialect":"common"
+            }]},
+            {"id":Uuid::now_v7(),"locale":"en-US","content":{"version":2,"text":"target","annotations":[]}}
+        ]
+    }]);
+    assert_eq!(
+        call_grammar_links(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":content}),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+#[sqlx::test]
+async fn grammar_links_reject_v3_targets_without_form_topology(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool, EDIT).await;
+    let target_entry = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,revision,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word',1,'{}',$2,$2)")
+        .bind(target_entry)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target_pos = Uuid::now_v7();
+    let target_form = Uuid::now_v7();
+    let target_variant = Uuid::now_v7();
+    for (id, node_type) in [
+        (target_pos, "pos"),
+        (target_form, "form_slot"),
+        (target_variant, "form_variant"),
+    ] {
+        sqlx::query("INSERT INTO lexicon.nodes(id,entry_id,node_type) VALUES($1,$2,$3)")
+            .bind(id)
+            .bind(target_entry)
+            .bind(node_type)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let source = create(&state, actor).await;
+    let path = format!("/entries/{}", source["id"].as_str().unwrap());
+    let mut content = draft();
+    content["grammar_structures"] = json!([{
+        "id":Uuid::now_v7(),
+        "part_of_speech":"noun",
+        "variants":[
+            {"id":Uuid::now_v7(),"locale":"en-GB","content":{"version":2,"text":"target","annotations":[]},"form_links":[{
+                "id":Uuid::now_v7(),
+                "source_segments":[{"start":0,"end":6,"surface":"target"}],
+                "target_word_id":target_entry,
+                "target_pos_id":target_pos,
+                "target_form_id":target_form,
+                "target_variant_id":target_variant,
+                "target_dialect":"common"
+            }]},
+            {"id":Uuid::now_v7(),"locale":"en-US","content":{"version":2,"text":"target","annotations":[]}}
+        ]
+    }]);
+    assert_eq!(
+        call_grammar_links(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":content}),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
 async fn call_grammar_audio(
     state: &AppState,
     actor: Uuid,
@@ -5108,6 +5230,22 @@ async fn next_sentence_association_roundtrips_to_a_next_entry_target(pool: PgPoo
             }]
         }
     });
+    sqlx::query("UPDATE lexicon_next.entries SET kind='phrase' WHERE id=$1")
+        .bind(target_entry)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call_associations(&state, actor, "POST", "/sentences", body.clone())
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    sqlx::query("UPDATE lexicon_next.entries SET kind='word' WHERE id=$1")
+        .bind(target_entry)
+        .execute(&pool)
+        .await
+        .unwrap();
     let mut invalid = body.clone();
     invalid["variant"]["associations"][0]["source_segments"][0]["end"] = json!(99);
     assert_eq!(

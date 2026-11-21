@@ -191,10 +191,11 @@ async fn validate_target(
     conn: &mut PgConnection,
     target: &NextSentenceTarget,
 ) -> Result<(), AppError> {
-    let (source, entry, pos, sense, base_form, form, variant) = match target {
+    let (source, entry, publication, pos, sense, base_form, form, variant) = match target {
         NextSentenceTarget::Linked {
             target_source,
             target_entry_id,
+            target_publication_id,
             target_pos_id,
             target_base_form_id,
             target_form_id,
@@ -204,6 +205,7 @@ async fn validate_target(
         } => (
             target_source.as_ref(),
             Some(*target_entry_id),
+            *target_publication_id,
             Some(*target_pos_id),
             Some(*target_sense_id),
             Some(*target_base_form_id),
@@ -221,6 +223,7 @@ async fn validate_target(
             None,
             None,
             None,
+            None,
         ),
         NextSentenceTarget::Pending { .. } => return Ok(()),
     };
@@ -228,31 +231,55 @@ async fn validate_target(
         source,
         Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
     );
-    let valid = if next {
+    let valid = if let (Some(entry), Some(publication)) = (entry, publication.filter(|_| !next)) {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.entries e WHERE e.id=$1 AND e.kind='word') AND EXISTS(SELECT 1 FROM lexicon.entry_publications p WHERE p.id=$2 AND p.entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.entry_publication_nodes n WHERE n.publication_id=$2 AND n.entry_id=$1 AND n.node_id=$3 AND n.node_type='pos') AND EXISTS(SELECT 1 FROM lexicon.entry_publication_nodes n WHERE n.publication_id=$2 AND n.entry_id=$1 AND n.node_id=$4 AND n.node_type='sense') AND EXISTS(SELECT 1 FROM lexicon.entry_publication_nodes n WHERE n.publication_id=$2 AND n.entry_id=$1 AND n.node_id=$5 AND n.node_type='form_slot') AND EXISTS(SELECT 1 FROM lexicon.entry_publication_nodes n WHERE n.publication_id=$2 AND n.entry_id=$1 AND n.node_id=$6 AND n.node_type='form_slot') AND EXISTS(SELECT 1 FROM lexicon.entry_publication_nodes n WHERE n.publication_id=$2 AND n.entry_id=$1 AND n.node_id=$7 AND n.node_type='form_variant')")
+            .bind(entry)
+            .bind(publication)
+            .bind(pos)
+            .bind(sense)
+            .bind(base_form)
+            .bind(form)
+            .bind(variant)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(AppError::internal)?
+    } else if next {
         if let (Some(pos), Some(sense), Some(base_form), Some(form), Some(variant)) =
             (pos, sense, base_form, form, variant)
         {
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries WHERE id=$1) AND EXISTS(SELECT 1 FROM lexicon_next.nodes WHERE id=$2 AND entry_id=$1 AND kind='sense') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$3 AND entry_id=$1 AND role='pos') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$4 AND entry_id=$1 AND role='form' AND parent_id=$3) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$5 AND entry_id=$1 AND role='form' AND parent_id=$3) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$6 AND entry_id=$1 AND role='variant' AND parent_id=$5)")
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries WHERE id=$1 AND kind='word') AND EXISTS(SELECT 1 FROM lexicon_next.nodes WHERE id=$2 AND entry_id=$1 AND kind='sense') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$3 AND entry_id=$1 AND role='pos') AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$4 AND entry_id=$1 AND role='form' AND parent_id=$3) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$5 AND entry_id=$1 AND role='form' AND parent_id=$3) AND EXISTS(SELECT 1 FROM lexicon_next.form_editor_nodes WHERE id=$6 AND entry_id=$1 AND role='variant' AND parent_id=$5)")
                 .bind(entry).bind(sense).bind(pos).bind(base_form).bind(form).bind(variant)
                 .fetch_one(&mut *conn).await.map_err(AppError::internal)?
         } else {
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries WHERE id=$1)")
-                .bind(entry)
-                .fetch_one(&mut *conn)
-                .await
-                .map_err(AppError::internal)?
-        }
-    } else if let (Some(pos), Some(sense), Some(form), Some(variant)) = (pos, sense, form, variant)
-    {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$2 AND entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$3 AND entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$4 AND entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$5 AND entry_id=$1)")
-            .bind(entry).bind(pos).bind(sense).bind(form).bind(variant)
-            .fetch_one(&mut *conn).await.map_err(AppError::internal)?
-    } else {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id=$1)")
+            sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM lexicon_next.entries WHERE id=$1 AND kind='word')",
+            )
             .bind(entry)
             .fetch_one(&mut *conn)
             .await
             .map_err(AppError::internal)?
+        }
+    } else if let (Some(pos), Some(sense), Some(base_form), Some(form), Some(variant)) =
+        (pos, sense, base_form, form, variant)
+    {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM lexicon.entries e WHERE e.id=$1 AND e.kind='word') AND EXISTS(SELECT 1 FROM lexicon.nodes WHERE id=$2 AND entry_id=$1 AND node_type='pos') AND EXISTS(SELECT 1 FROM lexicon.senses sense WHERE sense.id=$3 AND sense.entry_id=$1 AND sense.entry_pos_id=$2) AND EXISTS(SELECT 1 FROM lexicon.v3_concrete_forms form WHERE form.id=$4 AND form.entry_id=$1 AND form.entry_pos_id=$2) AND EXISTS(SELECT 1 FROM lexicon.v3_concrete_forms base_form WHERE base_form.id=$5 AND base_form.entry_id=$1 AND base_form.entry_pos_id=$2) AND EXISTS(SELECT 1 FROM lexicon.v3_form_variants variant WHERE variant.id=$6 AND variant.entry_id=$1 AND variant.form_id=$4) AND ($4=$5 OR EXISTS(SELECT 1 FROM lexicon.v3_group_memberships form_group JOIN lexicon.v3_group_memberships base_group ON base_group.entry_id=form_group.entry_id AND base_group.form_group_id=form_group.form_group_id WHERE form_group.entry_id=$1 AND form_group.form_id=$4 AND base_group.form_id=$5))",
+        )
+            .bind(entry)
+            .bind(pos)
+            .bind(sense)
+            .bind(form)
+            .bind(base_form)
+            .bind(variant)
+            .fetch_one(&mut *conn).await.map_err(AppError::internal)?
+    } else {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id=$1 AND kind='word')",
+        )
+        .bind(entry)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(AppError::internal)?
     };
     if valid {
         Ok(())
