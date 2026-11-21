@@ -81,7 +81,7 @@ pub fn router() -> Router<AppState> {
         ))
 }
 
-#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entry-matches", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=entry_matches::NextEntryMatchInput, params(("x-tsz-next-levels"=Option<String>,Header,description="v1 returns current saved sense levels in matches."),("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status in matched entries; omitted maps published to draft.")), responses((status=200, body=entry_matches::NextEntryMatches), (status=401), (status=403), (status=422)))]
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entry-matches", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=entry_matches::NextEntryMatchInput, params(("x-tsz-next-levels"=Option<String>,Header,description="v1 returns current saved sense levels in matches."),("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status in matched entries; omitted maps published to draft."),("x-tsz-next-annotation-rule"=Option<String>,Header,description="v1 returns whether an exact headword conflict requires an annotation.")), responses((status=200, body=entry_matches::NextEntryMatches), (status=401), (status=403), (status=422)))]
 pub async fn match_entries(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -91,7 +91,10 @@ pub async fn match_entries(
     permissions::load(&state, &auth)
         .await?
         .require("words.create")?;
-    let mut result = entry_matches::find(&state.pool, input).await?;
+    let annotation_rule = headers
+        .get("x-tsz-next-annotation-rule")
+        .is_some_and(|value| value == "v1");
+    let mut result = entry_matches::find(&state.pool, input, annotation_rule).await?;
     publication_statuses(&headers, &mut result.items);
     Ok(Json(result))
 }

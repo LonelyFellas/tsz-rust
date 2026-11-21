@@ -43,6 +43,35 @@ async fn call(
     call_with_groups(state, actor, method, path, body, false).await
 }
 
+async fn call_annotation_rule(
+    state: &AppState,
+    actor: Uuid,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(format!("{ROOT}{path}"))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                state.admin_token_manager.generate(actor, "admin").unwrap()
+            ),
+        )
+        .header("x-tsz-next-forms", "v1")
+        .header("x-tsz-next-annotation-rule", "v1")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = tsz_rust::router(state.clone()).oneshot(req).await.unwrap();
+    let status = response.status();
+    let data =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    (status, data)
+}
+
 async fn call_associations(
     state: &AppState,
     actor: Uuid,
@@ -1826,7 +1855,7 @@ async fn multiline_definitions_persist_and_single_line_fields_stay_strict(pool: 
 }
 
 #[sqlx::test]
-async fn homonym_annotations_use_forms_or_initial_headword_fallback(pool: PgPool) {
+async fn homonym_annotations_use_only_initial_headwords(pool: PgPool) {
     let actor = admin(
         &pool,
         &[
@@ -1838,28 +1867,55 @@ async fn homonym_annotations_use_forms_or_initial_headword_fallback(pool: PgPool
     )
     .await;
     let state = AppState::for_test(pool);
-    let first = create(&state, actor).await;
-    let mut content = draft();
-    content["forms"] = json!([{ "id":Uuid::now_v7(), "locale":"en-US", "text":"center" }]);
+    let form_only = create(&state, actor).await;
+    let mut form_only_draft = draft();
+    form_only_draft["headword"] = json!("flip");
+    form_only_draft["forms"] = json!([{
+        "id":Uuid::now_v7(),
+        "locale":"en-US",
+        "text":"flipper"
+    }]);
     let (status, first) = call(
         &state,
         Some(actor),
         "PUT",
-        &format!("/entries/{}", first["id"].as_str().unwrap()),
-        json!({"expected_revision":1,"draft":content}),
+        &format!("/entries/{}", form_only["id"].as_str().unwrap()),
+        json!({"expected_revision":1,"draft":form_only_draft}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, only_form_matches) = call_annotation_rule(
+        &state,
+        actor,
+        "POST",
+        "/entry-matches",
+        json!({
+            "target_language":"en",
+            "kind":"word",
+            "surface":"flipper"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{only_form_matches}");
+    assert_eq!(only_form_matches["annotation_required"], false);
+    let first = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entries",
+        json!({"target_language":"en","kind":"word","headword":"flipper"}),
+    )
+    .await
+    .1;
     let (status, second) = call(
         &state,
         Some(actor),
         "POST",
         "/entries",
-        json!({"target_language":"en","kind":"word","headword":"center"}),
+        json!({"target_language":"en","kind":"word","headword":"flipper"}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let initial_only = create(&state, actor).await;
     let (_, list) = call(
         &state,
         Some(actor),
@@ -1868,7 +1924,7 @@ async fn homonym_annotations_use_forms_or_initial_headword_fallback(pool: PgPool
         Value::Null,
     )
     .await;
-    for (entry, visible) in [(&first, true), (&second, true), (&initial_only, false)] {
+    for (entry, visible) in [(&form_only, false), (&first, true), (&second, true)] {
         let row = list["items"]
             .as_array()
             .unwrap()
@@ -1886,10 +1942,26 @@ async fn homonym_annotations_use_forms_or_initial_headword_fallback(pool: PgPool
         .await;
         assert_eq!(read["annotation_visible"], visible);
     }
+    let (status, matches) = call_annotation_rule(
+        &state,
+        actor,
+        "POST",
+        "/entry-matches",
+        json!({
+            "target_language":"en",
+            "kind":"word",
+            "surface":"flipper"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{matches}");
+    assert_eq!(matches["annotation_required"], true);
+    assert_eq!(matches["pagination"]["total"], 3);
+
     for (entry, annotation, expected) in [
-        (&first, "1", StatusCode::OK),
-        (&second, "1", StatusCode::CONFLICT),
-        (&second, "2", StatusCode::OK),
+        (&form_only, Value::Null, StatusCode::OK),
+        (&first, json!("1"), StatusCode::OK),
+        (&second, json!("1"), StatusCode::CONFLICT),
     ] {
         let (status, result) = call(
             &state,
@@ -1904,36 +1976,19 @@ async fn homonym_annotations_use_forms_or_initial_headword_fallback(pool: PgPool
         .await;
         assert_eq!(status, expected, "{result}");
     }
-    let path = format!("/entries/{}", second["id"].as_str().unwrap());
-    let mut second_draft = second["draft"].clone();
-    second_draft["forms"] = json!([{ "id":Uuid::now_v7(), "locale":"en-GB", "text":"center" }]);
-    for (revision, locale, visible) in [(1, "en-GB", false), (2, "en", true)] {
-        second_draft["forms"][0]["locale"] = json!(locale);
-        let (status, saved) = call(
-            &state,
-            Some(actor),
-            "PUT",
-            &path,
-            json!({"expected_revision":revision,"draft":second_draft}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{saved}");
-        let (_, list) = call(
-            &state,
-            Some(actor),
-            "GET",
-            "/workspace/entries",
-            Value::Null,
-        )
-        .await;
-        for row in list["items"].as_array().unwrap() {
-            assert_eq!(
-                row["annotation_visible"],
-                visible && row["id"] != initial_only["id"],
-                "{row}"
-            );
-        }
-    }
+    let (status, result) = call(
+        &state,
+        Some(actor),
+        "PATCH",
+        &format!(
+            "/workspace/entries/{}/annotation",
+            second["id"].as_str().unwrap()
+        ),
+        json!({"annotation":"2","base_annotation_revision":1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+
     let (status, result) = call(
         &state,
         Some(actor),
@@ -1957,7 +2012,8 @@ async fn homonym_annotations_use_forms_or_initial_headword_fallback(pool: PgPool
             .as_array()
             .unwrap()
             .iter()
-            .all(|row| row["annotation_visible"] == false)
+            .find(|row| row["id"] == second["id"])
+            .is_some_and(|row| row["annotation_visible"] == false)
     );
 }
 

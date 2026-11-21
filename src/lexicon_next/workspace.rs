@@ -7,17 +7,14 @@ use crate::{
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
+// Numeric annotations distinguish entries with the same original headword.
+// Inflected or regional forms can still appear in match results, but they do
+// not create an annotation conflict by themselves.
 const SAME_NAME: &str = r#"e.status<>'archived' AND other.status<>'archived' AND other.target_language=e.target_language AND other.medium_locale=e.medium_locale AND other.kind=e.kind AND other.id<>e.id
- AND EXISTS (
- WITH current_forms AS NOT MATERIALIZED (
-   SELECT n.entry_id,f.locale,f.text FROM lexicon_next.nodes n JOIN lexicon_next.forms f ON f.id=n.id
- )
- SELECT 1 FROM lexicon_next.entries target
- LEFT JOIN current_forms f ON f.entry_id=target.id
- LEFT JOIN current_forms oform ON oform.entry_id=other.id
- WHERE target.id=e.id
-   AND lower(COALESCE(f.text,target.headword))=lower(COALESCE(oform.text,other.headword))
-   AND (f.locale IS NULL OR oform.locale IS NULL OR oform.locale=f.locale OR oform.locale='en' OR f.locale='en'))"#;
+ AND lower(translate(btrim(regexp_replace(normalize(other.headword) COLLATE "und-x-icu",
+     '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")
+     = lower(translate(btrim(regexp_replace(normalize(e.headword) COLLATE "und-x-icu",
+     '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")"#;
 
 pub(super) fn select(medium_locale: Option<&str>) -> QueryBuilder<Postgres> {
     let mut sql = QueryBuilder::new(format!(

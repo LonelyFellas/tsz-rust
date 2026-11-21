@@ -1,4 +1,4 @@
-use super::{language, list_model::NextWorkspaceEntry};
+use super::{language, list_model::NextWorkspaceEntry, model::NextEntryKind};
 use crate::{error::AppError, lexicon::normalization::NormalizedHeadword};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, QueryBuilder};
@@ -9,6 +9,7 @@ use utoipa::ToSchema;
 pub struct NextEntryMatchInput {
     pub target_language: String,
     pub medium_locale: Option<String>,
+    pub kind: Option<NextEntryKind>,
     pub surface: String,
     #[schema(minimum = 1)]
     pub page: Option<u32>,
@@ -22,6 +23,8 @@ pub struct NextEntryMatches {
     pub surface: String,
     pub items: Vec<NextWorkspaceEntry>,
     pub pagination: crate::api::PaginationMeta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotation_required: Option<bool>,
 }
 
 // Same effective spellings as the list: current forms, or the input headword
@@ -50,7 +53,11 @@ fn filter(sql: &mut QueryBuilder<Postgres>, surface: &str, language: &str, mediu
     }
 }
 
-pub async fn find(pool: &PgPool, input: NextEntryMatchInput) -> Result<NextEntryMatches, AppError> {
+pub async fn find(
+    pool: &PgPool,
+    input: NextEntryMatchInput,
+    include_annotation_rule: bool,
+) -> Result<NextEntryMatches, AppError> {
     language::require_language(&input.target_language)?;
     if let Some(locale) = &input.medium_locale {
         language::require_medium(locale)?;
@@ -78,6 +85,42 @@ pub async fn find(pool: &PgPool, input: NextEntryMatchInput) -> Result<NextEntry
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+    let annotation_required = if include_annotation_rule {
+        let mut query = QueryBuilder::new(
+            r#"SELECT EXISTS(
+                SELECT 1 FROM lexicon_next.entries e
+                WHERE e.status<>'archived'
+                  AND e.target_language="#,
+        );
+        query
+            .push_bind(&input.target_language)
+            .push(
+                r#" AND lower(translate(btrim(regexp_replace(normalize(e.headword) COLLATE "und-x-icu",
+                    '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")
+                    = lower("#,
+            )
+            .push_bind(&surface.key)
+            .push(" COLLATE \"und-x-icu\")");
+        if let Some(locale) = &input.medium_locale {
+            query.push(" AND e.medium_locale=").push_bind(locale);
+        }
+        if let Some(kind) = &input.kind {
+            query.push(" AND e.kind=").push_bind(match kind {
+                NextEntryKind::Word => "word",
+                NextEntryKind::Phrase => "phrase",
+            });
+        }
+        query.push(")");
+        Some(
+            query
+                .build_query_scalar()
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(AppError::internal)?,
+        )
+    } else {
+        None
+    };
     let mut pagination = crate::api::page_meta(page, size, total);
     pagination.page = i64::from(page).min(pagination.total_pages.max(1)) as u32;
     let mut rows = super::workspace::select(input.medium_locale.as_deref());
@@ -101,5 +144,6 @@ pub async fn find(pool: &PgPool, input: NextEntryMatchInput) -> Result<NextEntry
         surface: surface.display,
         items,
         pagination,
+        annotation_required,
     })
 }
