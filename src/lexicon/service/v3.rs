@@ -5950,6 +5950,13 @@ pub(crate) async fn replace_dubbing_audio_with_voice_changes(
     replace_dubbing_audio_internal(tx, actor, request, entry, revision, value, true).await
 }
 
+fn decode_audio_forms(value: &Value) -> Result<DraftFormsStepContentV3, crate::error::AppError> {
+    let mut forms =
+        serde_json::from_value(value.clone()).map_err(crate::error::AppError::internal)?;
+    crate::lexicon::rich_text_repair::repair_expanded_forms(&mut forms);
+    Ok(forms)
+}
+
 async fn replace_dubbing_audio_internal(
     tx: &mut Transaction<'_, Postgres>,
     actor: Uuid,
@@ -5983,8 +5990,7 @@ async fn replace_dubbing_audio_internal(
     } else {
         crate::speech::audio_updates::ensure_audio_only(&before, value)?;
     }
-    let forms: DraftFormsStepContentV3 =
-        serde_json::from_value(value[0].clone()).map_err(crate::error::AppError::internal)?;
+    let mut forms = decode_audio_forms(&value[0])?;
     let meanings: DraftMeaningsStepContentV3 =
         serde_json::from_value(value[1].clone()).map_err(crate::error::AppError::internal)?;
     let form_issues = crate::lexicon::v3_contract::validate_forms(&forms, StepSaveIntent::Save);
@@ -5996,7 +6002,6 @@ async fn replace_dubbing_audio_internal(
     if !meaning_issues.is_empty() {
         return Err(map(v3_validation_failed(meaning_issues)));
     }
-    let mut forms = forms;
     let mut meanings = meanings;
     normalize_pronunciation_audio_assets(tx, &authorization, entry, &mut forms)
         .await
@@ -6518,6 +6523,23 @@ mod tests {
 
     fn fixed_id(value: u128) -> Uuid {
         Uuid::from_u128(value)
+    }
+
+    #[test]
+    fn audio_save_decodes_forms_after_repairing_stale_pronunciation_rich_text() {
+        let mut raw = serde_json::to_value(two_form_content(false)).unwrap();
+        let path = "/pos/0/forms/0/regional_variants/common/pronunciations/0";
+        raw.pointer_mut(path).unwrap()["dict_phonetic_rich"] = json!({
+            "version": 2,
+            "text": "stale phonetic",
+            "annotations": []
+        });
+
+        let forms = decode_audio_forms(&raw).unwrap();
+        let saved = serde_json::to_value(forms).unwrap();
+        let pronunciation = saved.pointer(path).unwrap();
+        assert_eq!(pronunciation["dict_phonetic"], "test");
+        assert!(pronunciation.get("dict_phonetic_rich").is_none());
     }
 
     /// 禅道 BUG #6：例句带一条已解析的关联时，词义节点计算不能再炸。
