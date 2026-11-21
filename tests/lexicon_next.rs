@@ -63,6 +63,7 @@ async fn call_annotation_rule(
         )
         .header("x-tsz-next-forms", "v1")
         .header("x-tsz-next-annotation-rule", "v1")
+        .header("x-tsz-next-annotation-kind", "word")
         .body(Body::from(body.to_string()))
         .unwrap();
     let response = tsz_rust::router(state.clone()).oneshot(req).await.unwrap();
@@ -231,7 +232,7 @@ async fn creation_matches_current_forms_and_empty_drafts(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let reader = admin(&pool, &["words.access"]).await;
     let state = AppState::for_test(pool.clone());
-    let query = json!({"target_language":"en","surface":"Center","page":1,"page_size":2});
+    let query = json!({"target_language":"en","surface":"Center","page":1,"page_size":100});
     assert_eq!(
         call(&state, None, "POST", "/entry-matches", query.clone())
             .await
@@ -293,9 +294,9 @@ async fn creation_matches_current_forms_and_empty_drafts(pool: PgPool) {
     let (status, first) = call(&state, Some(actor), "POST", "/entry-matches", query.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(first["surface"], "Center");
-    assert_eq!(first["pagination"]["total"], 2);
+    assert_eq!(first["pagination"]["total"], 3);
     assert_eq!(first["pagination"]["total_pages"], 1);
-    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    assert_eq!(first["items"].as_array().unwrap().len(), 3);
     assert!(
         first["items"]
             .as_array()
@@ -314,6 +315,7 @@ async fn creation_matches_current_forms_and_empty_drafts(pool: PgPool) {
         std::collections::BTreeSet::from([
             entries[0]["id"].as_str().unwrap(),
             entries[1]["id"].as_str().unwrap(),
+            entries[2]["id"].as_str().unwrap(),
         ])
     );
     let current = first["items"]
@@ -1891,7 +1893,6 @@ async fn homonym_annotations_use_only_initial_headwords(pool: PgPool) {
         "/entry-matches",
         json!({
             "target_language":"en",
-            "kind":"word",
             "surface":"flipper"
         }),
     )
@@ -1949,13 +1950,13 @@ async fn homonym_annotations_use_only_initial_headwords(pool: PgPool) {
         "/entry-matches",
         json!({
             "target_language":"en",
-            "kind":"word",
             "surface":"flipper"
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{matches}");
     assert_eq!(matches["annotation_required"], true);
+    assert_eq!(matches["annotation_items"].as_array().unwrap().len(), 2);
     assert_eq!(matches["pagination"]["total"], 3);
 
     for (entry, annotation, expected) in [

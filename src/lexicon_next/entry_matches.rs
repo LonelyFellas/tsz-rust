@@ -9,7 +9,6 @@ use utoipa::ToSchema;
 pub struct NextEntryMatchInput {
     pub target_language: String,
     pub medium_locale: Option<String>,
-    pub kind: Option<NextEntryKind>,
     pub surface: String,
     #[schema(minimum = 1)]
     pub page: Option<u32>,
@@ -25,18 +24,18 @@ pub struct NextEntryMatches {
     pub pagination: crate::api::PaginationMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotation_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotation_items: Option<Vec<NextWorkspaceEntry>>,
 }
 
-// Same effective spellings as the list: current forms, or the input headword
-// only while the draft has no forms. EXISTS keeps one result per entry even
-// when several locales match. Match across kinds, including multiword forms.
+// Same effective spellings as the list: current forms and the input headword.
+// EXISTS keeps one result per entry even when several locales match. Match
+// across kinds, including multiword forms.
 const MATCH: &str = r#" AND EXISTS (
     SELECT 1 FROM (
         SELECT f.text AS target FROM lexicon_next.forms f
         JOIN lexicon_next.nodes n ON n.id=f.id WHERE n.entry_id=e.id
-        UNION ALL SELECT e.headword WHERE NOT EXISTS (
-            SELECT 1 FROM lexicon_next.forms f JOIN lexicon_next.nodes n ON n.id=f.id WHERE n.entry_id=e.id
-        )
+        UNION ALL SELECT e.headword
     ) surfaces WHERE
         lower(translate(btrim(regexp_replace(normalize(target,NFKC) COLLATE "und-x-icu",
             '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")
@@ -57,6 +56,7 @@ pub async fn find(
     pool: &PgPool,
     input: NextEntryMatchInput,
     include_annotation_rule: bool,
+    annotation_kind: Option<NextEntryKind>,
 ) -> Result<NextEntryMatches, AppError> {
     language::require_language(&input.target_language)?;
     if let Some(locale) = &input.medium_locale {
@@ -85,42 +85,6 @@ pub async fn find(
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let annotation_required = if include_annotation_rule {
-        let mut query = QueryBuilder::new(
-            r#"SELECT EXISTS(
-                SELECT 1 FROM lexicon_next.entries e
-                WHERE e.status<>'archived'
-                  AND e.target_language="#,
-        );
-        query
-            .push_bind(&input.target_language)
-            .push(
-                r#" AND lower(translate(btrim(regexp_replace(normalize(e.headword) COLLATE "und-x-icu",
-                    '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")
-                    = lower("#,
-            )
-            .push_bind(&surface.key)
-            .push(" COLLATE \"und-x-icu\")");
-        if let Some(locale) = &input.medium_locale {
-            query.push(" AND e.medium_locale=").push_bind(locale);
-        }
-        if let Some(kind) = &input.kind {
-            query.push(" AND e.kind=").push_bind(match kind {
-                NextEntryKind::Word => "word",
-                NextEntryKind::Phrase => "phrase",
-            });
-        }
-        query.push(")");
-        Some(
-            query
-                .build_query_scalar()
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(AppError::internal)?,
-        )
-    } else {
-        None
-    };
     let mut pagination = crate::api::page_meta(page, size, total);
     pagination.page = i64::from(page).min(pagination.total_pages.max(1)) as u32;
     let mut rows = super::workspace::select(input.medium_locale.as_deref());
@@ -139,11 +103,43 @@ pub async fn find(
         .fetch_all(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+    let annotation_items = if include_annotation_rule {
+        let mut rows = super::workspace::select(input.medium_locale.as_deref());
+        rows.push(" WHERE e.status<>'archived' AND e.target_language=")
+            .push_bind(&input.target_language)
+            .push(
+                r#" AND lower(translate(btrim(regexp_replace(normalize(e.headword,NFKC) COLLATE "und-x-icu",
+                    '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")
+                    = lower("#,
+            )
+            .push_bind(&surface.key)
+            .push(" COLLATE \"und-x-icu\")");
+        if let Some(locale) = &input.medium_locale {
+            rows.push(" AND e.medium_locale=").push_bind(locale);
+        }
+        if let Some(kind) = &annotation_kind {
+            rows.push(" AND e.kind=").push_bind(match kind {
+                NextEntryKind::Word => "word",
+                NextEntryKind::Phrase => "phrase",
+            });
+        }
+        rows.push(" ORDER BY e.updated_at DESC,e.id DESC LIMIT 100");
+        Some(
+            rows.build_query_as()
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(AppError::internal)?,
+        )
+    } else {
+        None
+    };
+    let annotation_required = annotation_items.as_ref().map(|items| !items.is_empty());
     tx.commit().await.map_err(AppError::internal)?;
     Ok(NextEntryMatches {
         surface: surface.display,
         items,
         pagination,
         annotation_required,
+        annotation_items,
     })
 }
