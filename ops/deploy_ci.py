@@ -235,6 +235,21 @@ def wait_for_baseline(host, *, seconds=15 * 60):
             inspection = host.inspect()
             print(json.dumps({"status": "waiting", "reason": str(error),
                               "deployment": inspection}), file=sys.stderr, flush=True)
+            # The host has already proved that this transaction is old, idle, and
+            # has not crossed the mutation boundary. Abort it immediately instead
+            # of waiting for the full queue timeout before the first safe cleanup.
+            if inspection.get("safe_abort") is True:
+                try:
+                    aborted = host.abort_stale()
+                except DeploymentError as error:
+                    if str(error) != "remote_operation_busy":
+                        raise
+                    stale_abort_attempted = False
+                    time.sleep(10)
+                    continue
+                if aborted.get("aborted"):
+                    deadline = time.monotonic() + seconds
+                    continue
             if time.monotonic() >= deadline:
                 if not stale_abort_attempted:
                     stale_abort_attempted = True
