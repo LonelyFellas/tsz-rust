@@ -28,14 +28,16 @@ pub struct NextEntryMatches {
     pub annotation_items: Option<Vec<NextWorkspaceEntry>>,
 }
 
-// Same effective spellings as the list: current forms and the input headword.
-// EXISTS keeps one result per entry even when several locales match. Match
-// across kinds, including multiword forms.
+// Same effective spellings as the list: current forms, or the input headword
+// only while the draft has no forms. EXISTS keeps one result per entry even
+// when several locales match. Match across kinds, including multiword forms.
 const MATCH: &str = r#" AND EXISTS (
     SELECT 1 FROM (
         SELECT f.text AS target FROM lexicon_next.forms f
         JOIN lexicon_next.nodes n ON n.id=f.id WHERE n.entry_id=e.id
-        UNION ALL SELECT e.headword
+        UNION ALL SELECT e.headword WHERE NOT EXISTS (
+            SELECT 1 FROM lexicon_next.forms f JOIN lexicon_next.nodes n ON n.id=f.id WHERE n.entry_id=e.id
+        )
     ) surfaces WHERE
         lower(translate(btrim(regexp_replace(normalize(target,NFKC) COLLATE "und-x-icu",
             '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")
