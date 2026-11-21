@@ -222,6 +222,18 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(result, baseline)
         host.abort_stale.assert_called_once_with()
 
+    def test_wait_for_baseline_aborts_safe_stale_transaction_immediately(self):
+        host = Mock()
+        baseline = {"deployment_manifest": {"source": {"git_sha": "a" * 40}}}
+        host.baseline.side_effect = [DeploymentError("deployment_in_progress"), baseline]
+        host.verify_existing.return_value = {"verified": True, "git_sha": "a" * 40}
+        host.inspect.return_value = {"owner": "old", "safe_abort": True}
+        host.abort_stale.return_value = {"aborted": True, "owner": "old"}
+        with patch.object(ci, "validate_deployment"), patch.object(ci.time, "monotonic", return_value=0):
+            result = ci.wait_for_baseline(host, seconds=15 * 60)
+        self.assertEqual(result, baseline)
+        host.abort_stale.assert_called_once_with()
+
     def test_wait_for_baseline_retries_when_stale_abort_is_still_busy(self):
         host = Mock()
         baseline = {"deployment_manifest": {"source": {"git_sha": "a" * 40}}}
