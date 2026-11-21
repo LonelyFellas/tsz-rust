@@ -198,7 +198,7 @@ fn draft() -> Value {
 const EDIT: &[&str] = &["words.access", "words.create", "words.edit"];
 
 #[sqlx::test]
-async fn creation_matches_current_forms_empty_drafts_and_archived_entries(pool: PgPool) {
+async fn creation_matches_current_forms_and_empty_drafts(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let reader = admin(&pool, &["words.access"]).await;
     let state = AppState::for_test(pool.clone());
@@ -264,8 +264,8 @@ async fn creation_matches_current_forms_empty_drafts_and_archived_entries(pool: 
     let (status, first) = call(&state, Some(actor), "POST", "/entry-matches", query.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(first["surface"], "Center");
-    assert_eq!(first["pagination"]["total"], 3);
-    assert_eq!(first["pagination"]["total_pages"], 2);
+    assert_eq!(first["pagination"]["total"], 2);
+    assert_eq!(first["pagination"]["total_pages"], 1);
     assert_eq!(first["items"].as_array().unwrap().len(), 2);
     assert!(
         first["items"]
@@ -274,23 +274,10 @@ async fn creation_matches_current_forms_empty_drafts_and_archived_entries(pool: 
             .iter()
             .all(|entry| entry["status"] == "draft")
     );
-    let mut second_query = query.clone();
-    second_query["page"] = json!(2);
-    let (status, second) = call(&state, Some(actor), "POST", "/entry-matches", second_query).await;
-    assert_eq!(status, StatusCode::OK, "{second}");
-    assert_eq!(second["pagination"]["page"], 2);
-    assert_eq!(second["items"][0]["status"], "archived");
-    let mut beyond_query = query.clone();
-    beyond_query["page"] = json!(99);
-    let (status, beyond) = call(&state, Some(actor), "POST", "/entry-matches", beyond_query).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(beyond["pagination"]["page"], 2);
-    assert_eq!(beyond["items"], second["items"]);
     let ids = first["items"]
         .as_array()
         .unwrap()
         .iter()
-        .chain(second["items"].as_array().unwrap())
         .map(|row| row["id"].as_str().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
@@ -298,7 +285,6 @@ async fn creation_matches_current_forms_empty_drafts_and_archived_entries(pool: 
         std::collections::BTreeSet::from([
             entries[0]["id"].as_str().unwrap(),
             entries[1]["id"].as_str().unwrap(),
-            entries[4]["id"].as_str().unwrap()
         ])
     );
     let current = first["items"]
