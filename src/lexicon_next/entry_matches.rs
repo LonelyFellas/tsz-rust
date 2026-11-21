@@ -40,7 +40,7 @@ const MATCH: &str = r#" AND EXISTS (
             = lower("#;
 
 fn filter(sql: &mut QueryBuilder<Postgres>, surface: &str, language: &str, medium: Option<&str>) {
-    sql.push(" WHERE e.target_language=")
+    sql.push(" WHERE e.status<>'archived' AND e.target_language=")
         .push_bind(language)
         .push(MATCH)
         .push_bind(surface)
@@ -87,8 +87,10 @@ pub async fn find(pool: &PgPool, input: NextEntryMatchInput) -> Result<NextEntry
         &input.target_language,
         input.medium_locale.as_deref(),
     );
-    rows.push(" ORDER BY CASE e.status WHEN 'archived' THEN 1 ELSE 0 END,e.updated_at DESC,e.id DESC LIMIT ")
-        .push_bind(i64::from(size)).push(" OFFSET ").push_bind(i64::from(pagination.page-1)*i64::from(size));
+    rows.push(" ORDER BY e.updated_at DESC,e.id DESC LIMIT ")
+        .push_bind(i64::from(size))
+        .push(" OFFSET ")
+        .push_bind(i64::from(pagination.page - 1) * i64::from(size));
     let items = rows
         .build_query_as()
         .fetch_all(&mut *tx)
