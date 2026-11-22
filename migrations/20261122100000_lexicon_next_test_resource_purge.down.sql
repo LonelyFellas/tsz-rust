@@ -1,0 +1,2 @@
+DROP TABLE lexicon_next.test_resource_purge_commands;
+DROP TABLE lexicon_next.test_resource_entries;

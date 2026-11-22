@@ -131,6 +131,7 @@ fn openapi_declares_closed_drafts_and_distinct_endpoints() {
     }
     let paths = &spec["paths"];
     assert!(paths["/api/v1/admin/lexicon-next/entries"]["post"].is_object());
+    assert!(paths["/api/v1/admin/lexicon-next/test-resources/purge"]["post"].is_object());
     assert!(paths["/api/v1/admin/lexicon-next/entries/{id}"]["put"].is_object());
     assert!(
         paths["/api/v1/admin/lexicon-next/entries/{id}"]["put"]["responses"]["409"].is_object()

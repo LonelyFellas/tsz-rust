@@ -149,6 +149,9 @@ pub struct Config {
     pub object_storage: ObjectStorageConfig,
     #[serde(skip)]
     pub test_resources: Option<crate::test_resources::TestResourcesConfig>,
+    /// 仅测试环境允许通过精确登记的批次清理发布历史和关联音频。
+    #[serde(default)]
+    pub test_resource_purge_enabled: bool,
     #[serde(default)]
     pub avatar_public_base_url: Option<String>,
     #[serde(skip)]
@@ -419,6 +422,21 @@ mod tests {
         assert!(parse(&input).unwrap().learning_memory_enabled);
         input.pop();
         input.push(("LEARNING_MEMORY_ENABLED", "yes"));
+        assert!(parse(&input).is_err());
+    }
+
+    #[test]
+    fn test_resource_purge_is_opt_in_and_requires_true_or_false() {
+        assert!(
+            !parse(&valid_baseline())
+                .unwrap()
+                .test_resource_purge_enabled
+        );
+        let mut input = valid_baseline();
+        input.push(("TEST_RESOURCE_PURGE_ENABLED", "true"));
+        assert!(parse(&input).unwrap().test_resource_purge_enabled);
+        input.pop();
+        input.push(("TEST_RESOURCE_PURGE_ENABLED", "yes"));
         assert!(parse(&input).is_err());
     }
 
