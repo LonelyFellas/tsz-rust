@@ -1,0 +1,80 @@
+name: Deploy tshb-test over VPC
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Public tsz-rust main commit
+        required: true
+        type: string
+      run_id:
+        description: Public tsz-rust CI run ID
+        required: true
+        type: string
+      attempt:
+        description: Public tsz-rust CI run attempt
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-tshb-test-vpc
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event.repository.private == true && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, tshb-test-vpc]
+    timeout-minutes: 120
+    env:
+      DEPLOY_SHA: ${{ inputs.sha }}
+      DEPLOY_CI_RUN: ${{ inputs.run_id }}
+      DEPLOY_CI_ATTEMPT: ${{ inputs.attempt }}
+    steps:
+      - name: Check out public tsz-rust main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: LonelyFellas/tsz-rust
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create an isolated evidence directory
+        id: evidence
+        run: echo "path=$(mktemp -d "$RUNNER_TEMP/backend-deploy.XXXXXXXX")" >> "$GITHUB_OUTPUT"
+
+      - name: Check current deployment candidate
+        id: candidate
+        env:
+          GH_TOKEN: ${{ secrets.TSHB_TEST_SOURCE_READ_TOKEN }}
+          EVIDENCE_PATH: ${{ steps.evidence.outputs.path }}
+        run: |
+          set -euo pipefail
+          [[ -n "$GH_TOKEN" ]]
+          python3 -u ops/deploy_ci.py check \
+            --sha "$DEPLOY_SHA" --run-id "$DEPLOY_CI_RUN" --attempt "$DEPLOY_CI_ATTEMPT" \
+            --directory "$EVIDENCE_PATH"
+
+      - name: Verify internal SSH connection
+        if: steps.candidate.outputs.current == 'true'
+        run: bash ops/check_vpc_deploy_ssh.sh
+
+      - name: Deploy verified CI artifact over VPC
+        if: steps.candidate.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TSHB_TEST_SOURCE_READ_TOKEN }}
+          EVIDENCE_PATH: ${{ steps.evidence.outputs.path }}
+        run: bash ops/run_deploy_ci.sh "$EVIDENCE_PATH"
+
+      - name: Preserve transaction evidence
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: backend-deploy-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.evidence.outputs.path }}/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 30

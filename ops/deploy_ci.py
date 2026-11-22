@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import zipfile
 
 from artifact_test_runtime import IsolatedRuntime, VerificationError, digest
-from deploy_test import Controller, DeploymentError, atomic_json, build_plan
+from deploy_test import Controller, DeploymentError, atomic_json, build_plan, measured_phase
 from deployment_manifest import validate_manifest as validate_deployment
 from deployment_transport import GithubGate, REPOSITORY, SshHost
 from migration_compatibility import migration_interval, rehearse
@@ -127,10 +127,11 @@ class Github(GithubGate):
                 "artifact_missing_or_expired")
         archive = Path(str(destination) + ".zip")
         require(not archive.exists() and not Path(destination).exists(), "artifact_destination_exists")
-        with archive.open("xb") as output:
-            result = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/actions/artifacts/{record['id']}/zip"],
-                                    stdout=output, stderr=subprocess.PIPE, timeout=300, check=False)
-        require(result.returncode == 0, "artifact_download_failed")
+        with measured_phase("github_artifact_download", []):
+            with archive.open("xb") as output:
+                result = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/actions/artifacts/{record['id']}/zip"],
+                                        stdout=output, stderr=subprocess.PIPE, timeout=300, check=False)
+            require(result.returncode == 0, "artifact_download_failed")
         require(archive.stat().st_size <= MAX_ARTIFACT_BYTES, "artifact_too_large")
         if record.get("digest"):
             require(record["digest"] == "sha256:" + digest(archive), "artifact_archive_digest_mismatch")
