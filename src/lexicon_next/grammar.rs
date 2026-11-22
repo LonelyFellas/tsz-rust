@@ -420,7 +420,30 @@ async fn validate_form_target(
         Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
     );
     let valid: bool = if let Some(publication) = publication.filter(|_| !next) {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.entries e WHERE e.id=$1 AND e.kind='word') AND EXISTS(SELECT 1 FROM lexicon.entry_publications p WHERE p.id=$2 AND p.entry_id=$1) AND EXISTS(SELECT 1 FROM lexicon.entry_publication_nodes n WHERE n.publication_id=$2 AND n.entry_id=$1 AND n.node_id=$3 AND n.node_type='pos') AND EXISTS(SELECT 1 FROM lexicon.entry_publication_nodes n WHERE n.publication_id=$2 AND n.entry_id=$1 AND n.node_id=$4 AND n.node_type='form_slot') AND EXISTS(SELECT 1 FROM lexicon.entry_publication_nodes n WHERE n.publication_id=$2 AND n.entry_id=$1 AND n.node_id=$5 AND n.node_type='form_variant')")
+        sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM lexicon.entries e
+                JOIN lexicon.entry_publications p
+                  ON p.id=$2 AND p.entry_id=e.id
+                JOIN lexicon.entry_publication_nodes pos_pub
+                  ON pos_pub.publication_id=p.id AND pos_pub.entry_id=e.id AND pos_pub.node_id=$3 AND pos_pub.node_type='pos'
+                JOIN lexicon.nodes pos
+                  ON pos.id=pos_pub.node_id AND pos.entry_id=e.id AND pos.node_type='pos'
+                JOIN lexicon.entry_publication_nodes form_pub
+                  ON form_pub.publication_id=p.id AND form_pub.entry_id=e.id AND form_pub.node_id=$4 AND form_pub.node_type='concrete_form'
+                JOIN lexicon.nodes form
+                  ON form.id=form_pub.node_id AND form.entry_id=e.id AND form.node_type='concrete_form'
+                LEFT JOIN lexicon.nodes form_parent
+                  ON form_parent.id=form.parent_node_id AND form_parent.entry_id=e.id
+                JOIN lexicon.entry_publication_nodes variant_pub
+                  ON variant_pub.publication_id=p.id AND variant_pub.entry_id=e.id AND variant_pub.node_id=$5 AND variant_pub.node_type='form_variant'
+                JOIN lexicon.nodes variant
+                  ON variant.id=variant_pub.node_id AND variant.entry_id=e.id AND variant.node_type='form_variant' AND variant.parent_node_id=form.id
+                WHERE e.id=$1 AND e.kind='word'
+                  AND (form.parent_node_id=pos.id OR (form_parent.node_type='form_group' AND form_parent.parent_node_id=pos.id))
+            )",
+        )
             .bind(entry)
             .bind(publication)
             .bind(pos)
