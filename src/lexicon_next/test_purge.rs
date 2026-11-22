@@ -417,9 +417,9 @@ pub async fn purge(
         AppError::forbidden(ErrorCode::Forbidden, "test resource run is required")
     })?;
     let (input, request) = canonical_request(&input)?;
-    permissions::load(&state, &auth)
-        .await?
-        .require("words.access")?;
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("words.access")?;
+    authorization.require("words.create")?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     super::repository::lock_list_writers(&mut tx).await?;
     if let Some(result) =
