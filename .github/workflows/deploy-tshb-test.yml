@@ -16,8 +16,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  dispatch-vpc:
+    if: >-
+      vars.TSHB_TEST_VPC_DEPLOY_REPO != '' &&
+      github.repository == 'LonelyFellas/tsz-rust' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Check out trusted main tools
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Request deployment in the private repository
+        env:
+          GH_TOKEN: ${{ secrets.TSHB_TEST_VPC_DISPATCH_TOKEN }}
+          DEPLOY_REPO: ${{ vars.TSHB_TEST_VPC_DEPLOY_REPO }}
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEPLOY_CI_RUN: ${{ github.event.workflow_run.id }}
+          DEPLOY_CI_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: bash ops/dispatch_vpc_deploy.sh
+
   deploy:
     if: >-
+      vars.TSHB_TEST_VPC_DEPLOY_REPO == '' &&
       github.repository == 'LonelyFellas/tsz-rust' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_branch == 'main' &&
@@ -69,36 +96,7 @@ jobs:
 
       - name: Deploy verified CI artifact
         if: steps.candidate.outputs.current == 'true'
-        run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/backend-deploy"
-          mkdir -p "$root"
-          for retry in 1 2; do
-            directory="$root/attempt-$retry"
-            mkdir -p "$directory"
-            set +e
-            python3 -u ops/deploy_ci.py deploy \
-              --sha "$DEPLOY_SHA" --run-id "$DEPLOY_CI_RUN" --attempt "$DEPLOY_CI_ATTEMPT" \
-              --directory "$directory" \
-              2>&1 | tee "$root/controller-$retry.log"
-            status=${PIPESTATUS[0]}
-            set -e
-            if [[ "$status" -eq 0 ]]; then
-              exit 0
-            fi
-            recovery_error=""
-            failed_stage=""
-            if [[ -f "$directory/result.json" ]]; then
-              recovery_error="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("recovery_error", ""))' "$directory/result.json")"
-              failed_stage="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("failed_stage", ""))' "$directory/result.json")"
-            fi
-            if [[ "$recovery_error" != "remote_operation_busy" && "$failed_stage" != "artifact_upload_failed" ]]; then
-              exit "$status"
-            fi
-            echo "backend deployment retry $retry after $failed_stage/$recovery_error" >&2
-            sleep 30
-          done
-          exit 1
+        run: bash ops/run_deploy_ci.sh "$RUNNER_TEMP/backend-deploy"
 
       - name: Close deployment SSH connection
         if: ${{ always() }}

@@ -31,6 +31,27 @@
 
 实现由 [PR #425](https://github.com/LonelyFellas/tsz-rust/pull/425) 合并，精确审查提交为 `0006a6f47cffadc9315b4f60f2faebb1bcba5ec4`。审查：2 轮；确认缺陷 1（失败归档遮蔽重试成功归档，已修复）；证据排除误报 0；未解决 P0–P2 为 0；关联回归/回退：未知。修复后的 31 项定向检查通过。
 
+## tshb-test 内网部署接入
+
+公开仓库 `LonelyFellas/tsz-rust` 的 main CI 继续生成并验证 Linux 制品。配置 `TSHB_TEST_VPC_DEPLOY_REPO` 后，该 CI 成功时通过 `workflow_dispatch` 提交 SHA、run ID 和 attempt。私有部署仓库的任务负责下载并校验原始制品，复用现有控制器把制品经内网 SSH 推送到 `tshb-test`。公开 workflow 的日志记录私有 run ID，发布结果看私有 run 的控制器回执。
+
+### 接入与切换
+
+1. 将 [私有部署工作流模板](deploy-tshb-test-vpc.yml) 放到专用私有仓库 `main` 的 `.github/workflows/deploy-tshb-test-vpc.yml`。保持 `main` 为默认分支。组织私有仓库关闭 fork，只授权部署维护者访问；个人私有仓库仅保留所有者访问，因为 GitHub 不提供该仓库级 fork 开关。Runner 以仓库级注册到这个私有仓库，标签为 `tshb-test-vpc`。
+2. 在阿里云河源为 Runner 准备与 `tshb-test` 同 VPC 的独立 Linux x64 主机。使用能直接执行现有 Linux 制品的系统（例如 Ubuntu 24.04），安装 Git、Bash、Python 3、`gh` 和 OpenSSH。用专用账号运行 Runner，验证 Actions、GitHub 制品存储和 Docker 镜像仓库的 HTTPS 出站。迁移演练使用 Runner 自己的 Docker，并验证服务账号可运行容器以及四个演练镜像可用。
+3. 以 Runner 账号配置 `tshb-test` SSH 别名，`HostName` 填测试服私网 IPv4，采用专用发布 key、`IdentitiesOnly yes` 和独立核验的已知主机密钥。禁用 `ProxyJump`、`ProxyCommand` 和 `ControlPath`。测试服安全组按 Runner 私网来源开放 SSH，保留已有部署账号和远端控制器权限边界。以同一账号运行 `bash ops/check_vpc_deploy_ssh.sh` 检查直连。
+4. 私有仓库配置 `TSHB_TEST_SOURCE_READ_TOKEN`，只用 `LonelyFellas/tsz-rust` 的 `Actions: read` 与 `Contents: read`。公开仓库配置 `TSHB_TEST_VPC_DISPATCH_TOKEN`，只用专用私有仓库的 `Actions: write`。两份凭据使用独立的细粒度授权。先用 Runner 的只读凭据查询指定 CI attempt、下载验证回执和二进制 ZIP，核对 GitHub 提供的摘要，确认实际下载端点可用。
+5. 验证私有 workflow 可调度到目标 Runner 后，在已授权的发布窗口使用当前 main 成功 CI 的精确候选做首次部署。确认控制器状态、远端事务和实际版本吻合。再设置公开仓库变量 `TSHB_TEST_VPC_DEPLOY_REPO=owner/repo`，以自然触发的 main CI 验收切换。切换前确认公网部署任务和远端事务空闲。
+
+私有仓库的 Actions 证据保留 30 天，包含候选、计划、bundle、控制器日志和状态。Runner 使用 `RUNNER_TEMP` 下的独立目录，服务账号需拥有该目录及文件的删除权限，由 Runner 在 job 边界清理。Runner 中断时按远端事务 ID 与原计划核对现场，再走既有恢复流程。
+
+### 验收和回退
+
+- 只读验收记录精确 SHA、CI run/attempt、私有 run ID、Runner 标签、私网 SSH 直连和制品摘要。过时候选应返回 `superseded`，失败候选应在 SSH 之前停止。
+- 真实发布核对 `accepted`、正式进程与 manifest 摘要、HTTPS 鉴权、草稿保存与重新读取、fixture 清理以及 `server_build=0`。
+- 从 `github_artifact_download` 日志取各次 GitHub ZIP 下载时间，从事务 `timings` 取 `upload` 阶段耗时，从 `result.json` 取控制器耗时。另记私有 workflow 的排队、仓库检出和证据归档用时。首版在部署任务内下载制品，使用实测记录评估整体收益。
+- 跨仓调度报错或回执丢失时，先查私有 run 和远端事务。恢复公网发布时，等私有队列和运行中任务处理完、远端 owner 释放，再清空 `TSHB_TEST_VPC_DEPLOY_REPO`，核对最新 main CI 后重跑公开仓库部署工作流。进入写入阶段的故障按原事务恢复。
+
 ## 首次自动发布验收（2026-11-15）
 
 自动 CD 已启用并完成一次自然触发的真实发布；正常版本不逐次人工确认。

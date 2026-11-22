@@ -264,24 +264,145 @@ class DeploymentTests(unittest.TestCase):
                     self.assertEqual(result['status'], status)
                     self.assertEqual(json.loads((Path(directory) / 'result.json').read_text())['status'], status)
 
-    def test_workflow_binds_successful_main_ci_and_uses_no_rebuild(self):
-        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/deploy-tshb-test.yml").read_text()
+
+class WorkflowTests(unittest.TestCase):
+    root = Path(__file__).resolve().parents[1]
+
+    def test_public_workflow_only_routes_successful_main_ci_to_one_deployer(self):
+        workflow = (self.root / ".github/workflows/deploy-tshb-test.yml").read_text()
         self.assertIn("workflow_run:", workflow)
         self.assertIn("branches: [main]", workflow)
-        self.assertIn("github.event.workflow_run.conclusion == 'success'", workflow)
-        self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", workflow)
-        self.assertIn(ci.REPOSITORY, workflow)
-        self.assertNotIn("pull_request:", workflow)
-        self.assertNotIn("cargo build", workflow)
-        self.assertIn("cancel-in-progress: false", workflow)
-        self.assertIn("include-hidden-files: true", workflow)
-        self.assertIn("python3 -u ops/deploy_ci.py deploy", workflow)
+        dispatch, deploy = workflow.split("\n  deploy:\n", 1)
+        for job, operator in ((dispatch, "!="), (deploy, "==")):
+            condition = job.split("if: >-\n", 1)[1].split("runs-on:", 1)[0]
+            for clause in (
+                f"vars.TSHB_TEST_VPC_DEPLOY_REPO {operator} ''",
+                f"github.repository == '{ci.REPOSITORY}'",
+                "github.event.workflow_run.head_repository.full_name == github.repository",
+                "github.event.workflow_run.head_branch == 'main'",
+                "(github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')",
+                "github.event.workflow_run.conclusion == 'success'",
+            ):
+                self.assertIn(clause, condition)
+        self.assertIn("run: bash ops/dispatch_vpc_deploy.sh", dispatch)
+        self.assertNotIn("TSHB_TEST_SSH_KEY", dispatch)
+        self.assertIn("run: bash ops/run_deploy_ci.sh", deploy)
 
-    def test_workflow_retries_busy_backend_uploads(self):
-        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/deploy-tshb-test.yml").read_text()
-        self.assertIn("for retry in 1 2", workflow)
-        self.assertIn('$recovery_error" != "remote_operation_busy"', workflow)
-        self.assertIn('$failed_stage" != "artifact_upload_failed"', workflow)
+    def test_private_workflow_requires_main_and_a_verified_candidate_before_ssh(self):
+        workflow = (self.root / "docs/features/backend-auto-deploy/deploy-tshb-test-vpc.yml").read_text()
+        self.assertIn("if: github.event.repository.private == true && github.ref == 'refs/heads/main'", workflow)
+        self.assertIn("runs-on: [self-hosted, linux, x64, tshb-test-vpc]", workflow)
+        self.assertIn(f"repository: {ci.REPOSITORY}", workflow)
+        self.assertIn("ref: refs/heads/main", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        for run in ("bash ops/check_vpc_deploy_ssh.sh", "bash ops/run_deploy_ci.sh"):
+            step = next(step for step in workflow.split("      - name: ") if f"run: {run}" in step)
+            self.assertIn("if: steps.candidate.outputs.current == 'true'", step)
+        self.assertIn("include-hidden-files: true", workflow)
+        self.assertNotIn("cargo build", workflow)
+
+
+class WorkflowScriptTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.directory = Path(temp.name)
+        self.calls = self.directory / "calls.jsonl"
+        self.env = {**os.environ, "PATH": f"{self.directory}:{os.environ['PATH']}",
+                    "FAKE_CALLS": str(self.calls), "GH_TOKEN": "fake-token", "DEPLOY_REPO": "owner/deploy",
+                    "DEPLOY_SHA": "a" * 40, "DEPLOY_CI_RUN": "17", "DEPLOY_CI_ATTEMPT": "2"}
+
+    def fake(self, name, body):
+        script = self.directory / name
+        script.write_text(f"#!{sys.executable}\nimport json, os, sys\n"
+                          "with open(os.environ['FAKE_CALLS'], 'a') as log:\n"
+                          "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n" + body)
+        script.chmod(0o700)
+
+    def run_script(self, script, *arguments, **env):
+        result = subprocess.run(["bash", str(WorkflowTests.root / "ops" / script), *arguments],
+                                cwd=self.directory, env={**self.env, **env}, capture_output=True, text=True)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+        self.calls.unlink(missing_ok=True)
+        return result, calls
+
+    def fake_github(self):
+        self.fake("gh", "if sys.argv[2] == 'repos/owner/deploy':\n"
+                       "    print(os.environ.get('FAKE_REPOSITORY_MATCH', 'true'))\n"
+                       "else:\n"
+                       "    print(os.environ.get('FAKE_WORKFLOW_RUN', '123456'))\n"
+                       "    sys.exit(int(os.environ.get('FAKE_DISPATCH_STATUS', '0')))\n")
+
+    def test_dispatch_validates_inputs_without_calling_github(self):
+        self.fake_github()
+        for field, value in (("GH_TOKEN", ""), ("DEPLOY_REPO", "https://example.com/deploy"),
+                             ("DEPLOY_SHA", "bad"), ("DEPLOY_CI_RUN", "-1"), ("DEPLOY_CI_ATTEMPT", "0")):
+            with self.subTest(field=field):
+                result, calls = self.run_script("dispatch_vpc_deploy.sh", **{field: value})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
+
+    def test_dispatch_rejects_a_public_repository_or_non_main_default_branch(self):
+        self.fake_github()
+        result, calls = self.run_script("dispatch_vpc_deploy.sh", FAKE_REPOSITORY_MATCH="false")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [["api", "repos/owner/deploy", "--jq", '.private == true and .default_branch == "main"']])
+
+    def test_dispatch_only_sends_candidate_identity_and_reports_private_run(self):
+        self.fake_github()
+        result, calls = self.run_script("dispatch_vpc_deploy.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("123456", result.stdout)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][:4], ["api", "--method", "POST",
+                         "repos/owner/deploy/actions/workflows/deploy-tshb-test-vpc.yml/dispatches"])
+        self.assertEqual(calls[1][8:], ["-f", "ref=main", "-f", f"inputs[sha]={self.env['DEPLOY_SHA']}",
+                                        "-f", "inputs[run_id]=17", "-f", "inputs[attempt]=2"])
+
+    def test_dispatch_error_or_missing_receipt_is_not_retried(self):
+        self.fake_github()
+        for env in ({"FAKE_DISPATCH_STATUS": "19"}, {"FAKE_WORKFLOW_RUN": ""}):
+            with self.subTest(env=env):
+                result, calls = self.run_script("dispatch_vpc_deploy.sh", **env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(len(calls), 2)
+
+    def test_vpc_requires_direct_private_ssh_before_connecting(self):
+        interpreter = self.directory / "python3"
+        interpreter.symlink_to(sys.executable)
+        self.fake("ssh", "if sys.argv[1] == '-G':\n    print(os.environ['FAKE_SSH_CONFIGURATION'])\n")
+        for config in ("hostname 8.8.8.8", "hostname invalid", "hostname 10.0.0.1\nproxyjump gateway",
+                       "hostname 10.0.0.1\nproxycommand ssh gateway", "hostname 10.0.0.1\ncontrolpath /tmp/socket"):
+            with self.subTest(config=config):
+                result, calls = self.run_script("check_vpc_deploy_ssh.sh", FAKE_SSH_CONFIGURATION=config)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [["-G", "tshb-test"]])
+        result, calls = self.run_script("check_vpc_deploy_ssh.sh", FAKE_SSH_CONFIGURATION="hostname 10.0.0.1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[1], ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o",
+                                    "ConnectTimeout=10", "tshb-test", "true"])
+
+    def test_runner_retries_only_known_transport_failures(self):
+        (self.directory / "ops").mkdir()
+        self.fake("sleep", "")
+        self.fake("python3", "from pathlib import Path\n"
+                             "if sys.argv[1] == '-c':\n"
+                             "    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+                             "directory = Path(sys.argv[sys.argv.index('--directory') + 1])\n"
+                             "if directory.name == 'attempt-1':\n"
+                             "    (directory / 'result.json').write_text(os.environ['FAKE_RESULT'])\n"
+                             "    sys.exit(12)\n")
+        for evidence, retry in (({"recovery_error": "remote_operation_busy"}, True),
+                                ({"failed_stage": "artifact_upload_failed"}, True),
+                                ({"failed_stage": "postflight_failed"}, False)):
+            with self.subTest(evidence=evidence):
+                result, calls = self.run_script("run_deploy_ci.sh", str(self.directory / "evidence"),
+                                                FAKE_RESULT=json.dumps(evidence))
+                self.assertEqual(result.returncode, 0 if retry else 12, result.stderr)
+                controller_calls = [call for call in calls if call[:3] == ["-u", "ops/deploy_ci.py", "deploy"]]
+                self.assertEqual([Path(call[-1]).name for call in controller_calls],
+                                 ["attempt-1", "attempt-2"] if retry else ["attempt-1"])
 
 
 if __name__ == "__main__":
