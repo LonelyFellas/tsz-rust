@@ -37,7 +37,7 @@
 
 ### 接入与切换
 
-1. 将 [私有部署工作流模板](deploy-tshb-test-vpc.yml) 放到专用私有仓库 `main` 的 `.github/workflows/deploy-tshb-test-vpc.yml`。保持 `main` 为默认分支，只给部署维护者仓库写权限，关闭私有 fork。Runner 以仓库级注册到这个私有仓库，标签为 `tshb-test-vpc`。
+1. 将 [私有部署工作流模板](deploy-tshb-test-vpc.yml) 放到专用私有仓库 `main` 的 `.github/workflows/deploy-tshb-test-vpc.yml`。保持 `main` 为默认分支。组织私有仓库关闭 fork，只授权部署维护者访问；个人私有仓库仅保留所有者访问，因为 GitHub 不提供该仓库级 fork 开关。Runner 以仓库级注册到这个私有仓库，标签为 `tshb-test-vpc`。
 2. 在阿里云河源为 Runner 准备与 `tshb-test` 同 VPC 的独立 Linux x64 主机。使用能直接执行现有 Linux 制品的系统（例如 Ubuntu 24.04），安装 Git、Bash、Python 3、`gh` 和 OpenSSH。用专用账号运行 Runner，验证 Actions、GitHub 制品存储和 Docker 镜像仓库的 HTTPS 出站。迁移演练使用 Runner 自己的 Docker，并验证服务账号可运行容器以及四个演练镜像可用。
 3. 以 Runner 账号配置 `tshb-test` SSH 别名，`HostName` 填测试服私网 IPv4，采用专用发布 key、`IdentitiesOnly yes` 和独立核验的已知主机密钥。禁用 `ProxyJump`、`ProxyCommand` 和 `ControlPath`。测试服安全组按 Runner 私网来源开放 SSH，保留已有部署账号和远端控制器权限边界。以同一账号运行 `bash ops/check_vpc_deploy_ssh.sh` 检查直连。
 4. 私有仓库配置 `TSHB_TEST_SOURCE_READ_TOKEN`，只用 `LonelyFellas/tsz-rust` 的 `Actions: read` 与 `Contents: read`。公开仓库配置 `TSHB_TEST_VPC_DISPATCH_TOKEN`，只用专用私有仓库的 `Actions: write`。两份凭据使用独立的细粒度授权。先用 Runner 的只读凭据查询指定 CI attempt、下载验证回执和二进制 ZIP，核对 GitHub 提供的摘要，确认实际下载端点可用。
