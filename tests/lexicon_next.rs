@@ -3140,6 +3140,89 @@ async fn grammar_links_reject_v3_targets_without_form_topology(pool: PgPool) {
     );
 }
 
+#[sqlx::test]
+async fn grammar_links_reject_publication_targets_from_different_form_branches(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool, EDIT).await;
+    let target_entry = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,revision,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word',1,'{}',$2,$2)")
+        .bind(target_entry)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let publication = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entry_publications(id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id) VALUES($1,$2,1,1,3,'{}',$3,$4)")
+        .bind(publication)
+        .bind(target_entry)
+        .bind(b"publication-topology".as_slice())
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target_pos = Uuid::now_v7();
+    let other_pos = Uuid::now_v7();
+    let target_form = Uuid::now_v7();
+    let target_variant = Uuid::now_v7();
+    for (id, node_type, parent) in [
+        (target_pos, "pos", None),
+        (other_pos, "pos", None),
+        (target_form, "form_slot", Some(other_pos)),
+        (target_variant, "form_variant", Some(target_form)),
+    ] {
+        sqlx::query(
+            "INSERT INTO lexicon.nodes(id,entry_id,node_type,parent_node_id) VALUES($1,$2,$3,$4)",
+        )
+        .bind(id)
+        .bind(target_entry)
+        .bind(node_type)
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO lexicon.entry_publication_nodes(publication_id,entry_id,node_id,node_type) VALUES($1,$2,$3,$4)")
+            .bind(publication)
+            .bind(target_entry)
+            .bind(id)
+            .bind(node_type)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let source = create(&state, actor).await;
+    let path = format!("/entries/{}", source["id"].as_str().unwrap());
+    let mut content = draft();
+    content["grammar_structures"] = json!([{
+        "id":Uuid::now_v7(),
+        "part_of_speech":"noun",
+        "variants":[
+            {"id":Uuid::now_v7(),"locale":"en-GB","content":{"version":2,"text":"target","annotations":[]},"form_links":[{
+                "id":Uuid::now_v7(),
+                "source_segments":[{"start":0,"end":6,"surface":"target"}],
+                "target_word_id":target_entry,
+                "target_publication_id":publication,
+                "target_pos_id":target_pos,
+                "target_form_id":target_form,
+                "target_variant_id":target_variant,
+                "target_dialect":"common"
+            }]},
+            {"id":Uuid::now_v7(),"locale":"en-US","content":{"version":2,"text":"target","annotations":[]}}
+        ]
+    }]);
+    assert_eq!(
+        call_grammar_links(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":1,"draft":content}),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
 async fn call_grammar_audio(
     state: &AppState,
     actor: Uuid,
