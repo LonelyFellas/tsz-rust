@@ -2,6 +2,7 @@
 use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::{
@@ -13,6 +14,24 @@ use crate::{
 };
 
 pub const HEADER: &str = "x-tsz-test-run";
+
+pub async fn register_entry(
+    conn: &mut PgConnection,
+    run: &str,
+    actor: Uuid,
+    entry_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO lexicon_next.test_resource_entries(run_id,entry_id,actor_id) VALUES($1,$2,$3)",
+    )
+    .bind(run)
+    .bind(entry_id)
+    .bind(actor)
+    .execute(conn)
+    .await
+    .map_err(AppError::internal)?;
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 pub struct TestResourcesConfig {

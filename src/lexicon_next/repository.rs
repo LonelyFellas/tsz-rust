@@ -132,6 +132,7 @@ pub async fn create(
     pool: &PgPool,
     auth: &AdminAuth,
     mut input: CreateNextEntry,
+    test_run: Option<&str>,
 ) -> Result<NextEntry, AppError> {
     language::require_language(&input.target_language)?;
     language::require_medium(&input.medium_locale)?;
@@ -152,6 +153,9 @@ pub async fn create(
     };
     sqlx::query("INSERT INTO lexicon_next.entries(id,target_language,medium_locale,kind,headword,owner_id,revision,creation_detection) VALUES($1,$2,$3,$4,$5,$6,1,$7)")
         .bind(id).bind(&input.target_language).bind(&input.medium_locale).bind(kind).bind(&input.headword).bind(auth.subject).bind(creation_detection).execute(&mut *tx).await.map_err(AppError::internal)?;
+    if let Some(run) = test_run {
+        crate::test_resources::register_entry(&mut tx, run, auth.subject, id).await?;
+    }
     let draft = NextDraft {
         grammar_structures: None,
         sense_groups: None,

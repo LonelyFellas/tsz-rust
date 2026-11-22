@@ -19,6 +19,7 @@ mod sentence_drafts;
 pub mod sentence_model;
 pub mod sentences;
 pub mod test_fixtures;
+pub(crate) mod test_purge;
 mod workspace;
 
 use crate::{
@@ -58,6 +59,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/test-fixtures/dialect-pair",
             axum::routing::post(test_fixtures::create),
+        )
+        .route(
+            "/test-resources/purge",
+            axum::routing::post(test_purge::purge),
         )
         .route("/equivalent-catalog", get(equivalent_catalog))
         .route("/sentences", get(sentences::list).post(sentences::create))
@@ -209,13 +214,14 @@ pub async fn list(
         .require("words.access")?;
     Ok(Json(repository::list(&state.pool, query).await?))
 }
-#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=CreateNextEntry, params(("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=201, body=NextEntry), (status=401), (status=403), (status=422)))]
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=CreateNextEntry, params(("X-TSZ-Test-Run"=Option<String>, Header, description="仅测试资源白名单账号可用的独占批次；词条会登记到该批次"),("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=201, body=NextEntry), (status=401), (status=403), (status=422)))]
 pub async fn create(
     State(state): State<AppState>,
     auth: AdminAuth,
     headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<CreateNextEntry>,
 ) -> Result<(StatusCode, Json<NextEntry>), AppError> {
+    let (_, test_run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     permissions::load(&state, &auth)
         .await?
         .require("words.create")?;
@@ -238,7 +244,7 @@ pub async fn create(
     Ok((
         StatusCode::CREATED,
         Json(entry_for_client(
-            repository::create(&state.pool, &auth, input).await?,
+            repository::create(&state.pool, &auth, input, test_run.as_deref()).await?,
             &headers,
         )),
     ))

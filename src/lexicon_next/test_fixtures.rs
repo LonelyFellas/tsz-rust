@@ -107,6 +107,7 @@ pub async fn create(
             .execute(&mut *tx)
             .await
             .map_err(AppError::internal)?;
+        test_resources::register_entry(&mut tx, &run, auth.subject, entry).await?;
         sqlx::query(
             "INSERT INTO lexicon_next.nodes(id,entry_id,kind,parent_id) VALUES($1,$2,'sense',NULL)",
         )

@@ -353,6 +353,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         learning_memory_enabled: config.learning_memory_enabled,
         object_storage,
         test_resources: config.test_resources.map(Arc::new),
+        test_resource_purge_enabled: config.test_resource_purge_enabled,
         avatar_public_base_url: config.avatar_public_base_url,
         speech_provider,
         smart_lexicon_v3_flags: config.smart_lexicon_v3_flags,
