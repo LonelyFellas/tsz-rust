@@ -31,6 +31,12 @@
 
 实现由 [PR #425](https://github.com/LonelyFellas/tsz-rust/pull/425) 合并，精确审查提交为 `0006a6f47cffadc9315b4f60f2faebb1bcba5ec4`。审查：2 轮；确认缺陷 1（失败归档遮蔽重试成功归档，已修复）；证据排除误报 0；未解决 P0–P2 为 0；关联回归/回退：未知。修复后的 31 项定向检查通过。
 
+## tshb-test 直接拉取 GitHub 制品
+
+默认自动部署使用成功 main CI 的原始制品。Actions 先验证来源、制品和验收回执，继续执行原有迁移演练和部署预检。控制器进入传输步骤时，Actions 为精确 artifact ID 向 GitHub 获取短时下载地址，经 SSH 标准输入交给测试服。GitHub token 留在 Actions，下载地址只在内存中使用。
+
+测试服校验 ZIP 的字节数和 SHA-256，再从 ZIP 读取二进制，校验其大小和控制器计划中的 SHA-256。传输失败停在正式服务切换前，临时网络错误最多重试一次。签发、下载与校验计入控制器的 `upload` 阶段，测试服拉取设有 120 秒远端超时。私网和手动发布仍可使用现有 SSH 传输。
+
 ## tshb-test 内网部署接入
 
 公开仓库 `LonelyFellas/tsz-rust` 的 main CI 继续生成并验证 Linux 制品。配置 `TSHB_TEST_VPC_DEPLOY_REPO` 后，该 CI 成功时通过 `workflow_dispatch` 提交 SHA、run ID 和 attempt。私有部署仓库的任务负责下载并校验原始制品，复用现有控制器把制品经内网 SSH 推送到 `tshb-test`。公开 workflow 的日志记录私有 run ID，发布结果看私有 run 的控制器回执。

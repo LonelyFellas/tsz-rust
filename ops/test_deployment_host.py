@@ -1,5 +1,6 @@
 import copy
 import gzip
+import hashlib
 import http.client
 import io
 import json
@@ -11,6 +12,7 @@ import time
 import unittest
 import uuid
 from unittest.mock import Mock, patch
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -222,6 +224,73 @@ class HostOperationTests(unittest.TestCase):
                 with patch.object(host.sys, "stdout", io.StringIO()):
                     host.receive(plan, io.BytesIO(gzip.compress(payload, mtime=0)), "gzip")
                 self.assertEqual(host.sha(host.transaction(plan) / "incoming"), plan["artifact_sha256"])
+
+    def test_github_pull_verifies_archive_and_binary_before_marking_upload_complete(self):
+        for failure in (None, "url", "network", "size", "archive_digest", "binary_digest", "completion_reply"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with self.environment(root):
+                    plan = self.prepare(root)
+                    self.acquire(plan)
+                    host.dispatch("backup", plan, None)
+                    binary = Path(plan["artifact_path"]).read_bytes()
+                    if failure == "binary_digest":
+                        binary = b"x" * len(binary)
+                    archive = io.BytesIO()
+                    with zipfile.ZipFile(archive, "w") as bundle:
+                        bundle.writestr("tsz-rust", binary)
+                        bundle.writestr("tsz-rust.manifest.json", "{}")
+                        bundle.writestr("tsz-rust.sha256", "")
+                    data = archive.getvalue()
+                    url = "https://productionresultssa9.blob.core.windows.net/container/artifact.zip?sig=fixture"
+                    download = {"url": url, "archive_bytes": len(data), "binary_bytes": len(binary),
+                                "archive_sha256": hashlib.sha256(data).hexdigest()}
+                    opener = Mock()
+                    response = io.BytesIO(data)
+                    response.status = 200
+                    opener.open.return_value = response
+                    if failure == "url":
+                        download["url"] = "https://productionresultssa9.blob.core.windows.net.example.com/archive?sig=fixture"
+                    elif failure == "network":
+                        opener.open.side_effect = OSError("sensitive signed URL")
+                    elif failure == "size":
+                        download["archive_bytes"] -= 1
+                    elif failure == "archive_digest":
+                        download["archive_sha256"] = "0" * 64
+                    incoming = host.transaction(plan) / "incoming"
+                    original = host.BINARY.read_bytes()
+                    with patch.object(host.urllib.request, "build_opener", return_value=opener):
+                        if failure == "completion_reply":
+                            complete_upload = host.complete_upload
+
+                            def lose_reply(plan, value):
+                                complete_upload(plan, value)
+                                raise host.HostError("artifact_pull_failed")
+
+                            with patch.object(host, "complete_upload", side_effect=lose_reply):
+                                with self.assertRaisesRegex(host.HostError, "^artifact_pull_failed$"):
+                                    host.pull_artifact(plan, download)
+                            self.assertEqual(incoming.read_bytes(), binary)
+                            self.assertEqual(host.pull_artifact(plan, download), {"done": "upload"})
+                            opener.open.assert_called_once()
+                        elif failure:
+                            with self.assertRaisesRegex(host.HostError, "artifact_pull_|uploaded_digest_mismatch") as error:
+                                host.pull_artifact(plan, download)
+                            self.assertNotIn("sensitive signed URL", str(error.exception))
+                            self.assertFalse(incoming.exists())
+                            self.assertEqual(host.state(plan)["completed"], ["backup"])
+                        else:
+                            self.assertEqual(host.pull_artifact(plan, download), {"done": "upload"})
+                            self.assertEqual(host.pull_artifact(plan, download), {"done": "upload"})
+                            opener.open.assert_called_once_with(url, timeout=20)
+                            self.assertEqual(incoming.read_bytes(), binary)
+                            self.assertEqual(host.state(plan)["completed"], ["backup", "upload"])
+                            incoming.write_bytes(b"changed after completion")
+                            with self.assertRaisesRegex(host.HostError, "^uploaded_digest_mismatch$"):
+                                host.pull_artifact(plan, download)
+                    if failure == "url":
+                        opener.open.assert_not_called()
+                    self.assertEqual(host.BINARY.read_bytes(), original)
 
     def test_backup_and_atomic_install_bind_original_and_ci_digest(self):
         with tempfile.TemporaryDirectory() as directory:

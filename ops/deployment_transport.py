@@ -18,6 +18,7 @@ MODULES = ("deployment_manifest", "deployment_auth_smoke", "deployment_business_
 REMOTE_UPLOAD_TIMEOUT_SECONDS = 30 * 60
 REMOTE_UPLOAD_KILL_GRACE_SECONDS = 5
 LOCAL_UPLOAD_GRACE_SECONDS = 30
+REMOTE_PULL_TIMEOUT_SECONDS = 120
 
 
 def command(arguments, *, data=None, timeout=60, failure_stages=()):
@@ -121,7 +122,13 @@ class GithubGate:
 class SshHost:
     credentials = None
 
+    def __init__(self, *, artifact_pull=None):
+        self.artifact_pull = artifact_pull
+
     def _upload_once(self, plan):
+        if self.artifact_pull is not None:
+            self.request("pull_artifact", plan, download=self.artifact_pull(plan))
+            return
         artifact = Path(plan["artifact_path"])
         modules = {name: (ROOT / (name + ".py")).read_text() for name in MODULES}
         receiver = "import json,sys,types; p=json.loads(sys.stdin.buffer.readline()); " \
@@ -174,7 +181,7 @@ class SshHost:
                 print(json.dumps({"status": "waiting", "reason": str(error)}), file=sys.stderr, flush=True)
                 time.sleep(min(10, max(0, deadline - time.monotonic())))
 
-    def request(self, action, plan=None):
+    def request(self, action, plan=None, *, download=None):
         payload = {"action": action, "plan": plan, "credentials": self.credentials,
                    "modules": {name: (ROOT / (name + ".py")).read_text() for name in MODULES}}
         bootstrap = "import json,sys,types; p=json.load(sys.stdin); " \
@@ -183,9 +190,18 @@ class SshHost:
                     "sys.modules['deployment_host'].entry(p)"
         # All arguments other than a fixed bootstrap travel via stdin, including credentials.
         import shlex
+        remote_command = "python3 -I -c " + shlex.quote(bootstrap)
+        timeout = 300
+        if download is not None:
+            payload["download"] = download
+            remote_command = (
+                f"/usr/bin/timeout --preserve-status --signal=TERM --kill-after={REMOTE_UPLOAD_KILL_GRACE_SECONDS}s "
+                f"{REMOTE_PULL_TIMEOUT_SECONDS}s {remote_command}"
+            )
+            timeout = REMOTE_PULL_TIMEOUT_SECONDS + LOCAL_UPLOAD_GRACE_SECONDS
         text = command(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o",
-                        "StrictHostKeyChecking=yes", "tshb-test", "python3 -I -c " + shlex.quote(bootstrap)],
-                       data=json.dumps(payload), timeout=300)
+                        "StrictHostKeyChecking=yes", "tshb-test", remote_command],
+                       data=json.dumps(payload), timeout=timeout)
         result = json.loads(text)
         if not result.get("ok"):
             raise DeploymentError(result.get("stage", "remote_action_failed"))
