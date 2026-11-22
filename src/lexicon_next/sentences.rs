@@ -247,13 +247,13 @@ async fn validate_target(
                 JOIN lexicon.nodes sense
                   ON sense.id=sense_pub.node_id AND sense.entry_id=e.id AND sense.node_type='sense' AND sense.parent_node_id=pos.id
                 JOIN lexicon.entry_publication_nodes base_pub
-                  ON base_pub.publication_id=p.id AND base_pub.entry_id=e.id AND base_pub.node_id=$5 AND base_pub.node_type='form_slot'
+                  ON base_pub.publication_id=p.id AND base_pub.entry_id=e.id AND base_pub.node_id=$5 AND base_pub.node_type='concrete_form'
                 JOIN lexicon.nodes base_form
-                  ON base_form.id=base_pub.node_id AND base_form.entry_id=e.id AND base_form.node_type='form_slot'
+                  ON base_form.id=base_pub.node_id AND base_form.entry_id=e.id AND base_form.node_type='concrete_form'
                 JOIN lexicon.entry_publication_nodes form_pub
-                  ON form_pub.publication_id=p.id AND form_pub.entry_id=e.id AND form_pub.node_id=$6 AND form_pub.node_type='form_slot'
+                  ON form_pub.publication_id=p.id AND form_pub.entry_id=e.id AND form_pub.node_id=$6 AND form_pub.node_type='concrete_form'
                 JOIN lexicon.nodes form
-                  ON form.id=form_pub.node_id AND form.entry_id=e.id AND form.node_type='form_slot'
+                  ON form.id=form_pub.node_id AND form.entry_id=e.id AND form.node_type='concrete_form'
                 LEFT JOIN lexicon.nodes form_parent
                   ON form_parent.id=form.parent_node_id AND form_parent.entry_id=e.id
                 JOIN lexicon.entry_publication_nodes variant_pub

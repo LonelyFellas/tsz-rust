@@ -3167,7 +3167,7 @@ async fn grammar_links_reject_publication_targets_from_different_form_branches(p
     for (id, node_type, parent) in [
         (target_pos, "pos", None),
         (other_pos, "pos", None),
-        (target_form, "form_slot", Some(other_pos)),
+        (target_form, "concrete_form", Some(other_pos)),
         (target_variant, "form_variant", Some(target_form)),
     ] {
         sqlx::query(

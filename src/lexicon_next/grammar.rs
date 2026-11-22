@@ -431,9 +431,9 @@ async fn validate_form_target(
                 JOIN lexicon.nodes pos
                   ON pos.id=pos_pub.node_id AND pos.entry_id=e.id AND pos.node_type='pos'
                 JOIN lexicon.entry_publication_nodes form_pub
-                  ON form_pub.publication_id=p.id AND form_pub.entry_id=e.id AND form_pub.node_id=$4 AND form_pub.node_type='form_slot'
+                  ON form_pub.publication_id=p.id AND form_pub.entry_id=e.id AND form_pub.node_id=$4 AND form_pub.node_type='concrete_form'
                 JOIN lexicon.nodes form
-                  ON form.id=form_pub.node_id AND form.entry_id=e.id AND form.node_type='form_slot'
+                  ON form.id=form_pub.node_id AND form.entry_id=e.id AND form.node_type='concrete_form'
                 LEFT JOIN lexicon.nodes form_parent
                   ON form_parent.id=form.parent_node_id AND form_parent.entry_id=e.id
                 JOIN lexicon.entry_publication_nodes variant_pub
