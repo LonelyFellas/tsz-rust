@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -102,6 +103,30 @@ class GateTests(unittest.TestCase):
             host._upload({"artifact_path": "/tmp/unused"})
         self.assertEqual(host._upload_once.call_count, 2)
         sleep.assert_called_once_with(10)
+
+    def test_github_pull_sends_only_download_metadata_over_ssh_stdin(self):
+        url = "https://productionresultssa9.blob.core.windows.net/example?sig=fixture"
+        plan = {"artifact_path": "/not-read-by-ssh"}
+        issue_url = Mock(return_value={"url": url})
+        host = transport.SshHost(artifact_pull=issue_url)
+        with patch.object(transport, "command", return_value='{"ok":true,"result":{"done":"upload"}}') as command:
+            host.action("upload", plan)
+        issue_url.assert_called_once_with(plan)
+        argv = command.call_args.args[0]
+        self.assertNotIn(url, " ".join(argv))
+        self.assertIn("--preserve-status", argv[-1])
+        self.assertIn(f"{transport.REMOTE_PULL_TIMEOUT_SECONDS}s python3", argv[-1])
+        payload = json.loads(command.call_args.kwargs["data"])
+        self.assertEqual(payload["action"], "pull_artifact")
+        self.assertEqual(payload["download"], {"url": url})
+        self.assertEqual(payload["plan"], plan)
+
+    def test_pull_timeout_reply_reaches_the_controller_as_retryable_failure(self):
+        host = transport.SshHost(artifact_pull=Mock(return_value={"url": "https://example.invalid"}))
+        response = subprocess.CompletedProcess([], 0, '{"ok":false,"stage":"artifact_pull_failed"}', "")
+        with patch.object(transport.subprocess, "run", return_value=response):
+            with self.assertRaisesRegex(DeploymentError, "^artifact_pull_failed$"):
+                host.action("upload", {})
 
     def test_upload_does_not_repeat_a_timed_out_attempt_inside_the_controller(self):
         host = transport.SshHost()

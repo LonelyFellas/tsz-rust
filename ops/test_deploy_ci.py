@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+import urllib.error
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -71,6 +72,32 @@ class CandidateTests(unittest.TestCase):
             values[("status", "--porcelain")] = " M ops/deploy_ci.py"
             with self.assertRaisesRegex(DeploymentError, "clean_exact_main"):
                 repo.candidate(sha, 17, 2)
+
+    def test_pull_address_uses_only_the_verified_artifact_and_keeps_token_local(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "tsz-rust"
+            binary.write_bytes(b"binary")
+            record = Path(directory) / "artifact.json"
+            record.write_text(json.dumps({"id": 7, "expired": False, "size_in_bytes": 24,
+                                          "digest": "sha256:" + "a" * 64}))
+            plan = {"ci": {"artifact_id": 7}, "artifact_metadata_path": str(record), "artifact_path": str(binary)}
+            url = "https://productionresultssa9.blob.core.windows.net/archive?sig=fixture"
+            opener = Mock()
+            opener.open.side_effect = urllib.error.HTTPError(
+                "https://api.github.com/", 302, "Found", {"Location": url}, io.BytesIO()
+            )
+            with patch.dict(os.environ, {"GH_TOKEN": "token-fixture"}), \
+                 patch.object(ci.urllib.request, "build_opener", return_value=opener):
+                download = ci.Github().artifact_pull(plan)
+                request = opener.open.call_args.args[0]
+                self.assertEqual(request.full_url, f"https://api.github.com/repos/{ci.REPOSITORY}/actions/artifacts/7/zip")
+                self.assertEqual(request.get_header("Authorization"), "Bearer token-fixture")
+                self.assertEqual(download, {"url": url, "archive_bytes": 24, "archive_sha256": "a" * 64,
+                                            "binary_bytes": 6})
+                plan["ci"]["artifact_id"] = 8
+                with self.assertRaisesRegex(DeploymentError, "artifact_missing_or_expired"):
+                    ci.Github().artifact_pull(plan)
+                self.assertEqual(opener.open.call_count, 1)
 
 
 class DeploymentTests(unittest.TestCase):
@@ -287,6 +314,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("run: bash ops/dispatch_vpc_deploy.sh", dispatch)
         self.assertNotIn("TSHB_TEST_SSH_KEY", dispatch)
         self.assertIn("run: bash ops/run_deploy_ci.sh", deploy)
+        self.assertIn('--pull-from-github', deploy)
 
     def test_private_workflow_requires_main_and_a_verified_candidate_before_ssh(self):
         workflow = (self.root / "docs/features/backend-auto-deploy/deploy-tshb-test-vpc.yml").read_text()
@@ -395,6 +423,8 @@ class WorkflowScriptTests(unittest.TestCase):
                              "    sys.exit(12)\n")
         for evidence, retry in (({"recovery_error": "remote_operation_busy"}, True),
                                 ({"failed_stage": "artifact_upload_failed"}, True),
+                                ({"failed_stage": "artifact_pull_failed"}, True),
+                                ({"failed_stage": "artifact_pull_digest_mismatch"}, False),
                                 ({"failed_stage": "postflight_failed"}, False)):
             with self.subTest(evidence=evidence):
                 result, calls = self.run_script("run_deploy_ci.sh", str(self.directory / "evidence"),

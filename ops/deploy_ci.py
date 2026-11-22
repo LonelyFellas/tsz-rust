@@ -12,9 +12,11 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+import urllib.error
+import urllib.request
 import zipfile
 
-from artifact_test_runtime import IsolatedRuntime, VerificationError, digest
+from artifact_test_runtime import IsolatedRuntime, NoRedirect, VerificationError, digest
 from deploy_test import Controller, DeploymentError, atomic_json, build_plan, measured_phase
 from deployment_manifest import validate_manifest as validate_deployment
 from deployment_transport import GithubGate, REPOSITORY, SshHost
@@ -137,6 +139,36 @@ class Github(GithubGate):
             require(record["digest"] == "sha256:" + digest(archive), "artifact_archive_digest_mismatch")
         extract_artifact(archive, destination, expected)
         archive.unlink()
+
+    def artifact_pull(self, plan):
+        record = json.loads(Path(plan["artifact_metadata_path"]).read_text())
+        artifact_id = plan["ci"]["artifact_id"]
+        require(record.get("id") == artifact_id and record.get("expired") is False,
+                "artifact_missing_or_expired")
+        archive_bytes = record.get("size_in_bytes")
+        archive_digest = record.get("digest")
+        require(type(archive_bytes) is int and 0 < archive_bytes <= MAX_ARTIFACT_BYTES
+                and isinstance(archive_digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", archive_digest),
+                "artifact_pull_metadata_invalid")
+        token = os.environ.get("GH_TOKEN")
+        require(token, "artifact_pull_token_missing")
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        try:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=10):
+                raise DeploymentError("artifact_pull_url_unavailable")
+        except urllib.error.HTTPError as error:
+            with error:
+                if error.code in {429, 500, 502, 503, 504}:
+                    raise DeploymentError("artifact_pull_failed") from None
+                url = error.headers.get("Location") if error.code == 302 else None
+        except OSError:
+            raise DeploymentError("artifact_pull_failed") from None
+        require(url, "artifact_pull_url_unavailable")
+        return {"url": url, "archive_bytes": archive_bytes, "archive_sha256": archive_digest[7:],
+                "binary_bytes": Path(plan["artifact_path"]).stat().st_size}
 
 
 def one_artifact(rows, name):
@@ -322,13 +354,16 @@ def main(argv=None):
     parser.add_argument("--run-id", required=True, type=int)
     parser.add_argument("--attempt", required=True, type=int)
     parser.add_argument("--directory", required=True, type=Path)
+    parser.add_argument("--pull-from-github", action="store_true")
     args = parser.parse_args(argv)
     started = time.monotonic()
     try:
+        repo = Github()
         if args.command == "check":
-            result = Github().candidate(args.sha, args.run_id, args.attempt)
+            result = repo.candidate(args.sha, args.run_id, args.attempt)
         else:
-            result = deploy(Github(), SshHost(), args.sha, args.run_id, args.attempt, args.directory)
+            host = SshHost(artifact_pull=repo.artifact_pull if args.pull_from_github else None)
+            result = deploy(repo, host, args.sha, args.run_id, args.attempt, args.directory)
     except (DeploymentError, VerificationError, ArtifactManifestError, OSError, ValueError, KeyError,
             subprocess.TimeoutExpired, zipfile.BadZipFile) as error:
         result = {"status": "failed", "candidate_sha": args.sha,

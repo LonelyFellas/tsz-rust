@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root="$1"
+shift
 mkdir -p "$root"
 for retry in 1 2; do
   directory="$root/attempt-$retry"
@@ -9,7 +10,7 @@ for retry in 1 2; do
   set +e
   python3 -u ops/deploy_ci.py deploy \
     --sha "$DEPLOY_SHA" --run-id "$DEPLOY_CI_RUN" --attempt "$DEPLOY_CI_ATTEMPT" \
-    --directory "$directory" \
+    --directory "$directory" "$@" \
     2>&1 | tee "$root/controller-$retry.log"
   status=${PIPESTATUS[0]}
   set -e
@@ -22,7 +23,7 @@ for retry in 1 2; do
     recovery_error="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("recovery_error", ""))' "$directory/result.json")"
     failed_stage="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("failed_stage", ""))' "$directory/result.json")"
   fi
-  if [[ "$recovery_error" != "remote_operation_busy" && "$failed_stage" != "artifact_upload_failed" ]]; then
+  if [[ "$recovery_error" != "remote_operation_busy" && "$failed_stage" != "artifact_upload_failed" && "$failed_stage" != "artifact_pull_failed" ]]; then
     exit "$status"
   fi
   echo "backend deployment retry $retry after $failed_stage/$recovery_error" >&2

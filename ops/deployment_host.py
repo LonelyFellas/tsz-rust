@@ -15,13 +15,16 @@ import shutil
 import signal
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 
 import deployment_auth_smoke as auth
 import deployment_business_smoke as business
@@ -38,6 +41,7 @@ MANIFEST = Path("/opt/tsz-deploy-manifests/api.json")
 TRANSACTIONS = ROOT / "deployment-transactions"
 OPERATION_FDS = []
 STALE_TRANSACTION_SECONDS = 15 * 60
+MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 
 
 class HostError(Exception):
@@ -825,15 +829,85 @@ def observe_unlocked_acceptance(plan):
     return accepted_identity(plan, m, state(plan))
 
 
+def upload_state(plan):
+    value = state(plan)
+    require(not value["mutation_started"]
+            and value["completed"] in (["backup"], ["backup", "upload"]), "upload_out_of_order")
+    return value
+
+
+def write_incoming(plan, source):
+    output = transaction(plan) / "incoming"
+    output.unlink(missing_ok=True)
+    with output.open("xb") as destination:
+        shutil.copyfileobj(source, destination)
+        destination.flush()
+        os.fsync(destination.fileno())
+    require(sha(output) == plan["artifact_sha256"], "uploaded_digest_mismatch")
+    output.chmod(0o755)
+
+
+def complete_upload(plan, value):
+    value["completed"].append("upload")
+    value["pending"] = None
+    atomic(state_path(plan), value)
+
+
+def pull_artifact(plan, download):
+    url = urllib.parse.urlsplit(download["url"])
+    require(url.scheme == "https" and re.fullmatch(r"productionresultssa[0-9]+\.blob\.core\.windows\.net",
+                                                   url.netloc) and url.path and url.query and not url.fragment,
+            "artifact_pull_url_invalid")
+    archive_bytes, binary_bytes = download["archive_bytes"], download["binary_bytes"]
+    require(all(type(size) is int and 0 < size <= MAX_ARTIFACT_BYTES for size in (archive_bytes, binary_bytes))
+            and re.fullmatch(r"[0-9a-f]{64}", download["archive_sha256"]), "artifact_pull_metadata_invalid")
+    with operation(plan):
+        value = upload_state(plan)
+        output = transaction(plan) / "incoming"
+        if value["completed"] == ["backup", "upload"]:
+            require(output.is_file() and sha(output) == plan["artifact_sha256"], "uploaded_digest_mismatch")
+            return {"done": "upload"}
+        value["pending"] = "upload"
+        atomic(state_path(plan), value)
+        try:
+            with tempfile.TemporaryFile(dir=output.parent) as archive:
+                digest = hashlib.sha256()
+                remaining = archive_bytes
+                try:
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), auth.NoRedirect())
+                    with opener.open(download["url"], timeout=20) as response:
+                        require(response.status == 200, "artifact_pull_failed")
+                        while block := response.read(min(1048576, remaining + 1)):
+                            remaining -= len(block)
+                            require(remaining >= 0, "artifact_pull_size_mismatch")
+                            digest.update(block)
+                            archive.write(block)
+                except (OSError, http.client.HTTPException):
+                    raise HostError("artifact_pull_failed") from None
+                require(remaining == 0, "artifact_pull_size_mismatch")
+                require(digest.hexdigest() == download["archive_sha256"], "artifact_pull_digest_mismatch")
+                with zipfile.ZipFile(archive) as bundle:
+                    entries = bundle.infolist()
+                    require(len(entries) == 3 and {entry.filename for entry in entries}
+                            == {"tsz-rust", "tsz-rust.manifest.json", "tsz-rust.sha256"},
+                            "artifact_pull_archive_invalid")
+                    binary = bundle.getinfo("tsz-rust")
+                    require(binary.file_size == binary_bytes
+                            and not stat.S_ISLNK(binary.external_attr >> 16), "artifact_pull_archive_invalid")
+                    with bundle.open(binary) as source:
+                        write_incoming(plan, source)
+        except BaseException:
+            output.unlink(missing_ok=True)
+            raise
+        # Once the completion record may be visible, keep its verified binary.
+        complete_upload(plan, value)
+    return {"done": "upload"}
+
+
 def receive(plan, source, compression=None):
     try:
         with operation(plan):
-            value = state(plan)
-            require(
-                not value["mutation_started"]
-                and value["completed"] in (["backup"], ["backup", "upload"]),
-                "upload_out_of_order",
-            )
+            value = upload_state(plan)
             if value["completed"] == ["backup", "upload"]:
                 while source.read(1048576):
                     pass
@@ -841,20 +915,10 @@ def receive(plan, source, compression=None):
                 return
             value["pending"] = "upload"
             atomic(state_path(plan), value)
-            output = transaction(plan) / "incoming"
-            output.unlink(missing_ok=True)
-            input_stream = gzip.GzipFile(fileobj=source, mode="rb") if compression == "gzip" else source
-            with output.open("xb") as destination:
-                shutil.copyfileobj(input_stream, destination)
-                destination.flush()
-                os.fsync(destination.fileno())
-            if input_stream is not source:
-                input_stream.close()
-            output.chmod(0o755)
-            require(sha(output) == plan["artifact_sha256"], "uploaded_digest_mismatch")
-            value["completed"].append("upload")
-            value["pending"] = None
-            atomic(state_path(plan), value)
+            stream = gzip.GzipFile(fileobj=source, mode="rb") if compression == "gzip" else contextlib.nullcontext(source)
+            with stream as input_stream:
+                write_incoming(plan, input_stream)
+            complete_upload(plan, value)
         print(json.dumps({"ok": True}))
     except Exception as error:
         print(json.dumps({"ok": False, "stage": str(error) if isinstance(error, HostError) else type(error).__name__}))
@@ -863,8 +927,15 @@ def receive(plan, source, compression=None):
 
 def entry(payload):
     try:
-        result = dispatch(payload["action"], payload["plan"], payload.get("credentials"))
+        if payload["action"] == "pull_artifact":
+            def timed_out(signum, frame):
+                raise HostError("artifact_pull_failed")
+
+            signal.signal(signal.SIGTERM, timed_out)
+            result = pull_artifact(payload["plan"], payload["download"])
+        else:
+            result = dispatch(payload["action"], payload["plan"], payload.get("credentials"))
         print(json.dumps({"ok": True, "result": result}))
-    except (HostError, auth.SmokeFailure, manifests.ManifestError, OSError, ValueError, KeyError) as error:
+    except (HostError, auth.SmokeFailure, manifests.ManifestError, OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
         stage = str(error) if isinstance(error, (HostError, auth.SmokeFailure)) else type(error).__name__
         print(json.dumps({"ok": False, "stage": stage}))

@@ -96,7 +96,7 @@ jobs:
 
       - name: Deploy verified CI artifact
         if: steps.candidate.outputs.current == 'true'
-        run: bash ops/run_deploy_ci.sh "$RUNNER_TEMP/backend-deploy"
+        run: bash ops/run_deploy_ci.sh "$RUNNER_TEMP/backend-deploy" --pull-from-github
 
       - name: Close deployment SSH connection
         if: ${{ always() }}
