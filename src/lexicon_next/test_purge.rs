@@ -183,6 +183,35 @@ async fn ensure_no_external_references(
     Ok(())
 }
 
+/// Called under the list-writer lock, which also serializes the first purge transaction.
+/// The committed asset marker survives storage failures and blocks lifecycle changes on retry.
+pub(super) async fn ensure_lifecycle_available(
+    conn: &mut PgConnection,
+    entry_id: Uuid,
+) -> Result<(), AppError> {
+    let purging: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM lexicon_next.test_resource_entries WHERE entry_id=$1)
+            AND EXISTS (
+                SELECT 1 FROM lexicon.audio_assets a
+                WHERE a.reclamation_started_at IS NOT NULL AND a.id IN (
+                    SELECT asset_id FROM lexicon_next.audio_asset_references WHERE entry_id=$1
+                    UNION ALL
+                    SELECT r.asset_id FROM lexicon_next.publications p
+                    JOIN lexicon_next.publication_audio_references r ON r.publication_id=p.id
+                    WHERE p.entry_id=$1
+                )
+            )",
+    )
+    .bind(entry_id)
+    .fetch_one(conn)
+    .await
+    .map_err(AppError::internal)?;
+    if purging {
+        return Err(conflict("测试词条正在清理音频，请重试原清理请求"));
+    }
+    Ok(())
+}
+
 async fn prepare(
     conn: &mut PgConnection,
     run: &str,
