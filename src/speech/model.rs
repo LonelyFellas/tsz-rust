@@ -388,6 +388,7 @@ pub struct SynthesisRequest {
     content: RichTextV2,
     normalized_content: Vec<u8>,
     raw_ssml: Option<String>,
+    grammar: bool,
 }
 
 impl SynthesisRequest {
@@ -451,6 +452,7 @@ impl SynthesisRequest {
             content,
             normalized_content,
             raw_ssml: None,
+            grammar: false,
         })
     }
 
@@ -461,6 +463,15 @@ impl SynthesisRequest {
 
     pub(crate) fn manual_ssml(&self) -> Option<&str> {
         self.raw_ssml.as_deref()
+    }
+
+    pub(crate) fn with_grammar(mut self, grammar: bool) -> Self {
+        self.grammar = grammar && self.content.text.chars().any(is_grammar_parenthesis);
+        self
+    }
+
+    pub(crate) fn omits_parenthesis(&self, character: char) -> bool {
+        self.grammar && is_grammar_parenthesis(character)
     }
 
     pub fn fingerprint(&self) -> SynthesisFingerprint {
@@ -485,6 +496,9 @@ impl SynthesisRequest {
         encoder.field(self.options.pitch_semitones.to_string().as_bytes());
         encoder.field(self.options.output_format.azure_value().as_bytes());
         encoder.field(&self.normalized_content);
+        if self.grammar {
+            encoder.field(b"grammar-without-parentheses");
+        }
         if let Some(raw) = &self.raw_ssml {
             encoder.field(b"manual-ssml-v1");
             encoder.field(raw.as_bytes());
@@ -519,6 +533,10 @@ impl SynthesisRequest {
     pub fn content(&self) -> &RichTextV2 {
         &self.content
     }
+}
+
+pub(super) fn is_grammar_parenthesis(character: char) -> bool {
+    matches!(character, '(' | ')' | '（' | '）')
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

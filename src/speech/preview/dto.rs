@@ -10,6 +10,9 @@ pub struct CreatePreviewRequest {
     #[serde(default)]
     pub output_format: Option<crate::speech::AudioOutputFormat>,
     pub content: RichTextV2,
+    /// Omit round parentheses from the spoken text of a grammar structure.
+    #[serde(default)]
+    pub grammar: bool,
     pub voice_alias: String,
     #[serde(default)]
     #[schema(minimum = 0.01, maximum = 2)]

@@ -51,9 +51,21 @@ pub struct AudioRequirement {
     #[schema(required = true)]
     pub asset_id: Option<Uuid>,
     #[schema(required = true)]
+    #[serde(serialize_with = "serialize_review_source")]
     pub source: Option<GeneratedSpeechSource>,
     #[schema(required = true)]
     pub issue: Option<RequirementIssue>,
+}
+
+fn serialize_review_source<S: serde::Serializer>(
+    source: &Option<GeneratedSpeechSource>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    // Publication review responses also serve clients that predate grammar synthesis.
+    if let Some(source) = source.as_ref().filter(|source| source.is_grammar()) {
+        return Some(source.clone().without_grammar()).serialize(serializer);
+    }
+    source.serialize(serializer)
 }
 
 impl AudioRequirement {

@@ -205,7 +205,9 @@ pub(crate) async fn prepare_request(
     })
     .map_err(|_| invalid())?
     .with_output_format(setting.output_format.unwrap_or_default());
-    let request = SynthesisRequest::new(voice, options, content).map_err(|_| invalid())?;
+    let request = SynthesisRequest::new(voice, options, content)
+        .map_err(|_| invalid())?
+        .with_grammar(source.is_grammar());
     Ok((request, row.get("provider_version")))
 }
 
@@ -459,9 +461,11 @@ impl GeneratedAudioService {
         })?;
         let format = input.setting.output_format.unwrap_or_default();
         let options = options.with_output_format(format);
-        let request = SynthesisRequest::new(voice.voice, options, content).map_err(|error| {
-            crate::speech::model::model_error(ErrorCode::InvalidSpeechPreview, error)
-        })?;
+        let request = SynthesisRequest::new(voice.voice, options, content)
+            .map_err(|error| {
+                crate::speech::model::model_error(ErrorCode::InvalidSpeechPreview, error)
+            })?
+            .with_grammar(input.source.is_grammar());
         let effect_hash = effect_hash(&request, &voice.provider_version)?;
         let provider = self.provider.clone().ok_or_else(unavailable)?;
         if provider.provider_name() != request.voice().provider() {
@@ -1056,17 +1060,18 @@ pub(crate) async fn validate_bindings_with_forms(
         let native_locale = reference.setting.locale.ok_or_else(invalid)?;
         let locale = native_locale.as_str();
         if let Some(effect) = row.get::<Option<Vec<u8>>, _>("effect_hash") {
-            if row.get::<String, _>("state") != "ready"
-                || effect
-                    != prepare_effect_with_forms(
-                        conn,
-                        &reference.source,
-                        &reference.setting,
-                        current,
-                        batch,
-                    )
-                    .await?
-            {
+            let (request, version) =
+                prepare_request(conn, &reference.source, &reference.setting, current, batch)
+                    .await?;
+            // Previously bound grammar assets remain savable until the editor replaces them.
+            let matches = match effect_hash(&request, &version).map(|expected| effect == expected) {
+                Ok(true) => true,
+                _ if reference.source.is_grammar() => {
+                    effect == effect_hash(&request.with_grammar(false), &version)?
+                }
+                result => result?,
+            };
+            if row.get::<String, _>("state") != "ready" || !matches {
                 return Err(AppError::bad_request(
                     ErrorCode::InvalidSpeechPreview,
                     "正式音频与当前声音效果不一致，请重新生成或移除音频",
@@ -1108,8 +1113,15 @@ pub(crate) async fn validate_bindings_with_forms(
                 .await?,
         )
         .map_err(AppError::internal)?;
+        let mut expected_source = reference.source.canonical()?;
+        // Assets created before effect hashes were recorded used the unscoped source.
+        if reference.source.is_grammar()
+            && let Some(fields) = expected_source.as_object_mut()
+        {
+            fields.remove("grammar");
+        }
         if row.get::<String, _>("state") != "ready"
-            || row.get::<Value, _>("source") != reference.source.canonical()?
+            || row.get::<Value, _>("source") != expected_source
             || row.get::<Value, _>("voice") != expected_voice
             || row.get::<Value, _>("resolved_content") != resolved
         {

@@ -92,6 +92,7 @@ fn redis_pool() -> deadpool_redis::Pool {
 
 fn request(text: &str) -> CreatePreviewRequest {
     CreatePreviewRequest {
+        grammar: false,
         output_format: None,
         content: RichTextV2 {
             version: 2,
@@ -195,6 +196,31 @@ async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
     let hit = service.create_preview(admin_id, quieter).await.unwrap();
     assert!(matches!(hit.cache_status, PreviewCacheStatus::Hit));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+    let original = service
+        .create_preview(admin_id, request("(be) superior to…"))
+        .await
+        .unwrap();
+    let grammar_request = || CreatePreviewRequest {
+        grammar: true,
+        ..request("(be) superior to…")
+    };
+    let grammar = service
+        .create_preview(admin_id, grammar_request())
+        .await
+        .unwrap();
+    assert!(matches!(
+        grammar.cache_status,
+        PreviewCacheStatus::Generated
+    ));
+    assert_ne!(grammar.content_path, original.content_path);
+    let hit = service
+        .create_preview(admin_id, grammar_request())
+        .await
+        .unwrap();
+    assert!(matches!(hit.cache_status, PreviewCacheStatus::Hit));
+    assert_eq!(hit.content_path, grammar.content_path);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
 }
 
 #[sqlx::test]
