@@ -752,6 +752,10 @@ fn preserve_missing_spelling_rich(
                 }
                 if speech.is_none() {
                     speech.clone_from(stored_speech);
+                } else if let (Some(next), Some(stored)) = (speech, stored_speech)
+                    && next.content_by_accent.is_none()
+                {
+                    next.content_by_accent.clone_from(&stored.content_by_accent);
                 }
             }
         };
@@ -6145,7 +6149,9 @@ fn canonicalize_v3_forms(content: &mut DraftFormsStepContentV3) -> Result<(), Le
                     crate::lexicon::rich_text::canonicalize_spelling(rich);
                 }
                 if let Some(speech) = variant.spelling_speech {
-                    crate::lexicon::rich_text::canonicalize_spelling_speech(&mut speech.content);
+                    for content in speech.contents_mut() {
+                        crate::lexicon::rich_text::canonicalize_spelling_speech(content);
+                    }
                 }
             }
         }
@@ -7089,6 +7095,33 @@ mod tests {
                 .unwrap()
                 .get("spelling_speech")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_forms_save_preserves_accent_overrides_when_spelling_matches() {
+        let mut raw = serde_json::to_value(two_form_content(false)).unwrap();
+        let path = "/pos/0/forms/0/regional_variants/common";
+        let variant = raw.pointer_mut(path).unwrap();
+        let content = json!({"version": 2, "text": variant["spelling"], "annotations": []});
+        variant["spelling_speech"] = json!({
+            "content": content,
+            "content_by_accent": {"uk": content},
+            "voice_profile": {"voices": []}
+        });
+        let stored = serde_json::from_value(raw.clone()).unwrap();
+        raw.pointer_mut(path).unwrap()["spelling_speech"]
+            .as_object_mut()
+            .unwrap()
+            .remove("content_by_accent");
+        let mut proposed = serde_json::from_value(raw).unwrap();
+        preserve_missing_spelling_rich(&mut proposed, &stored);
+        assert_eq!(
+            serde_json::to_value(proposed)
+                .unwrap()
+                .pointer(path)
+                .unwrap()["spelling_speech"]["content_by_accent"]["uk"],
+            content
         );
     }
 

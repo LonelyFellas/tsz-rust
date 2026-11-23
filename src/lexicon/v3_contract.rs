@@ -455,8 +455,17 @@ fn spelling_speech_equal(
                 (&left.voice_id, left.version_id).cmp(&(&right.voice_id, right.version_id))
             });
         }
+        let mut content_by_accent = speech.and_then(|speech| speech.content_by_accent.clone());
+        if let Some(sides) = &mut content_by_accent {
+            for content in [&mut sides.uk, &mut sides.us].into_iter().flatten() {
+                if !crate::lexicon::rich_text::canonicalize_spelling_speech(content) {
+                    return None;
+                }
+            }
+        }
         Some((
             content.annotations,
+            content_by_accent,
             voices,
             speech.and_then(|speech| speech.voice_profile.dubbing.clone()),
             speech
@@ -1217,8 +1226,10 @@ fn validate_variant(
         ));
     }
     if let Some(speech) = spelling_speech {
-        let valid = speech.content.text == spelling
-            && crate::lexicon::rich_text::canonicalize_spelling_speech(&mut speech.content.clone());
+        let valid = speech.clone().contents_mut().all(|content| {
+            content.text == spelling
+                && crate::lexicon::rich_text::canonicalize_spelling_speech(content)
+        });
         if !valid {
             issues.push(issue(
                 V3ValidationIssueCode::SpellingRichTextInvalid,
@@ -2035,6 +2046,25 @@ mod tests {
         };
         let empty = speech(json!([]));
         assert!(spelling_speech_equal(None, Some(&empty)));
+        let overrides = |annotations| {
+            let mut value = serde_json::to_value(&empty).unwrap();
+            value["content"]["text"] = json!("hello there friend");
+            value["content_by_accent"] = json!({
+                "uk": {"version":2,"text":"hello there friend","annotations":annotations}
+            });
+            serde_json::from_value::<crate::lexicon::dto::SpellingSpeechV3>(value).unwrap()
+        };
+        let first = json!({"type":"pause","at":5,"duration_ms":10});
+        let second = json!({"type":"pause","at":11,"duration_ms":500});
+        assert!(spelling_speech_equal(
+            Some(&overrides(json!([first, second]))),
+            Some(&overrides(json!([second, first])))
+        ));
+        assert!(!spelling_speech_equal(
+            Some(&overrides(json!([]))),
+            Some(&empty)
+        ));
+
         let sonia = json!({"voice_id":"sonia","enabled":true,"rate_percent":0});
         let guy = json!({"voice_id":"guy","enabled":false,"rate_percent":10});
         let left = speech(json!([sonia, guy]));

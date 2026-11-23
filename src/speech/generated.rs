@@ -890,10 +890,11 @@ pub(crate) async fn validate_bindings_with_forms(
             .is_some_and(|accent| active_sources.contains(&(reference.path.as_str(), accent)))
     };
     for requirement in &requirements {
-        let (Some(profile), Some(source)) = (&requirement.profile, &requirement.source) else {
+        let Some(profile) = &requirement.profile else {
             continue;
         };
-        if profile.dubbing.is_none()
+        if requirement.source.is_none()
+            || profile.dubbing.is_none()
             || !checked.insert((requirement.source_path.clone(), requirement.source_dialect))
         {
             continue;
@@ -906,7 +907,15 @@ pub(crate) async fn validate_bindings_with_forms(
                 _ => "common",
             }),
         ) {
-            let locale = if accent == "gb" { "en-GB" } else { "en-US" };
+            let locale = if accent == "gb" {
+                super::locale::EnglishLocale::Uk
+            } else {
+                super::locale::EnglishLocale::Us
+            };
+            let source = requirement
+                .profile_source(locale.accent_group())
+                .ok_or_else(invalid)?;
+            let locale = locale.as_str();
             let content = source
                 .resolve_with_forms(conn, locale, current, batch)
                 .await?;

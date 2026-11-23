@@ -3,6 +3,83 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[test]
+fn spelling_references_use_the_voice_accent_and_respect_explicit_empty_pauses() {
+    let rich = |duration_ms| {
+        json!({
+            "version": 2, "text": "give up", "annotations": [
+                {"type": "pause", "at": 4, "duration_ms": duration_ms}
+            ]
+        })
+    };
+    let voice = |locale| {
+        json!({
+            "voice_id": "voice", "locale": locale, "enabled": true,
+            "rate_percent": 0, "audio_asset_id": Uuid::now_v7()
+        })
+    };
+    let owner = json!({
+        "content": rich(250),
+        "content_by_accent": {"uk": {"version": 2, "text": "give up", "annotations": []}},
+        "voice_profile": {"voices": [voice("en-AU"), voice("en-US")]}
+    });
+    let refs = references(&owner).unwrap();
+    assert_eq!(
+        serde_json::to_value(&refs[0].source).unwrap()["content"]["annotations"],
+        json!([])
+    );
+    assert_eq!(
+        serde_json::to_value(&refs[1].source).unwrap()["content"],
+        rich(250)
+    );
+}
+
+#[sqlx::test]
+async fn shared_spelling_validates_each_accent_with_its_own_content(pool: sqlx::PgPool) {
+    super::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let flash_alias: String = sqlx::query_scalar(
+        "SELECT alias FROM speech.voices WHERE provider_voice_id='en-US-Tiana:DragonHDFlashLatestNeural'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let voice = |alias: &str, locale| json!({"voice_id":alias,"version_id":Uuid::now_v7(),"locale":locale,"enabled":true,"rate_percent":0});
+    let content = json!({
+        "version":2,"text":"give up","annotations":[{"type":"pause","at":4,"duration_ms":500}]
+    });
+    let plain = json!({"version":2,"text":"give up","annotations":[]});
+    let mut value = json!({"forms":{"contents":[{
+        "id":Uuid::now_v7(),
+        "regional_variants":{"common":{
+            "id":Uuid::now_v7(),"dialect":"common","spelling":"give up",
+            "pronunciations":[{"id":Uuid::now_v7(),"synthesis":{"use_spelling":true}}],
+            "spelling_speech":{
+                "content":content,
+                "content_by_accent":{"us":plain},
+                "voice_profile":{
+                    "dubbing":{"area":"word","uk":{"mode":"local"},"us":{"mode":"local"}},
+                    "voices":[voice("en-gb-sonianeural","en-GB"),voice(&flash_alias,"en-US")]
+                }
+            }
+        }}
+    }]}});
+    let mut conn = pool.acquire().await.unwrap();
+    super::generated::validate_bindings(&mut conn, &value)
+        .await
+        .expect("Flash should see the explicitly empty US content");
+    value["forms"]["contents"][0]["regional_variants"]["common"]["spelling_speech"]["content_by_accent"] =
+        json!({"uk":plain,"us":content});
+    assert!(
+        super::generated::validate_bindings(&mut conn, &value)
+            .await
+            .is_err(),
+        "Flash must reject a pause on its own side"
+    );
+}
+
+#[test]
 fn text_source_paths_preserve_field_priority_and_null_validation() {
     let rich = |text| json!({"version":2,"text":text,"annotations":[]});
     let fields = ["content", "value", "name_en_rich", "dict_phonetic_rich"];

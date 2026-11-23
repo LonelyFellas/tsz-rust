@@ -28,6 +28,7 @@ async fn setup(pool: &PgPool) -> (Reviewer, Uuid, AudioRequirement, Arc<dyn Obje
         setting: Some(request.setting.clone()),
         source: Some(request.source.clone()),
         profile: None,
+        profile_sources: None,
         asset_id: None,
         issue: None,
     };

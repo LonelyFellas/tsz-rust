@@ -8,6 +8,7 @@ use crate::lexicon::dto::DraftFormsStepContentV3;
 
 const HEADER: &str = "x-tsz-spelling-markup";
 const SPEECH_HEADER: &str = "x-tsz-spelling-speech";
+const ACCENT_HEADER: &str = "x-tsz-spelling-accent-content";
 
 /// Only project the owned response after the service has preserved canonical data.
 pub(super) fn project_spelling_markup(headers: &HeaderMap, forms: &mut DraftFormsStepContentV3) {
@@ -15,6 +16,9 @@ pub(super) fn project_spelling_markup(headers: &HeaderMap, forms: &mut DraftForm
     let markup = capability.is_some_and(|value| value == "v1");
     let speech = headers
         .get(SPEECH_HEADER)
+        .is_some_and(|value| value == "v1");
+    let accent_content = headers
+        .get(ACCENT_HEADER)
         .is_some_and(|value| value == "v1");
     let phoneme_speech = headers
         .get("x-tsz-phoneme-speech")
@@ -42,6 +46,8 @@ pub(super) fn project_spelling_markup(headers: &HeaderMap, forms: &mut DraftForm
             }
             if !speech {
                 *v.spelling_speech = None;
+            } else if !accent_content && let Some(speech) = v.spelling_speech {
+                speech.content_by_accent = None;
             }
         }
     }
@@ -58,7 +64,7 @@ pub(super) fn spelling_markup_response<T: Serialize>(
     response.headers_mut().insert(
         header::VARY,
         axum::http::HeaderValue::from_static(
-            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment, x-tsz-multiple-spellings, x-tsz-voice-versions, x-tsz-voice-locales, x-tsz-voice-models",
+            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-spelling-accent-content, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment, x-tsz-multiple-spellings, x-tsz-voice-versions, x-tsz-voice-locales, x-tsz-voice-models",
         ),
     );
     Ok(response)
@@ -99,17 +105,25 @@ mod tests {
                 "id":Uuid::now_v7(),"form_type":"base","regional_variants":{"mode":"common","common":{
                     "id":Uuid::now_v7(),"dialect":"common","spelling":"give up","origin":"manual","pronunciations":[],
                     "spelling_rich":{"version":2,"text":"give up","annotations":[{"type":"italic","start":0,"end":4}]},
-                    "spelling_speech":{"content":{"version":2,"text":"give up","annotations":[{"type":"pause","at":4,"duration_ms":500}]},"voice_profile":{"voices":[]}}
+                    "spelling_speech":{"content":{"version":2,"text":"give up","annotations":[{"type":"pause","at":4,"duration_ms":500}]},"content_by_accent":{"uk":{"version":2,"text":"give up","annotations":[]}},"voice_profile":{"voices":[]}}
                 }}
             }]
         }]})).unwrap();
         let path = "/pos/0/forms/0/regional_variants/common";
         let canonical = serde_json::to_value(&stored).unwrap();
-        for capability in [None, Some("unknown"), Some("v1")] {
+        for (capability, accent) in [
+            (None, false),
+            (Some("unknown"), false),
+            (Some("v1"), false),
+            (Some("v1"), true),
+        ] {
             let mut headers = HeaderMap::new();
             headers.insert(HEADER, "v1".parse().unwrap());
             if let Some(capability) = capability {
                 headers.insert(SPEECH_HEADER, capability.parse().unwrap());
+            }
+            if accent {
+                headers.insert(ACCENT_HEADER, "v1".parse().unwrap());
             }
             let mut projected = stored.clone();
             project_spelling_markup(&headers, &mut projected);
@@ -121,6 +135,12 @@ mod tests {
                     .get("spelling_speech")
                     .is_some(),
                 capability == Some("v1")
+            );
+            assert_eq!(
+                value.pointer(&format!("{path}/spelling_speech/content_by_accent")),
+                accent.then(
+                    || &canonical.pointer(path).unwrap()["spelling_speech"]["content_by_accent"]
+                )
             );
             assert_eq!(
                 value.pointer(path).unwrap()["spelling_rich"],
