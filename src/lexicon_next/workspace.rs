@@ -458,6 +458,12 @@ pub async fn command(
         }
         if matches!(
             input.action,
+            NextListAction::Restore | NextListAction::Delete
+        ) {
+            super::test_purge::ensure_lifecycle_available(&mut tx, target.entry_id).await?;
+        }
+        if matches!(
+            input.action,
             NextListAction::Archive | NextListAction::Delete
         ) {
             super::relations::ensure_not_referenced(&mut tx, target.entry_id, &[]).await?;

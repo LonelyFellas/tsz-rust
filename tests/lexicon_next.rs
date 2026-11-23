@@ -5523,3 +5523,54 @@ mod relations;
 
 #[path = "lexicon_next/publications.rs"]
 mod publications;
+
+#[sqlx::test]
+async fn archived_fixture_cannot_be_restored_or_deleted_during_audio_purge(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    sqlx::query("UPDATE admins SET role='super_admin' WHERE id=$1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let id: Uuid = serde_json::from_value(entry["id"].clone()).unwrap();
+    sqlx::query("INSERT INTO lexicon_next.test_resource_entries(run_id,entry_id,actor_id) VALUES('purge-regression',$1,$2)")
+        .bind(id).bind(actor).execute(&pool).await.unwrap();
+    let command = |action, revision| {
+        call(
+            &state,
+            Some(actor),
+            "POST",
+            "/workspace/commands",
+            list_command(action, &[(&entry, revision)]),
+        )
+    };
+    assert_eq!(command("archive", 1).await.0, StatusCode::OK);
+    // This committed marker spans both the storage operation and any retry gap.
+    let asset = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id,reclamation_started_at) VALUES($1,$2,$3,'audio/mpeg',3,'en-GB','female','fixture.mp3',$4,now())")
+        .bind(asset).bind(format!("temporary-tests/purge-regression/audio/{asset}"))
+        .bind(format!("fixture-source/{asset}")).bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO lexicon_next.audio_asset_references(entry_id,asset_id) VALUES($1,$2)")
+        .bind(id)
+        .bind(asset)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for action in ["restore", "delete"] {
+        assert_eq!(command(action, 2).await.0, StatusCode::CONFLICT);
+    }
+    // The published snapshot can retain audio after it disappears from the draft.
+    sqlx::query("DELETE FROM lexicon_next.audio_asset_references WHERE entry_id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let publication = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon_next.publications(id,entry_id,revision,lifecycle_revision,published_by_admin_id,snapshot) VALUES($1,$2,1,1,$3,'{}')")
+        .bind(publication).bind(id).bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO lexicon_next.publication_audio_references(publication_id,asset_id,resource_id) VALUES($1,$2,$3)")
+        .bind(publication).bind(asset).bind(id).execute(&pool).await.unwrap();
+    assert_eq!(command("restore", 2).await.0, StatusCode::CONFLICT);
+}

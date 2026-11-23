@@ -1,5 +1,5 @@
 //! Opt-in online acceptance resources. Ordinary requests retain their original storage roots.
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use axum::http::HeaderMap;
 use sqlx::PgConnection;
@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::{
     error::{AppError, ErrorCode},
     platform::storage::{
-        ObjectStorageConfig, OssAdapterConfig, SecretString, StorageRegistry, valid_test_run,
+        ObjectKey, ObjectStorageConfig, OssAdapterConfig, SecretString, StorageRegistry,
+        test_key_parts, valid_test_run,
     },
     state::AppState,
 };
@@ -112,12 +113,72 @@ impl TestResourcesConfig {
         }))
     }
 
+    pub(crate) async fn purge_audio<'a>(
+        &self,
+        run: &str,
+        keys: impl Iterator<Item = &'a ObjectKey>,
+    ) -> Result<(), AppError> {
+        let unavailable =
+            || AppError::unavailable(ErrorCode::ServiceUnavailable, "audio object cleanup failed");
+        if self.spaces.policy("audio").is_none() {
+            return Err(unavailable());
+        }
+        let operator = self.adapter.operator().map_err(|_| unavailable())?;
+        for key in keys {
+            let Some((owner, "audio", inner)) = test_key_parts(key.as_str()) else {
+                return Err(unavailable());
+            };
+            if owner != run {
+                return Err(unavailable());
+            }
+            let physical_key = format!("{run}/audio/{inner}");
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                purge_object_versions(&operator, &physical_key),
+            )
+            .await
+            .map_err(|_| unavailable())?
+            .map_err(|_| unavailable())?;
+        }
+        Ok(())
+    }
+
     pub fn registry(
         &self,
         run: Option<&str>,
     ) -> Result<StorageRegistry, crate::platform::storage::StorageError> {
         self.spaces.build_test_routed_registry(&self.adapter, run)
     }
+}
+
+async fn purge_object_versions(operator: &opendal::Operator, key: &str) -> opendal::Result<()> {
+    // OSS lists by prefix. A longer object key sharing that prefix belongs to a different asset.
+    let list = || {
+        operator
+            .list_with(key)
+            .versions(true)
+            .deleted(true)
+            .recursive(true)
+    };
+    for entry in list().await? {
+        if entry.path() == key {
+            let version = entry
+                .metadata()
+                .version()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    opendal::Error::new(opendal::ErrorKind::Unexpected, "missing object version")
+                })?;
+            operator.delete_with(key).version(version).await?;
+        }
+    }
+    if list().await?.iter().any(|entry| entry.path() == key) {
+        return Err(opendal::Error::new(
+            opendal::ErrorKind::Unexpected,
+            "object versions remain",
+        ));
+    }
+    Ok(())
 }
 
 /// Header validation occurs after the handler's usual realm authentication; it never grants business permissions.
@@ -205,6 +266,173 @@ mod tests {
         .collect::<Vec<_>>();
         pairs.push(("TEST_RESOURCES_ADMIN_IDS".into(), actor.to_string()));
         (pairs, storage, actor)
+    }
+
+    #[tokio::test]
+    async fn purge_versions_removes_only_the_exact_key_and_verifies_absence() {
+        use axum::{
+            Router,
+            extract::State,
+            http::{Method, StatusCode, Uri},
+        };
+        use opendal::{Operator, services::Oss};
+        use std::sync::Mutex;
+
+        // The second key shares the requested prefix and must survive the cleanup.
+        struct Inventory {
+            versions: Vec<(&'static str, &'static str, &'static str)>,
+            retain_deleted: bool,
+        }
+        async fn respond(
+            State(state): State<Arc<Mutex<Inventory>>>,
+            method: Method,
+            uri: Uri,
+        ) -> (StatusCode, String) {
+            let mut inventory = state.lock().unwrap();
+            if method == Method::GET {
+                assert!(
+                    uri.query()
+                        .unwrap()
+                        .split('&')
+                        .any(|param| param.trim_end_matches('=') == "versions")
+                );
+                let entries = inventory.versions.iter().map(|(key, id, kind)| {
+                    format!("<{kind}><Key>{key}</Key><VersionId>{id}</VersionId><IsLatest>false</IsLatest><Size>2</Size><LastModified>2026-11-22T00:00:00Z</LastModified></{kind}>")
+                }).collect::<String>();
+                let body = format!(
+                    "<ListVersionsResult><IsTruncated>false</IsTruncated>{entries}</ListVersionsResult>"
+                );
+                return (StatusCode::OK, body);
+            }
+            assert_eq!(method, Method::DELETE);
+            let version_id = uri.query().unwrap().strip_prefix("versionId=").unwrap();
+            if !inventory.retain_deleted {
+                let path = uri.path().trim_start_matches('/');
+                inventory
+                    .versions
+                    .retain(|(key, id, _)| *key != path || *id != version_id);
+            }
+            (StatusCode::NO_CONTENT, String::new())
+        }
+        let inventory = Arc::new(Mutex::new(Inventory {
+            versions: vec![
+                ("clip", "v1", "Version"),
+                ("clip", "v2", "Version"),
+                ("clip", "marker", "DeleteMarker"),
+                ("clip-other", "keep", "Version"),
+            ],
+            retain_deleted: true,
+        }));
+        let server = Router::new()
+            .fallback(respond)
+            .with_state(inventory.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        opendal::install_default();
+        let operator = Operator::new(
+            Oss::default()
+                .bucket("fixture")
+                .endpoint(&endpoint)
+                .addressing_style("cname")
+                .access_key_id("fixture")
+                .access_key_secret("fixture"),
+        )
+        .unwrap();
+        assert!(purge_object_versions(&operator, "clip").await.is_err());
+        inventory.lock().unwrap().retain_deleted = false;
+        purge_object_versions(&operator, "clip").await.unwrap();
+        assert_eq!(
+            inventory.lock().unwrap().versions.as_slice(),
+            &[("clip-other", "keep", "Version")]
+        );
+        server.abort();
+    }
+
+    #[sqlx::test]
+    async fn concurrent_purge_returns_one_receipt_and_cleans_only_exclusive_commands(
+        pool: sqlx::PgPool,
+    ) {
+        use axum::{body::Body, http::Request};
+        use http_body_util::BodyExt;
+        use serde_json::{Value, json};
+        use tower::ServiceExt;
+
+        let (pairs, storage, actor) = fixture();
+        let mut state = AppState::for_test(pool.clone());
+        state.test_resource_purge_enabled = true;
+        state.test_resources = TestResourcesConfig::from_pairs(&pairs, &storage)
+            .unwrap()
+            .map(Arc::new);
+        sqlx::query("INSERT INTO admins(id,phone,display_name,password_hash,role,must_change_password) VALUES($1,'purge-test','Test','unused','super_admin',false)")
+            .bind(actor).execute(&pool).await.unwrap();
+        let token = state
+            .admin_token_manager
+            .generate(actor, "super_admin")
+            .unwrap();
+        let run = "purge-regression";
+        let call = |path: &'static str, body: Value| {
+            let request = Request::post(format!("/api/v1/admin/lexicon-next/{path}"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .header(HEADER, run)
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let router = crate::router(state.clone());
+            async move {
+                let response = router.oneshot(request).await.unwrap();
+                let status = response.status();
+                let result: Value = serde_json::from_slice(
+                    &response.into_body().collect().await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                (status, result)
+            }
+        };
+        let mut entries = Vec::new();
+        for word in ["alpha", "bravo"] {
+            let (status, entry) = call(
+                "entries",
+                json!({"target_language":"en","kind":"word","headword":word}),
+            )
+            .await;
+            assert!(status.is_success(), "{entry}");
+            entries.push(entry["id"].clone());
+        }
+        let command = |action, ids: &[Value], lifecycle| {
+            json!({"action":action,"request_id":Uuid::now_v7(),
+            "items":ids.iter().map(|id| json!({"entry_id":id,"base_revision":1,"base_lifecycle_revision":lifecycle})).collect::<Vec<_>>()})
+        };
+        let mixed = command("archive", &entries, 1);
+        let exclusive = command("archive", &entries[..1], 3);
+        for request in [
+            mixed.clone(),
+            command("restore", &entries[..1], 2),
+            exclusive,
+        ] {
+            let (status, result) = call("workspace/commands", request).await;
+            assert!(status.is_success(), "{result}");
+        }
+        let input = json!({"request_id":Uuid::now_v7(),"entry_ids":&entries[..1]});
+        let (a, b) = tokio::join!(
+            call("test-resources/purge", input.clone()),
+            call("test-resources/purge", input.clone())
+        );
+        let receipts: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT request_id FROM lexicon_next.list_commands WHERE actor_id=$1",
+        )
+        .bind(actor)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (a.0, b.0, receipts.len()),
+            (StatusCode::OK, StatusCode::OK, 1),
+            "{a:?} {b:?} {receipts:?}"
+        );
+        assert_eq!(receipts[0].to_string(), mixed["request_id"]);
+        assert_eq!(a, b);
+        assert_eq!(a, call("test-resources/purge", input).await);
     }
 
     #[tokio::test]

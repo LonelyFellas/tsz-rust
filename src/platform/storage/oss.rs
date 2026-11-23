@@ -120,6 +120,20 @@ impl fmt::Debug for OssAdapterConfig {
 }
 
 impl OssAdapterConfig {
+    pub(crate) fn operator(&self) -> opendal::Result<Operator> {
+        // OpenDAL 0.58 no longer installs an HTTP transport through service construction.
+        // Installation is process-global, idempotent (first-installed wins), and lazy, so do it
+        // at the OSS boundary before any operator can issue a request.
+        opendal::install_default();
+        let builder = Oss::default()
+            .root(&self.root)
+            .bucket(&self.bucket)
+            .endpoint(&self.endpoint)
+            .access_key_id(self.access_key_id.expose())
+            .access_key_secret(self.access_key_secret.expose());
+        Operator::new(builder)
+    }
+
     pub(crate) fn bucket(&self) -> &str {
         &self.bucket
     }
@@ -228,10 +242,9 @@ impl OssAdapter {
         policy: StoragePolicy,
         config: OssAdapterConfig,
     ) -> Result<Arc<dyn ObjectStore>, StorageError> {
-        // OpenDAL 0.58 no longer installs an HTTP transport through service construction.
-        // Installation is process-global, idempotent (first-installed wins), and lazy, so do it
-        // at the OSS boundary before any operator can issue a request.
-        opendal::install_default();
+        let operator = config
+            .operator()
+            .map_err(|error| map_opendal_error(&space, StorageOperation::Configure, None, error))?;
         let presign_write_endpoint = format!(
             "https://{}.{}",
             config.bucket,
@@ -248,14 +261,6 @@ impl OssAdapter {
             .with_region(&config.region)
             .with_signing_version(SigningVersion::V4);
         let presign_write_signer = Signer::new(Context::new(), credential_provider, request_signer);
-        let builder = Oss::default()
-            .root(&config.root)
-            .bucket(&config.bucket)
-            .endpoint(&config.endpoint)
-            .access_key_id(config.access_key_id.expose())
-            .access_key_secret(config.access_key_secret.expose());
-        let operator = Operator::new(builder)
-            .map_err(|error| map_opendal_error(&space, StorageOperation::Configure, None, error))?;
         let backend = Arc::new(Self {
             space: space.clone(),
             operator,
