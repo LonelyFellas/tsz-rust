@@ -69,3 +69,19 @@ impl StorageError {
         }
     }
 }
+
+// Log only categories selected by the caller, never the provider's error text.
+pub(super) fn log_presign_read_failure(
+    stage: &'static str,
+    error_kind: &'static str,
+    signer_kind: Option<reqsign_core::ErrorKind>,
+    retryable: bool,
+) {
+    tracing::error!(
+        event = "storage_presign_read_failed",
+        stage,
+        error_kind,
+        signer_kind = ?signer_kind,
+        retryable,
+    );
+}

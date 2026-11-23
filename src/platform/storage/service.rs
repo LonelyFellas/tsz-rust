@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 
 use super::{
-    error::{BackendErrorKind, StorageError, StorageOperation},
+    error::{BackendErrorKind, StorageError, StorageOperation, log_presign_read_failure},
     model::{ObjectKey, ObjectMetadata, PresignedRequest, PutOptions, StoragePolicy, StorageSpace},
 };
 
@@ -115,6 +115,9 @@ impl StorageService {
         tokio::time::timeout(Duration::from_secs(30), future)
             .await
             .unwrap_or_else(|_| {
+                if operation == StorageOperation::PresignRead {
+                    log_presign_read_failure("timeout", "Timeout", None, true);
+                }
                 Err(StorageError::backend(
                     &self.space,
                     operation,

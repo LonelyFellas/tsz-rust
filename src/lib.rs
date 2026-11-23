@@ -190,6 +190,7 @@ pub fn router(state: AppState) -> Router {
                         request_id = %request_id,
                         method = match req.method().as_str() { "GET" => "GET", "POST" => "POST", "PUT" => "PUT", "PATCH" => "PATCH", "DELETE" => "DELETE", "HEAD" => "HEAD", "OPTIONS" => "OPTIONS", _ => "OTHER" },
                         route = req.extensions().get::<axum::extract::MatchedPath>().map(|path| path.as_str()).unwrap_or("unmatched"),
+                        service_version = option_env!("TSZ_BUILD_SHA").unwrap_or("unknown"),
                     )
                 })
                 .on_response(|response: &axum::http::Response<_>, latency: StdDuration, _span: &tracing::Span| {
