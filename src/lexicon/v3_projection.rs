@@ -4,7 +4,10 @@
 //! Draft variants with blank spellings are valid incomplete nodes, but do not produce presentation
 //! or searchable surfaces until a spelling is supplied.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::Infallible,
+};
 
 use uuid::Uuid;
 
@@ -14,9 +17,12 @@ use crate::lexicon::{
         WordFormTypeV3, WordHeadwordsV2, WordRegionalVariantsV3,
     },
     normalization::{
-        HEADWORD_NORMALIZATION_VERSION, HeadwordNormalizationError, normalize_headword,
+        HEADWORD_NORMALIZATION_VERSION, HeadwordNormalizationError, NormalizedHeadword,
+        normalize_headword, normalize_text_key,
     },
 };
+
+use crate::platform::text::display_v1;
 
 pub(crate) const NATIVE_PRESENTATION_STRATEGY_VERSION: &str = "surface_summary_v1";
 pub(crate) const EMPTY_PRESENTATION_STRATEGY_VERSION: &str = "short_uuid_v1";
@@ -140,29 +146,51 @@ pub(crate) fn name_variants_from_native_forms(
     forms: &DraftFormsStepContentV3,
     initial_headwords: Option<&WordHeadwordsV2>,
 ) -> Result<Vec<EntryNameVariantV3>, V3ProjectionError> {
+    project_name_variants(forms, initial_headwords, projectable_surface)
+}
+
+pub(crate) fn name_variants_from_saved_forms(
+    forms: &DraftFormsStepContentV3,
+) -> Vec<EntryNameVariantV3> {
+    // V2 drafts can already contain spellings that exceed the V1 limit after
+    // normalization. Display saved text without reapplying input validation.
+    project_name_variants(forms, None, |_, spelling| {
+        let display = display_v1(spelling);
+        Ok::<_, Infallible>((!display.is_empty()).then(|| NormalizedHeadword {
+            key: normalize_text_key(&display),
+            display,
+        }))
+    })
+    .unwrap_or_else(|never| match never {})
+}
+
+fn project_name_variants<E>(
+    forms: &DraftFormsStepContentV3,
+    initial_headwords: Option<&WordHeadwordsV2>,
+    project: impl Fn(Uuid, &str) -> Result<Option<NormalizedHeadword>, E>,
+) -> Result<Vec<EntryNameVariantV3>, E> {
     let mut names = Vec::<EntryNameVariantV3>::new();
     let mut indices = HashMap::<String, usize>::new();
-    let mut push =
-        |variant_id, spelling: &str, dialect: Option<Dialect>| -> Result<(), V3ProjectionError> {
-            let Some(normalized) = projectable_surface(variant_id, spelling)? else {
-                return Ok(());
-            };
-            if let Some(&index) = indices.get(&normalized.key) {
-                let dialects = &mut names[index].dialects;
-                if let Some(dialect) = dialect
-                    && !dialects.contains(&dialect)
-                {
-                    dialects.push(dialect);
-                }
-            } else {
-                indices.insert(normalized.key, names.len());
-                names.push(EntryNameVariantV3 {
-                    text: normalized.display,
-                    dialects: dialect.into_iter().collect(),
-                });
-            }
-            Ok(())
+    let mut push = |variant_id, spelling: &str, dialect: Option<Dialect>| -> Result<(), E> {
+        let Some(normalized) = project(variant_id, spelling)? else {
+            return Ok(());
         };
+        if let Some(&index) = indices.get(&normalized.key) {
+            let dialects = &mut names[index].dialects;
+            if let Some(dialect) = dialect
+                && !dialects.contains(&dialect)
+            {
+                dialects.push(dialect);
+            }
+        } else {
+            indices.insert(normalized.key, names.len());
+            names.push(EntryNameVariantV3 {
+                text: normalized.display,
+                dialects: dialect.into_iter().collect(),
+            });
+        }
+        Ok(())
+    };
     let mut has_current_name = false;
     for pos in &forms.pos {
         for form in &pos.forms {
@@ -358,7 +386,7 @@ fn push_variant_sources(
 fn projectable_surface(
     variant_id: Uuid,
     spelling: &str,
-) -> Result<Option<crate::lexicon::normalization::NormalizedHeadword>, V3ProjectionError> {
+) -> Result<Option<NormalizedHeadword>, V3ProjectionError> {
     if spelling.trim().is_empty() {
         return Ok(None);
     }

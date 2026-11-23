@@ -2038,6 +2038,119 @@ fn form_editor() -> Value {
             }}],"form_groups":[{"id":Uuid::now_v7(),"is_regular":true,"scope":"general","members":[{"id":Uuid::now_v7(),"form_id":form}]}]}]})
 }
 
+async fn workspace_list_with_names(state: &AppState, actor: Uuid) -> Value {
+    let req = Request::builder()
+        .uri(format!("{ROOT}/workspace/entries?headword=center&pos=noun"))
+        .header("x-tsz-next-name-variants", "v1")
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                state.admin_token_manager.generate(actor, "admin").unwrap()
+            ),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = tsz_rust::router(state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+#[sqlx::test]
+async fn workspace_names_use_saved_base_forms_and_deduplicate_shared_spellings(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool);
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut draft = entry["draft"].clone();
+    let mut editor = form_editor();
+    let mut plural = form_editor();
+    plural["contents"][0]["regional_variants"]["uk"]["spelling"] = json!("centres");
+    plural["contents"][0]["regional_variants"]["us"]["spelling"] = json!("centers");
+    plural["pos"][0]["forms"][0]["form_type"] = json!("plural");
+    editor["contents"]
+        .as_array_mut()
+        .unwrap()
+        .push(plural["contents"][0].take());
+    editor["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .push(plural["pos"][0]["forms"][0].take());
+    editor["pos"][0]["form_groups"][0]["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(plural["pos"][0]["form_groups"][0]["members"][0].take());
+    draft["form_editor"] = editor;
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let (_, old_list) = call(
+        &state,
+        Some(actor),
+        "GET",
+        "/workspace/entries?headword=center&pos=noun",
+        Value::Null,
+    )
+    .await;
+    let old_row = &old_list["items"][0];
+    assert_eq!(old_row["id"], entry["id"]);
+    assert!(old_row.get("name_variants").is_none());
+
+    let list = workspace_list_with_names(&state, actor).await;
+    assert_eq!(list["items"][0]["id"], entry["id"]);
+    assert_eq!(
+        list["items"][0]["name_variants"],
+        json!([
+            {"text":"centre","dialects":["uk"]},
+            {"text":"center","dialects":["us"]}
+        ])
+    );
+
+    draft["form_editor"]["contents"][0]["regional_variants"]["uk"]["spelling"] = json!("center");
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let list = workspace_list_with_names(&state, actor).await;
+    assert_eq!(
+        list["items"][0]["name_variants"],
+        json!([{"text":"center","dialects":["uk","us"]}])
+    );
+
+    // A spelling allowed at save time can grow beyond the input limit after NFKC.
+    draft["form_editor"]["contents"][0]["regional_variants"]["uk"]["spelling"] =
+        json!("ﬀ".repeat(101));
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let list = workspace_list_with_names(&state, actor).await;
+    assert_eq!(
+        list["items"][0]["name_variants"],
+        json!([
+            {"text":"ff".repeat(101),"dialects":["uk"]},
+            {"text":"center","dialects":["us"]}
+        ])
+    );
+}
+
 #[sqlx::test]
 async fn v1_forms_editor_round_trips_and_projects_without_legacy_entry_data(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
