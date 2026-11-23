@@ -1,0 +1,97 @@
+extensions:
+  file_storage:
+    directory: /var/lib/signoz-tsz-rust-logs
+    fsync: true
+
+receivers:
+  journald/tsz-rust:
+    units: [tsz-rust.service]
+    grep: http_response|storage_presign_read_failed
+    start_at: end
+    convert_message_bytes: true
+    storage: file_storage
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 128
+    spike_limit_mib: 32
+  transform/request:
+    error_mode: propagate
+    log_statements:
+      - set(log.cache["message"], log.body["MESSAGE"]) where IsMap(log.body)
+      - replace_pattern(log.cache["message"], "\\x1b\\[[0-?]*[ -/]*[@-~]", "") where IsString(log.cache["message"])
+      - >-
+        merge_maps(log.cache, ExtractPatterns(log.cache["message"],
+        "http\\.request\\{request_id=(?P<request_id>[0-9a-fA-F-]{36}) method=\"(?P<method>[A-Z]+)\" route=\"(?P<route>/[A-Za-z0-9_./{}:*-]*|unmatched)\"(?: service_version=\"(?P<version>[0-9a-f]{40}|unknown)\")?\\}: "),
+        "upsert") where IsString(log.cache["message"])
+      - >-
+        merge_maps(log.cache, ExtractPatterns(log.cache["message"],
+        "\\}: tsz_rust: event=\"http_response\" status=(?P<status>[1-5][0-9]{2}) elapsed_ms=(?P<elapsed>[0-9]+)$"),
+        "upsert") where IsString(log.cache["message"])
+      - >-
+        merge_maps(log.cache, ExtractPatterns(log.cache["message"],
+        "\\}: tsz_rust::platform::storage::error: event=\"(?P<diagnostic>storage_presign_read_failed)\" stage=\"(?P<stage>oss_presign|oss_request|oss_sign|oss_signed_response|timeout)\" error_kind=\"(?P<kind>[A-Za-z]+)\" signer_kind=(?:Some\\((?P<signer_kind>[A-Za-z]+)\\)|None) retryable=(?P<retryable>true|false)$"),
+        "upsert") where IsString(log.cache["message"])
+      - keep_keys(log.attributes, [])
+      - set(log.attributes["request_id"], log.cache["request_id"]) where log.cache["request_id"] != nil
+      - set(log.attributes["http.request.method"], log.cache["method"]) where log.cache["request_id"] != nil
+      - set(log.attributes["http.route"], log.cache["route"]) where log.cache["route"] != nil and log.cache["route"] != "unmatched"
+      - set(log.attributes["http.response.status_code"], Int(log.cache["status"])) where log.cache["status"] != nil and log.cache["status"] != ""
+      - set(log.attributes["elapsed_ms"], Int(log.cache["elapsed"])) where log.cache["elapsed"] != nil and log.cache["elapsed"] != ""
+      - set(log.attributes["storage.failure.stage"], log.cache["stage"]) where log.cache["diagnostic"] != nil
+      - set(log.attributes["storage.error.kind"], log.cache["kind"]) where log.cache["diagnostic"] != nil
+      - set(log.attributes["storage.signer.error.kind"], log.cache["signer_kind"]) where log.cache["signer_kind"] != nil and log.cache["signer_kind"] != ""
+      - set(log.attributes["storage.retryable"], true) where log.cache["retryable"] == "true"
+      - set(log.attributes["storage.retryable"], false) where log.cache["retryable"] == "false"
+      - set(log.body, "http_response")
+      - set(log.body, "storage_presign_read_failed") where log.cache["diagnostic"] != nil
+      - set(log.severity_number, SEVERITY_NUMBER_INFO)
+      - set(log.severity_text, "INFO")
+      - set(log.severity_number, SEVERITY_NUMBER_WARN) where log.cache["status"] != nil and log.cache["status"] != "" and log.attributes["http.response.status_code"] >= 400 and log.attributes["http.response.status_code"] < 500
+      - set(log.severity_text, "WARN") where log.severity_number == SEVERITY_NUMBER_WARN
+      - set(log.severity_number, SEVERITY_NUMBER_ERROR) where log.attributes["http.response.status_code"] != nil and log.attributes["http.response.status_code"] >= 500
+      - set(log.severity_number, SEVERITY_NUMBER_ERROR) where log.cache["diagnostic"] != nil and log.cache["diagnostic"] != ""
+      - set(log.severity_text, "ERROR") where log.severity_number == SEVERITY_NUMBER_ERROR
+      - keep_keys(resource.attributes, [])
+      - set(resource.attributes["service.name"], "tsz-rust")
+      - set(log.attributes["service.version"], log.cache["version"]) where log.cache["version"] != nil and log.cache["version"] != "" and log.cache["version"] != "unknown"
+      - set(resource.attributes["deployment.environment.name"], "tshb-test")
+  filter/request:
+    error_mode: propagate
+    logs:
+      log_record:
+        - log.attributes["request_id"] == nil
+        - log.attributes["http.response.status_code"] == nil and log.attributes["storage.failure.stage"] == nil
+        - log.time_unix_nano < 1795343712518000974
+
+  groupbyattrs/version:
+    keys: [service.version]
+
+exporters:
+  otlphttp/signoz:
+    logs_endpoint: http://127.0.0.1:18081/v1/logs
+    compression: gzip
+    timeout: 15s
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      num_consumers: 1
+      queue_size: 2048
+
+service:
+  extensions: [file_storage]
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    logs:
+      receivers: [journald/tsz-rust]
+      processors: [memory_limiter, transform/request, filter/request, groupbyattrs/version]
+      exporters: [otlphttp/signoz]
