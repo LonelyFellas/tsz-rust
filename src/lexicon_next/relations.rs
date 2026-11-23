@@ -22,7 +22,7 @@ pub(super) fn validate(draft: &NextDraft, ids: &mut HashSet<Uuid>) -> Result<(),
                 || !crate::lexicon::validation::valid_percent(&row.score)
                 || row.target_word_id.is_some() != row.target_sense_id.is_some()
             {
-                return Err(invalid("拓展词类型、分值或关联义项无效"));
+                return Err(invalid("拓展词类型、分值或关联词义无效"));
             }
             if let Some(word) = row.target_word_id {
                 if word.is_nil()
@@ -78,7 +78,7 @@ pub(super) async fn ensure_not_referenced(
         return Err(AppError::conflict(
             ErrorCode::RevisionConflict,
             None,
-            "词条或义项仍被其他词条的拓展词引用，请先解除关联",
+            "词条或词义仍被其他词条的拓展词引用，请先解除关联",
         ));
     }
     Ok(())
@@ -124,7 +124,7 @@ pub(super) async fn prepare(
                 .bind(&previous.medium_locale).fetch_one(&mut *conn).await.map_err(AppError::internal)?;
             if !valid {
                 return Err(invalid(
-                    "关联词条或义项已不可用，或不属于当前目标语言与媒介语言",
+                    "关联词条或词义已不可用，或不属于当前目标语言与媒介语言",
                 ));
             }
         }

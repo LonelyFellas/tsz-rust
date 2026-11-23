@@ -784,6 +784,47 @@ async fn concurrent_saves_and_permanent_node_identity_are_atomic(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn generation_checks_ownership_revision_and_archive_before_agent_dispatch(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool, &["words.access", "words.create", "words.edit"]).await;
+    let other = admin(&pool, &["words.access", "words.edit"]).await;
+    let entry = create(&state, actor).await;
+    let id = entry["id"].as_str().unwrap();
+    let path = format!("/entries/{id}/generation");
+    let mut input = json!({"run_id":Uuid::new_v4(),"base_revision":1,"snapshot_id":"a".repeat(64),
+        "headword":"tomorrow","target":"en-GB","sections":["senses"],"senses":[],"existing_pos":[],"examples":[]});
+    assert_eq!(
+        call(&state, Some(other), "POST", &path, input.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&state, Some(actor), "POST", &path, input.clone())
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    input["base_revision"] = json!(2);
+    assert_eq!(
+        call(&state, Some(actor), "POST", &path, input.clone())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    sqlx::query("UPDATE lexicon_next.entries SET status='archived' WHERE id=$1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    input["base_revision"] = json!(1);
+    assert_eq!(
+        call(&state, Some(actor), "POST", &path, input).await.0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[sqlx::test]
 async fn current_permissions_and_strict_wire_boundaries(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let outsider = admin(&pool, EDIT).await;

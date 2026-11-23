@@ -250,7 +250,7 @@ async fn assistant_queries_both_sources_and_rules_without_changing_business_data
             {"id":"read","name":"read_lexicon","arguments":json!({"entry_id":entry}).to_string()},
             {"id":"rules","name":"read_filling_rules","arguments":"{}"}
         ])),
-        reply("根据词典和当前未保存内容，建议增加河岸义项。",json!([]))
+        reply("根据词典和当前未保存内容，建议增加河岸词义。",json!([]))
     ]);
     let (status, result) = call(
         &state,
@@ -639,7 +639,7 @@ async fn save_during_answer_delivers_with_notice_instead_of_conflict(pool: PgPoo
     stub.replies
         .lock()
         .await
-        .push_back(reply("建议补充河岸义项。", json!([])));
+        .push_back(reply("建议补充河岸词义。", json!([])));
     let (status, result) = call(
         &state,
         Method::POST,
@@ -651,7 +651,7 @@ async fn save_during_answer_delivers_with_notice_instead_of_conflict(pool: PgPoo
     .await;
     assert_eq!(status, StatusCode::OK, "{result}");
     let answer = result["answer"].as_str().unwrap();
-    assert!(answer.starts_with("建议补充河岸义项。"));
+    assert!(answer.starts_with("建议补充河岸词义。"));
     assert!(answer.contains("回答期间词条已保存过"));
     server.abort();
 }

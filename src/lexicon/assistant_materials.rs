@@ -105,7 +105,7 @@ fn collect_locations(value: &Value, path: &str, label: &str, output: &mut Locati
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
                 let name = match path.rsplit('.').next().unwrap_or("") {
-                    "senses" => "义项",
+                    "senses" => "词义",
                     "forms" => "词形",
                     "form_groups" => "词形组",
                     "grammar_structures" => "语法结构",
@@ -272,7 +272,7 @@ fn compress(mut value: Value, step: WordCreationStep, budget: usize) -> Value {
             .flatten()
         {
             for sense in pos["senses"].as_array_mut().into_iter().flatten() {
-                let label = sense["location"].as_str().unwrap_or("义项").to_owned();
+                let label = sense["location"].as_str().unwrap_or("词义").to_owned();
                 if let Some(examples) = sense["sentences"].as_array_mut()
                     && examples.len() > 1
                 {
@@ -458,7 +458,7 @@ mod tests {
                 .any(|i| i["code"] == "sense_group_required")
         );
         let long = "完整释义".repeat(500);
-        let value = json!({"forms":{"pos":[]},"meanings":{"pos":[{"pos":"noun","senses":[{"location":"名词 · 义项 1","definitions":[{"content":long}]}]}]}});
+        let value = json!({"forms":{"pos":[]},"meanings":{"pos":[{"pos":"noun","senses":[{"location":"名词 · 词义 1","definitions":[{"content":long}]}]}]}});
         let compressed = compress(value, WordCreationStep::Meanings, 500);
         assert!(!compressed.to_string().contains("完整释义"));
         assert!(
@@ -466,7 +466,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|v| v.as_str().unwrap().contains("义项 1"))
+                .any(|v| v.as_str().unwrap().contains("词义 1"))
         );
     }
     #[test]

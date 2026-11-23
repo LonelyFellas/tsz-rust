@@ -227,7 +227,7 @@ pub(super) async fn insert_meanings(
                 .bind(relation.target_word_id)
                 .bind(relation.target_sense_id)
                 .bind(&relation.score)
-                // 待物化的关联词没有目标义项可快照，必须落 NULL 而不是空串——
+                // 待物化的关联词没有目标词义可快照，必须落 NULL 而不是空串——
                 // lexicon_relations_target_shape_check 要求两组字段严格互斥。
                 .bind(
                     relation.target_word_id.and(

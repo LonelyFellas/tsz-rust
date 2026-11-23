@@ -6,6 +6,7 @@ pub mod dialect_pairs;
 pub mod entry_matches;
 mod equivalents;
 mod forms;
+pub mod generation;
 mod grammar;
 pub mod language;
 pub mod list_model;
@@ -71,6 +72,10 @@ pub fn router() -> Router<AppState> {
         .route("/entry-matches", axum::routing::post(match_entries))
         .route("/entries", get(list).post(create))
         .route("/entries/{id}", get(read).put(save))
+        .route(
+            "/entries/{id}/generation",
+            axum::routing::post(generation::advance),
+        )
         .route("/entries/{id}/view", get(view))
         .route("/entries/{id}/publication", get(publications::read))
         .route(
@@ -138,6 +143,12 @@ pub async fn capabilities(
         .await?
         .require("words.access")?;
     let mut capability = language::capabilities();
+    if headers
+        .get("x-tsz-next-generation")
+        .is_some_and(|v| v == "v1")
+    {
+        capability.generation = generation::available(&state).await;
+    }
     if supports_creation_snapshot(&headers) {
         capability.creation_snapshot = Some(true);
     }

@@ -106,7 +106,7 @@ pub(super) async fn prepare(
                     .to_owned();
                 super::language::text(&row.text, 200)?;
                 if !texts.insert((row.locale.clone(), key(&row.text))) {
-                    return Err(invalid("同一义项与媒介语言内的译词不能重复"));
+                    return Err(invalid("同一词义与媒介语言内的译词不能重复"));
                 }
             }
             let Some(metadata) = &mut row.metadata else {

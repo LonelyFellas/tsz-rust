@@ -51,7 +51,7 @@ export TSZ_ADMIN_PASSWORD='your-password'
 | --------- | ------ | ------------------------------------------ |
 | `surface` | 是     | 词面，用于 detect 和默认拼写               |
 | `kind`    | 否     | `word`（默认）或 `phrase`                  |
-| `gloss`   | 二选一 | 只给中文释义时，脚本按默认词性生成一个义项 |
+| `gloss`   | 二选一 | 只给中文释义时，脚本按默认词性生成一个词义 |
 | `pos`     | 二选一 | 词性数组，见下                             |
 
 `pos` 元素：
@@ -62,8 +62,8 @@ export TSZ_ADMIN_PASSWORD='your-password'
 | `spelling`      | 否     | `"harbour"` / `{"common": ...}` / `{"uk": ..., "us": ...}`，默认取 `surface` |
 | `pronunciation` | 否     | 同上形状的音标；不给就按拼写兜一个 `/拼写/` 占位                             |
 | `extra_forms`   | 否     | 派生词形：`{"form_type": "plural", "spelling": ..., "pronunciation": ...}`   |
-| `senses`        | 二选一 | 义项数组，元素可以是字符串（当作 `gloss`）或对象                             |
-| `gloss`         | 二选一 | 没有 `senses` 时的单义项简写                                                 |
+| `senses`        | 二选一 | 词义数组，元素可以是字符串（当作 `gloss`）或对象                             |
+| `gloss`         | 二选一 | 没有 `senses` 时的单词义简写                                                 |
 
 `senses` 元素：`gloss`（必填）、`sub_pos`（默认取该词性目录里的第一个）、`level`（默认 `A1`）、
 `frequency`（默认 `100`）、`grammar`（语法结构文本）、`group`（语义区间，写 `"引申义"` 则中英同名，
