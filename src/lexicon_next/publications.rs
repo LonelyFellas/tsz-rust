@@ -181,7 +181,7 @@ async fn prepare(
             sense.sub_pos.as_deref().unwrap_or(""),
             &parents,
         ) {
-            issues.push(issue(sense.id, "sub_pos", "请选择义项的有效细分词性"));
+            issues.push(issue(sense.id, "sub_pos", "请选择词义的有效细分词性"));
         }
     }
     issues.extend(
@@ -282,7 +282,7 @@ async fn prepare(
                 issues.push(issue(
                     relation.id,
                     "relations",
-                    "关联拓展词或目标义项尚未发布，请先发布目标或改为待关联文本",
+                    "关联拓展词或目标词义尚未发布，请先发布目标或改为待关联文本",
                 ));
             } else {
                 warnings.push(issue(
@@ -523,7 +523,7 @@ fn completeness(id: Uuid, draft: &NextDraft, medium: &str) -> Vec<NextPublicatio
         }
     }
     if draft.senses.is_empty() {
-        issues.push(issue(id, "senses", "请至少添加一个义项"));
+        issues.push(issue(id, "senses", "请至少添加一个词义"));
     }
     let groups = draft.sense_groups.as_deref().unwrap_or_default();
     for group in groups {
@@ -548,7 +548,7 @@ fn completeness(id: Uuid, draft: &NextDraft, medium: &str) -> Vec<NextPublicatio
             ));
         }
         if sense.level.is_none() {
-            issues.push(issue(sense.id, "level", "请选择义项等级"));
+            issues.push(issue(sense.id, "level", "请选择词义等级"));
         }
         if sense
             .sense_group_id

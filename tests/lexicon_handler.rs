@@ -6110,7 +6110,7 @@ async fn v3_aggregate_node_limit_is_enforced_across_forms_and_meanings(pool: PgP
         .map(|index| {
             json!({
                 "id": Uuid::now_v7(),
-                "name_zh": format!("义项 {index}"),
+                "name_zh": format!("词义 {index}"),
                 "name_en": format!("sense {index}")
             })
         })

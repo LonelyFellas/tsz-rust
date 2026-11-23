@@ -185,7 +185,7 @@ pub(super) fn issues(
     for sense in &draft.senses {
         let sub = sense.sub_pos.as_deref().unwrap_or("");
         if !valid_subcategory(sense.part_of_speech.as_deref().unwrap_or(""), sub, parents) {
-            add(sense.id, "sub_pos", "请选择义项的细分词性");
+            add(sense.id, "sub_pos", "请选择词义的细分词性");
         }
         for definition in &sense.definitions {
             if definition.grammar_unbound == Some(true) {
@@ -199,7 +199,7 @@ pub(super) fn issues(
                 add(
                     definition.id,
                     "grammar_structure_id",
-                    "请选择与义项细分词性匹配的语法结构",
+                    "请选择与词义细分词性匹配的语法结构",
                 );
             }
         }

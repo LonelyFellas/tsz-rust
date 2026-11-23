@@ -245,7 +245,7 @@ async fn load_peer(
         return Err(changed());
     }
     if lang != "en" || locale != medium {
-        return Err(invalid("只能配对同一媒介语词库中的英语义项"));
+        return Err(invalid("只能配对同一媒介语词库中的英语词义"));
     }
     Ok(Peer {
         revision,
@@ -266,7 +266,7 @@ pub(super) async fn apply(
         .values()
         .any(|s| !retained.contains(&s.sense_id) && s.pair_id.is_some())
     {
-        return Err(invalid("请先解除并保存配对，再删除该义项"));
+        return Err(invalid("请先解除并保存配对，再删除该词义"));
     }
     own.retain(|id, _| retained.contains(id));
     let mut peers = BTreeMap::<Uuid, Peer>::new();
@@ -317,7 +317,7 @@ pub(super) async fn apply(
         let mut pair_id = None;
         for (id, sid, rev, old, keep) in endpoints {
             if id == entry.id {
-                return Err(invalid("请选择另一个词条的义项"));
+                return Err(invalid("请选择另一个词条的词义"));
             }
             if keep {
                 let peer = load_peer(
@@ -331,7 +331,7 @@ pub(super) async fn apply(
                 let other = peer
                     .values
                     .get(&sid)
-                    .ok_or_else(|| invalid("请先在对方义项设置相反的方言"))?;
+                    .ok_or_else(|| invalid("请先在对方词义设置相反的方言"))?;
                 if other.pair_id != old {
                     return Err(changed());
                 }
@@ -360,7 +360,7 @@ pub(super) async fn apply(
             let other = peer
                 .values
                 .get_mut(&sid)
-                .ok_or_else(|| invalid("请先在对方义项设置相反的方言"))?;
+                .ok_or_else(|| invalid("请先在对方词义设置相反的方言"))?;
             if other.pair_id != old {
                 return Err(changed());
             }

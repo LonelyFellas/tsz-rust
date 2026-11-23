@@ -51,7 +51,7 @@ pub enum ExistingSurfaceSourceV2 {
     },
     /// 命中词条的词面被**另一个**词条引用为关联词。
     ///
-    /// `lexicon.relations` 的目标是已存在词条的义项（外键约束），所以关联词永远
+    /// `lexicon.relations` 的目标是已存在词条的词义（外键约束），所以关联词永远
     /// 不会引入新的词面：`surface` 必然等于 `ExistingSurfaceMatchV2.word_id` 这个
     /// 词条自己的主词。因此本分支描述的不是「词面存放在哪」，而是「谁在引用它」，
     /// `source_id` / `source_node_id` 指向的关联词节点属于 `referencing_word_id`。

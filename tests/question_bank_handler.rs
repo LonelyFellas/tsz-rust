@@ -1516,7 +1516,7 @@ async fn semantic_relation_beats_spelling_only_neighbour_and_missing_evidence_do
 async fn hidden_dictionary_equivalence_and_other_senses_block_second_answers(pool: PgPool) {
     let f = fixture(&pool).await;
     // Candidate's displayed sense is orange; another sense explicitly defines it as apple.
-    sqlx::query("UPDATE dictionary.entry_contents SET senses=senses || $1::jsonb WHERE normalized_term='orange'").bind(json!([{"id":"hidden","glosses":["Synonym of apple."],"translations":[{"code":"zh","word":"另一义项"}]}])).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE dictionary.entry_contents SET senses=senses || $1::jsonb WHERE normalized_term='orange'").bind(json!([{"id":"hidden","glosses":["Synonym of apple."],"translations":[{"code":"zh","word":"另一词义"}]}])).execute(&pool).await.unwrap();
     let p = call(&f, "POST", "/api/v1/me/learning-plans/preview", preview(&f)).await;
     assert_eq!(p.0, 200, "{}", p.1);
     assert_eq!(p.1["can_create"], true);

@@ -1048,8 +1048,8 @@ pub(crate) fn localize_issue(
         ("grammar_form_link_invalid", "关联词形只支持单词") => {
             Some(("關聯詞形只支援單字", "Form links support words only."))
         }
-        ("grammar_form_link_invalid", "读法义项不属于当前词性或词形") => Some((
-            "讀法義項不屬於目前詞性或詞形",
+        ("grammar_form_link_invalid", "读法词义不属于当前词性或词形") => Some((
+            "讀法詞義不屬於目前詞性或詞形",
             "The pronunciation sense does not belong to the current part of speech or form.",
         )),
         ("grammar_form_link_invalid", "关联词形目标已失效，请重新关联") => Some((

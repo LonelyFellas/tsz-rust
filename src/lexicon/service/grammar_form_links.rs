@@ -321,7 +321,7 @@ pub(super) async fn validate_targets(
                         return Err(invalid(variant.id, "关联词形只支持单词"));
                     }
                     if !reading_sense_valid(forms, &current_meanings, link) {
-                        return Err(invalid(variant.id, "读法义项不属于当前词性或词形"));
+                        return Err(invalid(variant.id, "读法词义不属于当前词性或词形"));
                     }
                     target_variant(forms, link)
                 } else {
@@ -343,7 +343,7 @@ pub(super) async fn validate_targets(
                     }
                     link.target_publication_id = target.publication_id();
                     if !reading_sense_valid(&target.forms, &target.meanings, link) {
-                        return Err(invalid(variant.id, "读法义项不属于当前词性或词形"));
+                        return Err(invalid(variant.id, "读法词义不属于当前词性或词形"));
                     }
                     target_variant(&target.forms, link)
                 };
@@ -443,7 +443,7 @@ pub(crate) async fn validate_reading_text(
                 .as_ref()
                 .ok_or_else(|| invalid(variant.id, "请选择具体读法"))?;
             if !reading_sense_valid(forms, meanings, link) {
-                return Err(invalid(variant.id, "读法义项不属于当前词性或词形"));
+                return Err(invalid(variant.id, "读法词义不属于当前词性或词形"));
             }
             let range = &link.source_segments[0];
             annotation_for_reading(
