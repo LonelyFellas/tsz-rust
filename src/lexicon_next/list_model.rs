@@ -1,4 +1,5 @@
 use super::model::{NextEntryKind, NextForm};
+use crate::lexicon::dto::EntryNameVariantV3;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -34,6 +35,11 @@ pub struct NextWorkspaceEntry {
     #[schema(value_type=NextEntryKind)]
     pub kind: String,
     pub headword: String,
+    /// Saved base spellings. Returned by the list only with x-tsz-next-name-variants: v1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    #[sqlx(skip)]
+    pub name_variants: Option<Vec<EntryNameVariantV3>>,
     pub owner_id: Uuid,
     pub revision: i64,
     pub lifecycle_revision: i64,
