@@ -3,6 +3,7 @@ use super::{language, list_model::*};
 use crate::{
     admin::{AdminAuth, permissions},
     error::{AppError, ErrorCode},
+    lexicon::{dto::SharedFormsStepContentV3, v3_projection::name_variants_from_saved_forms},
 };
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -17,10 +18,23 @@ const SAME_NAME: &str = r#"e.status<>'archived' AND other.status<>'archived' AND
      '[[:space:]]+',' ','g')), '‘’ʼ‐‑‒–—−',repeat(chr(39),3)||repeat('-',6)) COLLATE "und-x-icu")"#;
 
 pub(super) fn select(medium_locale: Option<&str>) -> QueryBuilder<Postgres> {
+    select_with_name_source(medium_locale, false)
+}
+
+fn select_with_name_source(
+    medium_locale: Option<&str>,
+    include_name_variants: bool,
+) -> QueryBuilder<Postgres> {
+    let name_source = if include_name_variants {
+        "NULLIF(current.document->'form_editor', 'null'::jsonb) AS name_source,"
+    } else {
+        ""
+    };
     let mut sql = QueryBuilder::new(format!(
         r#"SELECT e.id,e.target_language,e.kind,e.headword,e.owner_id,e.revision,e.lifecycle_revision,e.status,
     e.created_at,e.updated_at,creator.display_name AS created_by_name,editor.display_name AS updated_by_name,
     e.annotation,e.annotation_revision,
+    {name_source}
     EXISTS(SELECT 1 FROM lexicon_next.entries other WHERE {SAME_NAME}) AS annotation_visible,
     ARRAY(SELECT DISTINCT s.part_of_speech FROM lexicon_next.senses s JOIN lexicon_next.nodes n ON n.id=s.id
       WHERE n.entry_id=e.id AND s.part_of_speech IS NOT NULL
@@ -157,7 +171,31 @@ pub(super) fn validate(query: &NextWorkspaceQuery) -> Result<(), AppError> {
     }
     Ok(())
 }
-pub async fn list(pool: &PgPool, query: NextWorkspaceQuery) -> Result<NextWorkspaceList, AppError> {
+#[derive(sqlx::FromRow)]
+struct WorkspaceNameRow {
+    #[sqlx(flatten)]
+    entry: NextWorkspaceEntry,
+    name_source: Option<sqlx::types::Json<SharedFormsStepContentV3>>,
+}
+
+impl WorkspaceNameRow {
+    fn into_entry(self) -> Result<NextWorkspaceEntry, AppError> {
+        let mut entry = self.entry;
+        if let Some(sqlx::types::Json(editor)) = self.name_source {
+            let forms = editor.resolve().map_err(|error| {
+                AppError::internal(anyhow::anyhow!("invalid workspace form editor: {error}"))
+            })?;
+            entry.name_variants = Some(name_variants_from_saved_forms(&forms));
+        }
+        Ok(entry)
+    }
+}
+
+pub async fn list(
+    pool: &PgPool,
+    query: NextWorkspaceQuery,
+    include_name_variants: bool,
+) -> Result<NextWorkspaceList, AppError> {
     validate(&query)?;
     let page = query.page.unwrap_or(1);
     let size = query.page_size.unwrap_or(20);
@@ -173,17 +211,26 @@ pub async fn list(pool: &PgPool, query: NextWorkspaceQuery) -> Result<NextWorksp
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let mut rows = select(query.medium_locale.as_deref());
+    let mut rows = select_with_name_source(query.medium_locale.as_deref(), include_name_variants);
     filter(&mut rows, &query);
     rows.push(" ORDER BY e.created_at DESC,e.id DESC LIMIT ")
         .push_bind(i64::from(size))
         .push(" OFFSET ")
         .push_bind(i64::from(page - 1) * i64::from(size));
-    let items = rows
-        .build_query_as()
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(AppError::internal)?;
+    let items = if include_name_variants {
+        rows.build_query_as::<WorkspaceNameRow>()
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(AppError::internal)?
+            .into_iter()
+            .map(WorkspaceNameRow::into_entry)
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        rows.build_query_as()
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(AppError::internal)?
+    };
     tx.commit().await.map_err(AppError::internal)?;
     Ok(NextWorkspaceList {
         items,
