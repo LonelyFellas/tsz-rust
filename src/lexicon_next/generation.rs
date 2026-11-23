@@ -1,4 +1,7 @@
-use super::{language, model::NextListQuery, repository};
+use super::{
+    language,
+    model::{NextDraft, strip_legacy_creation_detection},
+};
 use crate::{
     admin::{AdminAuth, permissions},
     api::{ApiJson, ApiPath},
@@ -9,8 +12,11 @@ use crate::{
 };
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::{collections::BTreeMap, time::Duration};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -226,6 +232,68 @@ async fn editable(
     Ok((kind, medium))
 }
 
+async fn published_materials(
+    pool: &sqlx::PgPool,
+    headword: &str,
+    medium: &str,
+) -> Result<Vec<NextAgentSource>, AppError> {
+    let rows: Vec<(Uuid, Uuid, Value)> = sqlx::query_as(
+        "SELECT e.id, p.id, p.snapshot->'draft'
+         FROM lexicon_next.entries e
+         JOIN LATERAL (
+             SELECT id, snapshot, published_at
+             FROM lexicon_next.publications
+             WHERE entry_id=e.id
+             ORDER BY lifecycle_revision DESC
+             LIMIT 1
+         ) p ON true
+         WHERE e.status='published' AND e.target_language='en' AND e.medium_locale=$2
+           AND lower(p.snapshot #>> '{draft,headword}')=lower($1)
+         ORDER BY p.published_at DESC, e.id
+         LIMIT 6",
+    )
+    .bind(headword.trim())
+    .bind(medium)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::internal)?;
+    rows.into_iter()
+        .map(|(entry_id, publication_id, mut document)| {
+            strip_legacy_creation_detection(&mut document);
+            let draft: NextDraft = serde_json::from_value(document).map_err(AppError::internal)?;
+            let positions = draft
+                .senses
+                .iter()
+                .filter_map(|sense| sense.part_of_speech.as_deref())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let gloss = draft
+                .senses
+                .iter()
+                .flat_map(|sense| &sense.definitions)
+                .find(|row| row.locale == medium)
+                .map(|row| row.text.as_str())
+                .or_else(|| {
+                    draft
+                        .senses
+                        .iter()
+                        .flat_map(|sense| &sense.equivalents)
+                        .find(|row| row.locale == medium)
+                        .map(|row| row.text.as_str())
+                })
+                .unwrap_or_default();
+            let excerpt = format!("{} [{}] {gloss}", draft.headword, positions.join(", "));
+            Ok(NextAgentSource {
+                source: "智能词库".into(),
+                locator: format!("{entry_id}@{publication_id}"),
+                status: "found".into(),
+                excerpt: excerpt.chars().take(1400).collect(),
+            })
+        })
+        .collect()
+}
+
 #[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation",tag="admin-lexicon-next",security(("bearer_auth"=[])),
     params(("id"=Uuid,Path)),request_body=NextAgentInput,responses((status=200,body=NextAgentResult),(status=401),(status=403),(status=404),(status=409),(status=422),(status=429),(status=503)))]
 pub async fn advance(
@@ -276,36 +344,7 @@ pub async fn advance(
     if catalog.is_empty() {
         return Err(language::unavailable());
     }
-    let matches = repository::list(
-        &state.pool,
-        NextListQuery {
-            target_language: Some("en".into()),
-            medium_locale: Some(medium.clone()),
-            headword: Some(input.headword.clone()),
-            kind: None,
-            page: Some(1),
-            page_size: Some(6),
-        },
-    )
-    .await?;
-    let mut materials: Vec<_> = matches
-        .items
-        .into_iter()
-        .map(|entry| {
-            let excerpt = format!(
-                "{} [{}] {}",
-                entry.headword,
-                entry.part_of_speech.join(", "),
-                entry.gloss.unwrap_or_default()
-            );
-            NextAgentSource {
-                source: "智能词库".into(),
-                locator: format!("{}@{}", entry.id, entry.revision),
-                status: "found".into(),
-                excerpt: excerpt.chars().take(1400).collect(),
-            }
-        })
-        .collect();
+    let mut materials = published_materials(&state.pool, &input.headword, &medium).await?;
     if materials.is_empty() {
         materials.push(NextAgentSource {
             source: "智能词库".into(),
@@ -364,4 +403,101 @@ pub async fn advance(
     }
     editable(&state, &auth, id, input.base_revision).await?;
     Ok(Json(output))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin::{AdminRepository, AdminRole, NewAdmin};
+    use sqlx::PgPool;
+
+    #[sqlx::test]
+    async fn reference_materials_use_only_the_effective_published_snapshot(pool: PgPool) {
+        let actor = Uuid::new_v4();
+        AdminRepository::new(pool.clone())
+            .create(NewAdmin {
+                id: actor,
+                phone: "generation-test".into(),
+                display_name: "本地测试".into(),
+                password_hash: "test-only".into(),
+                role: AdminRole::Admin,
+                must_change_password: false,
+                created_by_admin_id: None,
+            })
+            .await
+            .unwrap();
+
+        let publication_id = Uuid::new_v4();
+        let mut expected_entry = Uuid::nil();
+        for status in ["published", "draft", "archived"] {
+            let entry = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO lexicon_next.entries
+                 (id,target_language,medium_locale,kind,headword,owner_id,revision,status,lifecycle_revision)
+                 VALUES($1,'en','zh-Hans','word','private revised spelling',$2,2,$3,1)",
+            )
+            .bind(entry)
+            .bind(actor)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let draft = |text: &str| {
+                json!({
+                    "schema_version": 1, "headword": "center", "forms": [],
+                    "senses": [{"id": Uuid::new_v4(), "part_of_speech":"noun",
+                        "definitions":[{"id":Uuid::new_v4(),"locale":"zh-Hans","style":"definition","text":text}],
+                        "equivalents":[]}]
+                })
+            };
+            let published = draft("已发布的词义");
+            sqlx::query(
+                "INSERT INTO lexicon_next.draft_revisions(entry_id,revision,actor_id,document)
+                 VALUES($1,1,$2,$3),($1,2,$2,$4)",
+            )
+            .bind(entry)
+            .bind(actor)
+            .bind(&published)
+            .bind(draft("未发布的草稿内容"))
+            .execute(&pool)
+            .await
+            .unwrap();
+            if status != "draft" {
+                let record = if status == "published" {
+                    expected_entry = entry;
+                    publication_id
+                } else {
+                    Uuid::new_v4()
+                };
+                sqlx::query(
+                    "INSERT INTO lexicon_next.publications
+                     (id,entry_id,revision,lifecycle_revision,published_by_admin_id,snapshot)
+                     VALUES($1,$2,1,1,$3,$4)",
+                )
+                .bind(record)
+                .bind(entry)
+                .bind(actor)
+                .bind(json!({"draft":published,"sentence_resources":[],"relation_targets":[]}))
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        let result = published_materials(&pool, "Center", "zh-Hans")
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].locator,
+            format!("{expected_entry}@{publication_id}")
+        );
+        assert_eq!(result[0].excerpt, "center [noun] 已发布的词义");
+        assert!(
+            published_materials(&pool, "private revised spelling", "zh-Hans")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
