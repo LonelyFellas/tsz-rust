@@ -61,16 +61,19 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
 
     // Core / Function / 历史 Strong 只控制教学样式，不是韵律指令。
     // 按颜色输出 emphasis 会把 jobs 切成 job + s；只有显式音标需要包裹正文。
+    let codepoints = request.content().text.chars().collect::<Vec<_>>();
     let ranges = request
         .content()
         .annotations
         .iter()
         .filter(|annotation| {
-            range(annotation)
-                .is_some_and(|(start, end)| (start..end).any(|position| !is_silent(position)))
+            range(annotation).is_some_and(|(start, end)| {
+                (start..end).any(|position| {
+                    !is_silent(position) && !request.omits_parenthesis(codepoints[position])
+                })
+            })
         })
         .collect::<Vec<_>>();
-    let codepoints = request.content().text.chars().collect::<Vec<_>>();
     let mut spoken = false;
 
     for position in 0..=codepoints.len() {
@@ -106,7 +109,9 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
         if let Some(character) = codepoints.get(position) {
             // 提示符里的空白照常留下：吞掉它会让两侧的词粘成一个，
             //「go to a school」标了「 a 」就会读成「go toschool」。
-            if !is_silent(position) || character.is_whitespace() {
+            if !request.omits_parenthesis(*character)
+                && (!is_silent(position) || character.is_whitespace())
+            {
                 push_text_character(&mut output, *character);
                 spoken |= !character.is_whitespace();
             }

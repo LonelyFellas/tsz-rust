@@ -264,7 +264,11 @@ pub(super) async fn persist(
             }
         }
     }
-    crate::speech::generated::validate_bindings(conn, &audio).await?;
+    crate::speech::generated::validate_bindings(
+        conn,
+        &serde_json::json!({ "grammar_structures": audio }),
+    )
+    .await?;
     for grammar in draft.grammar_structures.iter().flatten() {
         super::repository::node(conn, grammar.id, entry, "grammar", None).await?;
         for variant in &grammar.variants {

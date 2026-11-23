@@ -351,9 +351,20 @@ async fn inspect_impl(
             .await
             {
                 Ok((request, version)) => {
-                    let expected = crate::speech::generated::effect_hash(&request, &version)?;
-                    if row.get::<Option<Vec<u8>>, _>("effect_hash").as_ref() != Some(&expected) {
+                    use crate::speech::generated::{StoredEffect, compare_stored_effect};
+
+                    let Some(effect) = row.get::<Option<Vec<u8>>, _>("effect_hash") else {
                         item.issue = Some(RequirementIssue::EffectMismatch);
+                        continue;
+                    };
+                    match compare_stored_effect(request, &version, &effect, source.is_grammar())? {
+                        StoredEffect::Current => {}
+                        StoredEffect::LegacyGrammar => {
+                            item.source = Some(source.clone().without_grammar());
+                        }
+                        StoredEffect::Mismatch => {
+                            item.issue = Some(RequirementIssue::EffectMismatch);
+                        }
                     }
                 }
                 Err(error) if error.status_code().is_client_error() => {

@@ -12,6 +12,9 @@ pub enum GeneratedSpeechSource {
         content: RichTextV2,
         #[serde(default)]
         form_links: Vec<GrammarFormLinkV3>,
+        /// Omit round parentheses from the spoken text of a grammar structure.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        grammar: bool,
     },
     Phoneme {
         content: RichTextV2,
@@ -32,6 +35,39 @@ pub(crate) fn invalid() -> crate::error::AppError {
 }
 
 impl GeneratedSpeechSource {
+    pub(crate) fn is_grammar(&self) -> bool {
+        matches!(self, Self::Text { grammar: true, .. })
+    }
+
+    pub(crate) fn without_grammar(mut self) -> Self {
+        if let Self::Text { grammar, .. } = &mut self {
+            *grammar = false;
+        }
+        self
+    }
+
+    fn for_owner(mut self, path: &str) -> Self {
+        let mut parts = path.rsplit('/');
+        if let Self::Text {
+            grammar, content, ..
+        } = &mut self
+        {
+            *grammar = matches!(
+                (parts.next(), parts.next(), parts.next(), parts.next()),
+                (
+                    Some(_),
+                    Some("variants"),
+                    Some(_),
+                    Some("grammar_structures")
+                )
+            ) && content
+                .text
+                .chars()
+                .any(super::model::is_grammar_parenthesis);
+        }
+        self
+    }
+
     pub(crate) fn validate_locale(&self, locale: &str) -> Result<(), crate::error::AppError> {
         let locale = super::locale::EnglishLocale::parse(locale).ok_or_else(invalid)?;
         if let Self::Phoneme {
@@ -55,6 +91,7 @@ impl GeneratedSpeechSource {
             Self::Text {
                 content,
                 form_links,
+                ..
             } => {
                 form_links.is_empty()
                     && content.annotations.iter().any(|annotation| {
@@ -84,6 +121,7 @@ impl GeneratedSpeechSource {
                 Self::Text {
                     content,
                     form_links,
+                    ..
                 } => content
                     .annotations
                     .iter()
@@ -108,11 +146,21 @@ impl GeneratedSpeechSource {
 
     pub(crate) fn canonical(&self) -> Result<Value, crate::error::AppError> {
         let mut value = serde_json::to_value(self).map_err(crate::error::AppError::internal)?;
+        let fields = value.as_object_mut().ok_or_else(invalid)?;
+        if let Self::Text {
+            grammar: true,
+            content,
+            ..
+        } = self
+            && !content
+                .text
+                .chars()
+                .any(super::model::is_grammar_parenthesis)
+        {
+            fields.remove("grammar");
+        }
         // Locale is validated against the target, but is not part of the historical source identity.
-        value
-            .as_object_mut()
-            .ok_or_else(invalid)?
-            .remove("phoneme_locale");
+        fields.remove("phoneme_locale");
         // Grammar phonemes are resolved from explicit links for the selected accent.
         if value["form_links"]
             .as_array()
@@ -417,7 +465,8 @@ pub(crate) fn source_at_for_accent(
         let content = override_content.or_else(||current.get("content")).or_else(||current.get("value")).or_else(||current.get("name_en_rich")).or_else(||current.get("dict_phonetic_rich")).cloned().unwrap_or_else(||serde_json::json!({"version":2,"text":current.get("name_en").or_else(||current.get("dict_phonetic")).and_then(Value::as_str).unwrap_or(""),"annotations":[]}));
         serde_json::json!({"kind":"text","content":content,"form_links":current.get("form_links").or_else(||current.get("reading_links")).filter(|v|!v.is_null()).cloned().unwrap_or_else(||serde_json::json!([]))})
     };
-    serde_json::from_value(source).map_err(|_| invalid())
+    let source: GeneratedSpeechSource = serde_json::from_value(source).map_err(|_| invalid())?;
+    Ok(source.for_owner(path))
 }
 
 #[derive(Debug, Clone)]
@@ -473,7 +522,7 @@ fn collect_settings(
                     }
                     serde_json::from_value(source).map_err(|_| invalid())?
                 } else {
-                    source_at_for_accent(v, "", setting.accent_group())?
+                    source_at_for_accent(v, "", setting.accent_group())?.for_owner(path)
                 };
                 out.push(GeneratedReference {
                     path: path.into(),

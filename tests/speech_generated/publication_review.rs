@@ -5,6 +5,13 @@ use tsz_rust::speech::publication_audio::{
 };
 
 async fn setup(pool: &PgPool) -> (Reviewer, Uuid, AudioRequirement, Arc<dyn ObjectStore>) {
+    setup_with_text(pool, "Hello").await
+}
+
+async fn setup_with_text(
+    pool: &PgPool,
+    text: &str,
+) -> (Reviewer, Uuid, AudioRequirement, Arc<dyn ObjectStore>) {
     let actor = actor(pool).await;
     sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.publish',$1)").bind(actor).execute(pool).await.unwrap();
     let entry = Uuid::now_v7();
@@ -18,7 +25,7 @@ async fn setup(pool: &PgPool) -> (Reviewer, Uuid, AudioRequirement, Arc<dyn Obje
         })),
         Some(storage.clone()),
     );
-    let request = input(Uuid::now_v7(), Uuid::now_v7(), "Hello");
+    let request = input(Uuid::now_v7(), Uuid::now_v7(), text);
     let mut requirement = AudioRequirement {
         target_id: Uuid::now_v7(),
         content_id: None,
@@ -46,6 +53,69 @@ async fn setup(pool: &PgPool) -> (Reviewer, Uuid, AudioRequirement, Arc<dyn Obje
         requirement,
         storage,
     )
+}
+
+#[sqlx::test]
+async fn grammar_release_preserves_confirmation_for_a_bound_legacy_asset(pool: PgPool) {
+    let (reviewer, entry, mut requirement, storage) =
+        setup_with_text(&pool, "(be) superior to…").await;
+    requirement.source_path = "/pos/0/grammar_structures/0/variants/0".into();
+    let probes = probe_assets(
+        &pool,
+        Owner::Entry(entry),
+        std::slice::from_ref(&requirement),
+        storage.as_ref(),
+    )
+    .await
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let legacy = inspect_in(
+        &mut tx,
+        reviewer,
+        Owner::Entry(entry),
+        1,
+        vec![requirement.clone()],
+        None,
+        &probes,
+    )
+    .await
+    .unwrap();
+    assert!(legacy.ready());
+    let receipt = confirm_in(
+        &mut tx,
+        reviewer.actor_id,
+        0,
+        &legacy,
+        legacy.manifest_hash(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut source = serde_json::to_value(requirement.source.take().unwrap()).unwrap();
+    source["grammar"] = json!(true);
+    requirement.source = Some(serde_json::from_value(source).unwrap());
+    let mut tx = pool.begin().await.unwrap();
+    let upgraded = inspect_in(
+        &mut tx,
+        reviewer,
+        Owner::Entry(entry),
+        1,
+        vec![requirement],
+        None,
+        &probes,
+    )
+    .await
+    .unwrap();
+    assert!(upgraded.ready());
+    assert_eq!(upgraded.manifest_hash(), legacy.manifest_hash());
+    assert_eq!(
+        confirmed_in(&mut tx, reviewer.actor_id, 0, &upgraded)
+            .await
+            .unwrap(),
+        Some(receipt)
+    );
+    tx.commit().await.unwrap();
 }
 
 #[sqlx::test]

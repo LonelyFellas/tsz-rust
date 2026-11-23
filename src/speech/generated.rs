@@ -125,6 +125,35 @@ pub(crate) fn effect_hash(
     Ok(Sha256::digest(serde_json::to_vec(&value).map_err(AppError::internal)?).to_vec())
 }
 
+#[derive(PartialEq, Eq)]
+pub(crate) enum StoredEffect {
+    Current,
+    LegacyGrammar,
+    Mismatch,
+}
+
+pub(crate) fn compare_stored_effect(
+    request: SynthesisRequest,
+    provider_version: &str,
+    stored: &[u8],
+    grammar: bool,
+) -> Result<StoredEffect, AppError> {
+    let current = effect_hash(&request, provider_version);
+    // Prefer the historical identity if both renders are identical, so existing
+    // publication confirmations stay valid until the asset itself is replaced.
+    if grammar
+        && effect_hash(&request.with_grammar(false), provider_version)
+            .is_ok_and(|legacy| stored == legacy)
+    {
+        return Ok(StoredEffect::LegacyGrammar);
+    }
+    Ok(if stored == current? {
+        StoredEffect::Current
+    } else {
+        StoredEffect::Mismatch
+    })
+}
+
 pub(crate) async fn prepare_effect(
     conn: &mut sqlx::PgConnection,
     source: &GeneratedSpeechSource,
@@ -205,7 +234,9 @@ pub(crate) async fn prepare_request(
     })
     .map_err(|_| invalid())?
     .with_output_format(setting.output_format.unwrap_or_default());
-    let request = SynthesisRequest::new(voice, options, content).map_err(|_| invalid())?;
+    let request = SynthesisRequest::new(voice, options, content)
+        .map_err(|_| invalid())?
+        .with_grammar(source.is_grammar());
     Ok((request, row.get("provider_version")))
 }
 
@@ -459,9 +490,11 @@ impl GeneratedAudioService {
         })?;
         let format = input.setting.output_format.unwrap_or_default();
         let options = options.with_output_format(format);
-        let request = SynthesisRequest::new(voice.voice, options, content).map_err(|error| {
-            crate::speech::model::model_error(ErrorCode::InvalidSpeechPreview, error)
-        })?;
+        let request = SynthesisRequest::new(voice.voice, options, content)
+            .map_err(|error| {
+                crate::speech::model::model_error(ErrorCode::InvalidSpeechPreview, error)
+            })?
+            .with_grammar(input.source.is_grammar());
         let effect_hash = effect_hash(&request, &voice.provider_version)?;
         let provider = self.provider.clone().ok_or_else(unavailable)?;
         if provider.provider_name() != request.voice().provider() {
@@ -1056,16 +1089,12 @@ pub(crate) async fn validate_bindings_with_forms(
         let native_locale = reference.setting.locale.ok_or_else(invalid)?;
         let locale = native_locale.as_str();
         if let Some(effect) = row.get::<Option<Vec<u8>>, _>("effect_hash") {
+            let (request, version) =
+                prepare_request(conn, &reference.source, &reference.setting, current, batch)
+                    .await?;
             if row.get::<String, _>("state") != "ready"
-                || effect
-                    != prepare_effect_with_forms(
-                        conn,
-                        &reference.source,
-                        &reference.setting,
-                        current,
-                        batch,
-                    )
-                    .await?
+                || compare_stored_effect(request, &version, &effect, reference.source.is_grammar())?
+                    == StoredEffect::Mismatch
             {
                 return Err(AppError::bad_request(
                     ErrorCode::InvalidSpeechPreview,
@@ -1108,8 +1137,15 @@ pub(crate) async fn validate_bindings_with_forms(
                 .await?,
         )
         .map_err(AppError::internal)?;
+        let mut expected_source = reference.source.canonical()?;
+        // Assets created before effect hashes were recorded used the unscoped source.
+        if reference.source.is_grammar()
+            && let Some(fields) = expected_source.as_object_mut()
+        {
+            fields.remove("grammar");
+        }
         if row.get::<String, _>("state") != "ready"
-            || row.get::<Value, _>("source") != reference.source.canonical()?
+            || row.get::<Value, _>("source") != expected_source
             || row.get::<Value, _>("voice") != expected_voice
             || row.get::<Value, _>("resolved_content") != resolved
         {

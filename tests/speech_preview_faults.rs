@@ -319,6 +319,7 @@ fn cache(key: &str) -> CacheRecord {
 
 fn request(label: &str) -> CreatePreviewRequest {
     CreatePreviewRequest {
+        grammar: false,
         output_format: None,
         content: RichTextV2 {
             version: 2,

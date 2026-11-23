@@ -143,7 +143,8 @@ impl PreviewService {
         )?
         .with_expression(&voice.voice, input.style_degree, input.role)?
         .with_output_format(input.output_format.unwrap_or_default());
-        let request = SynthesisRequest::new(voice.voice, options, input.content)?;
+        let request =
+            SynthesisRequest::new(voice.voice, options, input.content)?.with_grammar(input.grammar);
         self.create_prepared(actor_id, voice.id, &voice.provider_version, request)
             .await
     }

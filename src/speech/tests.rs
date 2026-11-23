@@ -41,6 +41,45 @@ fn plain(text: &str) -> RichTextV2 {
 }
 
 #[test]
+fn grammar_skips_round_parentheses_without_losing_words_or_speech_marks() {
+    let original = request(plain("(be) superior to…"));
+    let grammar = original.clone().with_grammar(true);
+    assert!(
+        build_ssml(&original)
+            .unwrap()
+            .contains(">(be) superior to…<")
+    );
+    assert!(build_ssml(&grammar).unwrap().contains(">be superior to…<"));
+    assert_eq!(grammar.content().text, "(be) superior to…");
+    assert_ne!(original.fingerprint(), grammar.fingerprint());
+
+    let mut annotated = plain("（be） [superior]");
+    annotated.annotations = vec![
+        RichTextAnnotation::Phoneme {
+            start: 0,
+            end: 4,
+            alphabet: RichTextPhonemeAlphabet::Ipa,
+            phoneme: "biː".into(),
+        },
+        RichTextAnnotation::Pause {
+            at: 5,
+            duration_ms: 250,
+        },
+    ];
+    assert!(
+        build_ssml(&request(annotated).with_grammar(true))
+            .unwrap()
+            .contains(r#">be</phoneme> <break time="250ms"/>[superior]"#)
+    );
+
+    let plain = request(plain("be superior to…"));
+    assert_eq!(
+        plain.fingerprint(),
+        plain.clone().with_grammar(true).fingerprint()
+    );
+}
+
+#[test]
 fn final_effect_hash_ignores_teaching_marks_and_tracks_provider_version_and_sound() {
     let baseline = request(plain("hello"));
     let mut content = plain("hello");

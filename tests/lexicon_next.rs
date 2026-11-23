@@ -3356,6 +3356,176 @@ async fn call_grammar_audio(
 }
 
 #[sqlx::test]
+async fn superior_to_grammar_preview_and_regeneration_preserve_the_draft(pool: PgPool) {
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    use tsz_rust::{
+        platform::storage::{MemoryAdapter, StoragePolicy, StoragePrivacy, StorageRegistry},
+        speech::{SpeechError, SpeechProvider, SynthesisRequest, SynthesizedAudio, build_ssml},
+    };
+
+    #[derive(Default)]
+    struct RecordingProvider(Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl SpeechProvider for RecordingProvider {
+        fn provider_name(&self) -> &'static str {
+            "azure"
+        }
+        async fn synthesize(
+            &self,
+            request: &SynthesisRequest,
+        ) -> Result<SynthesizedAudio, SpeechError> {
+            self.0.lock().unwrap().push(build_ssml(request).unwrap());
+            Ok(SynthesizedAudio {
+                bytes: b"ID3-grammar-test".to_vec(),
+                content_type: "audio/mpeg",
+                provider_request_id: None,
+            })
+        }
+    }
+
+    let actor = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "speech.generate",
+        ],
+    )
+    .await;
+    let part = Uuid::now_v7();
+    let part_code = "phrase_prepositional_constituent";
+    let sub_code = "SUB_433C4EFDCBC64BA3B204BD4EC9D4";
+    sqlx::query("INSERT INTO catalog.parts_of_speech(id,code,kind,name_zh,name_en,abbreviation,short_name_zh,full_name_en) VALUES($1,$2,'phrase','介词性成分','Prepositional constituent','prep.','介词性成分','Prepositional constituent')")
+        .bind(part).bind(part_code).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO catalog.sub_parts_of_speech(id,part_of_speech_id,code,name_zh,name_en,short_name_zh,abbreviation,full_name_en) VALUES($1,$2,$3,'形容词介词搭配','Adjective-preposition construction','形介搭配','adj.-prep.','Adjective-preposition construction')")
+        .bind(Uuid::now_v7()).bind(part).bind(sub_code).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version,accent) VALUES($1,'sonia-grammar-test','azure','en-GB-SoniaNeural','en-GB','female','[]','v1','gb')")
+        .bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+    let provider = Arc::new(RecordingProvider::default());
+    let mut state = AppState::for_test(pool);
+    state.speech_provider = Some(provider.clone());
+    state.object_storage = StorageRegistry::from_stores([MemoryAdapter::object_store(
+        "audio".parse().unwrap(),
+        StoragePolicy::new(StoragePrivacy::Private, 1024, Duration::from_secs(60), None).unwrap(),
+    )])
+    .unwrap();
+    let router = tsz_rust::router(state.clone());
+    let token = state.admin_token_manager.generate(actor, "admin").unwrap();
+    let speech = async |endpoint: &str, body: Value| {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/admin/speech/{endpoint}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("x-tsz-voice-versions", "v6")
+                    .header("x-tsz-voice-locales", "v1")
+                    .header("x-tsz-voice-models", "v1")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let data: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(status.is_success(), "{endpoint}: {status} {data}");
+        data
+    };
+
+    let (status, entry) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entries",
+        json!({"target_language":"en", "kind":"phrase", "headword":"superior to"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{entry}");
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let text = "(be) superior to…";
+    let content = json!({"version":2,"text":text,"annotations":[
+        {"type":"emphasis","level":"function","start":0,"end":4},
+        {"type":"emphasis","level":"core","start":5,"end":17}
+    ]});
+    let mut source = json!({"kind":"text","content":content});
+    let mut setting = json!({"voice_id":"sonia-grammar-test","version_id":Uuid::now_v7(),
+        "version_name":"Sonia","enabled":true,"locale":"en-GB","rate_percent":-5,"volume_percent":93});
+    let profile = |setting: &Value| {
+        json!({
+            "dubbing":{"area":"grammar","uk":{"mode":"local"},"us":{"mode":"local"}},
+            "voices":[setting]
+        })
+    };
+    let old = speech(
+        "audio",
+        json!({"request_id":Uuid::now_v7(),"source":source,"setting":setting,"profile":profile(&setting)}),
+    )
+    .await;
+    setting["audio_asset_id"] = old["asset"]["id"].clone();
+    let mut draft = entry["draft"].clone();
+    draft["grammar_structures"] = json!([{"id":Uuid::now_v7(),"part_of_speech":part_code,"sub_pos":sub_code,"variants":[
+        {"id":Uuid::now_v7(),"locale":"en-GB","content":content,"voice_profile":profile(&setting)}
+    ]}]);
+    let (status, saved) = call_grammar_audio(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    source["grammar"] = json!(true);
+    let rendered = speech("ssml", json!({"source":source,"setting":setting})).await;
+    assert!(
+        rendered["ssml"]
+            .as_str()
+            .unwrap()
+            .contains(">be superior to…<")
+    );
+    let generated = speech(
+        "audio",
+        json!({"request_id":Uuid::now_v7(),"source":source,"setting":setting,"profile":profile(&setting)}),
+    )
+    .await;
+    assert_ne!(generated["asset"]["id"], old["asset"]["id"]);
+    let captured = provider.0.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2);
+    assert!(captured[0].contains(">(be) superior to…<"));
+    assert_eq!(captured[1], rendered["ssml"]);
+
+    let mut draft = saved["draft"].clone();
+    draft["grammar_structures"][0]["variants"][0]["voice_profile"]["voices"][0]["audio_asset_id"] =
+        generated["asset"]["id"].clone();
+    let (status, saved) = call_grammar_audio(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, reopened) = call_grammar_audio(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    let variant = &reopened["draft"]["grammar_structures"][0]["variants"][0];
+    assert_eq!(variant["content"], content);
+    assert_eq!(
+        variant["voice_profile"]["voices"][0]["audio_asset_id"],
+        generated["asset"]["id"]
+    );
+}
+
+#[sqlx::test]
 async fn grammar_audio_round_trips_preserves_legacy_and_owns_assets_with_forms(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let other_actor = admin(&pool, EDIT).await;
