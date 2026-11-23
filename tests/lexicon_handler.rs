@@ -347,6 +347,32 @@ async fn call_with_form_capability(
     capabilities: (bool, bool, bool, bool),
     shared_forms: bool,
 ) -> (StatusCode, Value) {
+    call_with_spelling_accent_capability(
+        state,
+        method,
+        uri,
+        bearer,
+        idempotency_key,
+        body,
+        capabilities,
+        shared_forms,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn call_with_spelling_accent_capability(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    bearer: &str,
+    idempotency_key: Option<Uuid>,
+    body: Option<Value>,
+    capabilities: (bool, bool, bool, bool),
+    shared_forms: bool,
+    accent_content: bool,
+) -> (StatusCode, Value) {
     let (markup, formatting, speech, phoneme_speech) = capabilities;
     let request_kind = test_request_kind(&method, uri);
     let mut builder = Request::builder()
@@ -366,6 +392,9 @@ async fn call_with_form_capability(
     }
     if speech {
         builder = builder.header("X-TSZ-Spelling-Speech", "v1");
+    }
+    if accent_content {
+        builder = builder.header("X-TSZ-Spelling-Accent-Content", "v1");
     }
     if formatting {
         builder = builder.header("X-TSZ-Sentence-Formatting", "v1");
@@ -435,7 +464,7 @@ async fn call_with_form_capability(
         assert_eq!(
             vary.as_ref().and_then(|value| value.to_str().ok()),
             Some(
-                "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment, x-tsz-multiple-spellings, x-tsz-voice-versions, x-tsz-voice-locales, x-tsz-voice-models"
+                "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-spelling-accent-content, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment, x-tsz-multiple-spellings, x-tsz-voice-versions, x-tsz-voice-locales, x-tsz-voice-models"
             )
         );
     }
@@ -19022,7 +19051,10 @@ async fn v3_spelling_speech_roundtrips_independently_and_survives_legacy_saves(p
     let id = ready["word"]["id"].as_str().unwrap();
     let path = "/pos/0/forms/0/regional_variants";
     let mut forms = ready["word"]["forms"].clone();
-    let speech = json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":500}]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10,"pitch_semitones":2,"style":"cheerful"}]}});
+    let mut speech = json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":500}]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10,"pitch_semitones":2,"style":"cheerful"}]}});
+    let mut uk = speech["content"].clone();
+    uk["annotations"][0]["duration_ms"] = json!(10);
+    speech["content_by_accent"] = json!({"uk": uk, "us": speech["content"]});
     for side in ["uk", "us"] {
         forms.pointer_mut(path).unwrap()[side]["spelling"] = json!("hello there");
         forms.pointer_mut(path).unwrap()[side]["spelling_speech"] = speech.clone();
@@ -19085,9 +19117,38 @@ async fn v3_spelling_speech_roundtrips_independently_and_survives_legacy_saves(p
     )
     .await;
     assert_eq!(preserved["word"]["forms"], expected);
+    let (status, legacy) = call_with_spelling_accent_capability(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+        (true, true, true, true),
+        false,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let legacy_forms = legacy["word"]["forms"].clone();
+    for side in ["uk", "us"] {
+        let setting = &legacy_forms.pointer(path).unwrap()[side]["spelling_speech"];
+        assert_eq!(setting["content"], speech["content"]);
+        assert!(setting.get("content_by_accent").is_none());
+    }
+    let (_, retained) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        preserved["word"]["revision"].as_i64().unwrap(),
+        "save",
+        legacy_forms,
+    )
+    .await;
+    assert_eq!(retained["word"]["forms"], expected);
     let mut cleared = expected;
     for side in ["uk", "us"] {
-        cleared.pointer_mut(path).unwrap()[side]["spelling_speech"]["content"]["annotations"] =
+        cleared.pointer_mut(path).unwrap()[side]["spelling_speech"]["content_by_accent"]["uk"]["annotations"] =
             json!([]);
         cleared.pointer_mut(path).unwrap()[side]["spelling_speech"]["voice_profile"]["voices"] =
             json!([]);
@@ -19096,7 +19157,7 @@ async fn v3_spelling_speech_roundtrips_independently_and_survives_legacy_saves(p
         &state,
         &bearer,
         id,
-        preserved["word"]["revision"].as_i64().unwrap(),
+        retained["word"]["revision"].as_i64().unwrap(),
         "save",
         cleared.clone(),
     )

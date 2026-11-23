@@ -265,24 +265,17 @@ async fn inspect_impl(
     // ordered selection for every accent represented by that source.
     let mut checked_profiles = HashMap::new();
     for item in &items {
-        let (Some(profile), Some(source)) = (&item.profile, &item.source) else {
+        let Some(profile) = &item.profile else {
             continue;
         };
-        if !profile.has_inheritance()
+        if item.source.is_none()
+            || !profile.has_inheritance()
             || checked_profiles.contains_key(&(item.source_path.clone(), item.source_dialect))
         {
             continue;
         }
-        let result = validate_inherited_profile(
-            tx,
-            profile,
-            source,
-            &item.source_path,
-            item.source_dialect,
-            current_forms,
-            options.batch,
-        )
-        .await;
+        let result =
+            validate_inherited_profile(tx, profile, item, current_forms, options.batch).await;
         let valid = match result {
             Ok(valid) => valid,
             Err(error) if error.status_code().is_client_error() => false,
@@ -569,27 +562,26 @@ pub(crate) async fn attach_receipt_in(
 async fn validate_inherited_profile(
     tx: &mut Transaction<'_, Postgres>,
     profile: &crate::lexicon::dto::VoiceProfileV3,
-    source: &crate::speech::generated_source::GeneratedSpeechSource,
-    path: &str,
-    source_dialect: Option<crate::lexicon::dto::Dialect>,
+    item: &AudioRequirement,
     current: Option<(Uuid, &DraftFormsStepContentV3)>,
     batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
 ) -> Result<bool, AppError> {
     use crate::lexicon::dto::{Dialect, PhonemeLocaleV3};
     use crate::speech::{dubbing::resolve_in, generated_source::voice_input, locale::AccentGroup};
-    let side = match source {
-        crate::speech::generated_source::GeneratedSpeechSource::Phoneme {
+    let side = match &item.source {
+        Some(crate::speech::generated_source::GeneratedSpeechSource::Phoneme {
             phoneme_locale: Some(locale),
             ..
-        } => Some(if *locale == PhonemeLocaleV3::EnGb {
+        }) => Some(if *locale == PhonemeLocaleV3::EnGb {
             Dialect::Uk
         } else {
             Dialect::Us
         }),
-        _ => source_dialect
+        _ => item
+            .source_dialect
             .filter(|dialect| *dialect != Dialect::Common)
             .or_else(|| {
-                path.split('/').find_map(|part| match part {
+                item.source_path.split('/').find_map(|part| match part {
                     "uk" => Some(Dialect::Uk),
                     "us" => Some(Dialect::Us),
                     _ => None,
@@ -621,6 +613,9 @@ async fn validate_inherited_profile(
             "en-GB"
         } else {
             "en-US"
+        };
+        let Some(source) = item.profile_source(accent) else {
+            return Ok(false);
         };
         let content = source
             .resolve_with_forms(tx, locale, current, batch)

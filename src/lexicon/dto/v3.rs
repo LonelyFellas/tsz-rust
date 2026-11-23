@@ -469,10 +469,32 @@ where
 #[serde(deny_unknown_fields)]
 pub struct SpellingSpeechV3 {
     pub content: RichTextV2V3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_by_accent: Option<SpellingContentByAccentV3>,
     pub voice_profile: VoiceProfileV3,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(max_items = 8)]
     pub audio_assets: Vec<AudioAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpellingContentByAccentV3 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uk: Option<RichTextV2V3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub us: Option<RichTextV2V3>,
+}
+
+impl SpellingSpeechV3 {
+    pub(crate) fn contents_mut(&mut self) -> impl Iterator<Item = &mut RichTextV2V3> {
+        std::iter::once(&mut self.content).chain(
+            self.content_by_accent
+                .iter_mut()
+                .flat_map(|sides| [&mut sides.uk, &mut sides.us])
+                .flatten(),
+        )
+    }
 }
 
 fn deserialize_optional_spelling_speech<'de, D>(
