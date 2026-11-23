@@ -371,9 +371,18 @@ pub(crate) fn voice_input(setting: &VoiceSettingV3) -> Value {
     value
 }
 
+#[cfg(test)]
 pub(crate) fn source_at(
     value: &Value,
     path: &str,
+) -> Result<GeneratedSpeechSource, crate::error::AppError> {
+    source_at_for_accent(value, path, None)
+}
+
+pub(crate) fn source_at_for_accent(
+    value: &Value,
+    path: &str,
+    accent: Option<super::locale::AccentGroup>,
 ) -> Result<GeneratedSpeechSource, crate::error::AppError> {
     let mut current = value;
     let mut locale = None;
@@ -400,7 +409,12 @@ pub(crate) fn source_at(
     let source = if let Some((alphabet, parent)) = phoneme {
         serde_json::json!({"kind":"phoneme","content":current["content"],"alphabet":alphabet,"phoneme":parent[alphabet],"ups_words":if alphabet=="ups" {parent.get("ups_words").cloned().unwrap_or_else(||serde_json::json!([]))} else {serde_json::json!([])},"phoneme_locale":locale})
     } else {
-        let content = current.get("content").or_else(||current.get("value")).or_else(||current.get("name_en_rich")).or_else(||current.get("dict_phonetic_rich")).cloned().unwrap_or_else(||serde_json::json!({"version":2,"text":current.get("name_en").or_else(||current.get("dict_phonetic")).and_then(Value::as_str).unwrap_or(""),"annotations":[]}));
+        let override_content = match accent {
+            Some(super::locale::AccentGroup::Uk) => current.pointer("/content_by_accent/uk"),
+            Some(super::locale::AccentGroup::Us) => current.pointer("/content_by_accent/us"),
+            _ => None,
+        };
+        let content = override_content.or_else(||current.get("content")).or_else(||current.get("value")).or_else(||current.get("name_en_rich")).or_else(||current.get("dict_phonetic_rich")).cloned().unwrap_or_else(||serde_json::json!({"version":2,"text":current.get("name_en").or_else(||current.get("dict_phonetic")).and_then(Value::as_str).unwrap_or(""),"annotations":[]}));
         serde_json::json!({"kind":"text","content":content,"form_links":current.get("form_links").or_else(||current.get("reading_links")).filter(|v|!v.is_null()).cloned().unwrap_or_else(||serde_json::json!([]))})
     };
     serde_json::from_value(source).map_err(|_| invalid())
@@ -450,6 +464,8 @@ fn collect_settings(
                 {
                     continue;
                 }
+                let setting: VoiceSettingV3 =
+                    serde_json::from_value(setting.clone()).map_err(|_| invalid())?;
                 let source = if let Some((alphabet, phone, words)) = phoneme {
                     let mut source = serde_json::json!({"kind":"phoneme","content":v["content"],"alphabet":alphabet,"phoneme":phone,"ups_words":words});
                     if let Some(locale) = native_locale {
@@ -457,7 +473,7 @@ fn collect_settings(
                     }
                     serde_json::from_value(source).map_err(|_| invalid())?
                 } else {
-                    source_at(v, "")?
+                    source_at_for_accent(v, "", setting.accent_group())?
                 };
                 out.push(GeneratedReference {
                     path: path.into(),
@@ -467,7 +483,7 @@ fn collect_settings(
                         .map_err(|_| invalid())?
                         .unwrap_or_else(Uuid::nil),
                     source,
-                    setting: serde_json::from_value(setting.clone()).map_err(|_| invalid())?,
+                    setting,
                     profile: profile
                         .get("dubbing")
                         .map(|_| serde_json::from_value(profile.clone()))

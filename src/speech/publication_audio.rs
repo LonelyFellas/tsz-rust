@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
-    generated_source::{GeneratedSpeechSource, source_at},
+    generated_source::{GeneratedSpeechSource, source_at_for_accent},
     locale::AccentGroup,
 };
 use crate::{
@@ -45,12 +45,25 @@ pub struct AudioRequirement {
     // validation instead of copying and returning the full list per selected voice.
     #[serde(skip)]
     pub profile: Option<Arc<VoiceProfileV3>>,
+    /// Effective UK and US sources for checking the whole voice profile.
+    #[serde(skip)]
+    pub profile_sources: Option<Arc<[Option<GeneratedSpeechSource>; 2]>>,
     #[schema(required = true)]
     pub asset_id: Option<Uuid>,
     #[schema(required = true)]
     pub source: Option<GeneratedSpeechSource>,
     #[schema(required = true)]
     pub issue: Option<RequirementIssue>,
+}
+
+impl AudioRequirement {
+    pub(crate) fn profile_source(&self, accent: AccentGroup) -> Option<&GeneratedSpeechSource> {
+        match (&self.profile_sources, accent) {
+            (Some(sources), AccentGroup::Uk) => sources[0].as_ref(),
+            (Some(sources), AccentGroup::Us) => sources[1].as_ref(),
+            _ => self.source.as_ref(),
+        }
+    }
 }
 
 pub fn entry_requirements(word: &AdminWordV3) -> Result<Vec<AudioRequirement>, AppError> {
@@ -193,6 +206,13 @@ fn add_selected(
         let profile: VoiceProfileV3 =
             serde_json::from_value(owner["voice_profile"].clone()).map_err(AppError::internal)?;
         let profile = Arc::new(profile);
+        let profile_sources =
+            (profile.dubbing.is_some() && owner.get("content_by_accent").is_some()).then(|| {
+                Arc::new(
+                    [AccentGroup::Uk, AccentGroup::Us]
+                        .map(|accent| source_at_for_accent(root, path, Some(accent)).ok()),
+                )
+            });
         for accent in voice_accents {
             if profile.dubbing.is_none()
                 || profile.voices.iter().any(|voice| {
@@ -221,8 +241,18 @@ fn add_selected(
                 }],
                 setting: None,
                 profile: Some(profile.clone()),
+                profile_sources: profile_sources.clone(),
                 asset_id: None,
-                source: source_at(root, path).ok(),
+                source: source_at_for_accent(
+                    root,
+                    path,
+                    Some(if accent == "gb" {
+                        AccentGroup::Uk
+                    } else {
+                        AccentGroup::Us
+                    }),
+                )
+                .ok(),
                 issue: Some(RequirementIssue::MissingConfiguration),
             });
         }
@@ -232,7 +262,7 @@ fn add_selected(
             if !in_scope(setting.accent_group()) || recorded(setting.accent_group()) {
                 continue;
             }
-            let source = source_at(root, path).ok();
+            let source = source_at_for_accent(root, path, setting.accent_group()).ok();
             let issue = if source.is_none() {
                 Some(RequirementIssue::InvalidSource)
             } else if setting.audio_asset_id.is_none() {
@@ -249,6 +279,7 @@ fn add_selected(
                 asset_id: setting.audio_asset_id,
                 setting: Some(setting),
                 profile: Some(profile.clone()),
+                profile_sources: profile_sources.clone(),
                 source,
                 issue,
             });
@@ -265,6 +296,7 @@ fn add_selected(
                 default_for: vec![],
                 setting: None,
                 profile: None,
+                profile_sources: None,
                 asset_id: Some(asset_id),
                 source: None,
                 issue: None,
@@ -445,6 +477,7 @@ fn variant(
                         default_for: vec![*accent],
                         setting: None,
                         profile: None,
+                        profile_sources: None,
                         asset_id: None,
                         source: None,
                         issue: Some(RequirementIssue::MissingConfiguration),
@@ -601,6 +634,7 @@ fn variant(
                     default_for: vec![*accent],
                     setting: None,
                     profile: None,
+                    profile_sources: None,
                     asset_id: None,
                     source: None,
                     issue: Some(RequirementIssue::MissingConfiguration),

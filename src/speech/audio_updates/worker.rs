@@ -159,13 +159,16 @@ async fn renew(pool: &PgPool, claim: &Claim) -> Result<(), AppError> {
 async fn effective(
     conn: &mut sqlx::PgConnection,
     profile: &VoiceProfileV3,
-    source: &GeneratedSpeechSource,
+    source_for_accent: &impl Fn(
+        Option<crate::speech::locale::AccentGroup>,
+    ) -> Result<GeneratedSpeechSource, AppError>,
     path: &str,
     dialect: Option<&str>,
     active: &[&str],
     groups: Option<&[super::super::library::dto::DubbingGroup]>,
 ) -> Result<Vec<VoiceSettingV3>, AppError> {
-    let side = match source {
+    let source = source_for_accent(None)?;
+    let side = match &source {
         GeneratedSpeechSource::Phoneme {
             phoneme_locale: Some(locale),
             ..
@@ -194,7 +197,12 @@ async fn effective(
             && profile.mode(accent) == Some(VoiceProfileModeV3::Inherit)
     }) {
         let locale = if accent == "gb" { "en-GB" } else { "en-US" };
-        let content = source.resolve(conn, locale).await?;
+        let selected_source = source_for_accent(Some(if accent == "gb" {
+            crate::speech::locale::AccentGroup::Uk
+        } else {
+            crate::speech::locale::AccentGroup::Us
+        }))?;
+        let content = selected_source.resolve(conn, locale).await?;
         let native = matches!(source, GeneratedSpeechSource::Phoneme { .. }).then_some(locale);
         result.extend(match groups {
             Some(groups) => {
@@ -254,11 +262,12 @@ async fn run(
         &claim.path,
         target.get("dialect").and_then(Value::as_str),
     );
-    let source = super::super::generated_source::source_at(&value, &claim.path)?;
+    let source_for_accent =
+        |accent| super::super::generated_source::source_at_for_accent(&value, &claim.path, accent);
     let mut settings = effective(
         &mut conn,
         &profile,
-        &source,
+        &source_for_accent,
         &claim.path,
         target.get("dialect").and_then(Value::as_str),
         &active,
@@ -267,7 +276,14 @@ async fn run(
     .await?;
     let mut hashes = vec![];
     for setting in &settings {
-        hashes.push(super::super::generated::prepare_effect(&mut conn, &source, setting).await?);
+        hashes.push(
+            super::super::generated::prepare_effect(
+                &mut conn,
+                &source_for_accent(setting.accent_group())?,
+                setting,
+            )
+            .await?,
+        );
     }
     // Only assets already owned by this target may be reused; cross-content claims remain forbidden.
     let mut old = vec![];
@@ -298,7 +314,7 @@ async fn run(
         match effective(
             &mut conn,
             &profile,
-            &source,
+            &source_for_accent,
             &claim.path,
             target.get("dialect").and_then(Value::as_str),
             &active,
@@ -310,8 +326,12 @@ async fn run(
                 let mut previous_hashes = vec![];
                 for setting in &before {
                     previous_hashes.push(
-                        super::super::generated::prepare_effect(&mut conn, &source, setting)
-                            .await?,
+                        super::super::generated::prepare_effect(
+                            &mut conn,
+                            &source_for_accent(setting.accent_group())?,
+                            setting,
+                        )
+                        .await?,
                     );
                 }
                 if previous_hashes == hashes {
@@ -346,6 +366,7 @@ async fn run(
             continue;
         }
         renew(pool, claim).await?;
+        let source = source_for_accent(setting.accent_group())?;
         let result = service
             .generate_background(
                 claim.actor,
@@ -405,7 +426,7 @@ async fn run(
     let latest = effective(
         &mut tx,
         &profile,
-        &source,
+        &source_for_accent,
         &claim.path,
         current
             .pointer(&claim.path)
@@ -420,7 +441,13 @@ async fn run(
     }
     for ((latest, setting), hash) in latest.iter().zip(&mut settings).zip(&hashes) {
         if latest.version_id != setting.version_id
-            || super::super::generated::prepare_effect(&mut tx, &source, latest).await? != *hash
+            || super::super::generated::prepare_effect(
+                &mut tx,
+                &source_for_accent(latest.accent_group())?,
+                latest,
+            )
+            .await?
+                != *hash
         {
             return Err(stale());
         }

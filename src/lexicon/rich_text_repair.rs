@@ -140,6 +140,26 @@ fn repair_pronunciation(
     }
 }
 
+fn repair_variant_spelling_speech(
+    speech: &mut super::dto::SpellingSpeechV3,
+    spelling: &str,
+    counts: &mut RepairCounts,
+) {
+    let mut changed = false;
+    for content in speech.contents_mut() {
+        if content.text != spelling
+            || !crate::lexicon::rich_text::canonicalize_spelling_speech(&mut content.clone())
+        {
+            *content = empty_rich_text(spelling);
+            changed = true;
+        }
+    }
+    if changed {
+        clear_voice_audio(&mut speech.voice_profile);
+        counts.spelling_speech_reset += 1;
+    }
+}
+
 fn repair_shared_variant(variant: &mut FormContentVariantV3, counts: &mut RepairCounts) {
     if let Some(rich) = variant.spelling_rich.as_ref() {
         let invalid = rich.text != variant.spelling
@@ -150,15 +170,8 @@ fn repair_shared_variant(variant: &mut FormContentVariantV3, counts: &mut Repair
         }
     }
     let spelling = variant.spelling.clone();
-    if let Some(speech) = variant.spelling_speech.as_mut()
-        && (speech.content.text != spelling
-            || !crate::lexicon::rich_text::canonicalize_spelling_speech(
-                &mut speech.content.clone(),
-            ))
-    {
-        speech.content = empty_rich_text(&spelling);
-        clear_voice_audio(&mut speech.voice_profile);
-        counts.spelling_speech_reset += 1;
+    if let Some(speech) = variant.spelling_speech.as_mut() {
+        repair_variant_spelling_speech(speech, &spelling, counts);
     }
     for pronunciation in &mut variant.pronunciations {
         repair_pronunciation(pronunciation, &spelling, counts);
@@ -174,15 +187,8 @@ fn repair_word_variant(variant: &mut impl WordVariantFields, counts: &mut Repair
         counts.spelling_rich_removed += 1;
     }
     let spelling = variant.spelling().to_owned();
-    if let Some(speech) = variant.spelling_speech_mut()
-        && (speech.content.text != spelling
-            || !crate::lexicon::rich_text::canonicalize_spelling_speech(
-                &mut speech.content.clone(),
-            ))
-    {
-        speech.content = empty_rich_text(&spelling);
-        clear_voice_audio(&mut speech.voice_profile);
-        counts.spelling_speech_reset += 1;
+    if let Some(speech) = variant.spelling_speech_mut() {
+        repair_variant_spelling_speech(speech, &spelling, counts);
     }
     for pronunciation in variant.pronunciations_mut() {
         repair_pronunciation(pronunciation, &spelling, counts);
