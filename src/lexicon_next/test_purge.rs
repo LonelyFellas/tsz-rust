@@ -1,7 +1,7 @@
 use axum::{Json, extract::State, http::HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{PgConnection, Row};
+use sqlx::{Connection, PgConnection, Row, postgres::PgAdvisoryLock};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -9,7 +9,7 @@ use crate::{
     admin::{AdminAuth, permissions},
     api::ApiJson,
     error::{AppError, ErrorCode},
-    platform::storage::{ObjectKey, StorageSpace},
+    platform::storage::ObjectKey,
     state::AppState,
     test_resources,
 };
@@ -33,6 +33,7 @@ pub struct TestPurgeResponse {
     pub audio_asset_ids: Vec<Uuid>,
 }
 
+#[derive(PartialEq)]
 struct AudioAsset {
     id: Uuid,
     object_key: ObjectKey,
@@ -240,7 +241,7 @@ async fn prepare(
     .await
     .map_err(AppError::internal)?;
     let asset_rows = sqlx::query(
-        "SELECT id,object_key,reclamation_started_at FROM lexicon.audio_assets WHERE id=ANY($1) FOR UPDATE",
+        "SELECT id,object_key,reclamation_started_at FROM lexicon.audio_assets WHERE id=ANY($1) ORDER BY id FOR UPDATE",
     )
     .bind(&asset_ids)
     .fetch_all(&mut *conn)
@@ -373,6 +374,18 @@ async fn delete_database(conn: &mut PgConnection, plan: &PurgePlan) -> Result<()
     .execute(&mut *conn)
     .await
     .map_err(AppError::internal)?;
+    // The command result contains every target ID, including targets from other batches.
+    sqlx::query(
+        "DELETE FROM lexicon_next.list_commands
+         WHERE request->>'action' IN ('archive','restore')
+           AND jsonb_typeof(result->'entry_ids')='array'
+           AND result->'entry_ids' <> '[]'::jsonb
+           AND to_jsonb($1::uuid[]) @> (result->'entry_ids')",
+    )
+    .bind(&plan.entry_ids)
+    .execute(&mut *conn)
+    .await
+    .map_err(AppError::internal)?;
     for sql in [
         "DELETE FROM lexicon_next.equivalents WHERE id IN (SELECT id FROM lexicon_next.nodes WHERE entry_id=ANY($1))",
         "DELETE FROM lexicon_next.definitions WHERE id IN (SELECT id FROM lexicon_next.nodes WHERE entry_id=ANY($1))",
@@ -420,7 +433,18 @@ pub async fn purge(
     let authorization = permissions::load(&state, &auth).await?;
     authorization.require("words.access")?;
     authorization.require("words.create")?;
-    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    // Serialize retries across both transactions and storage I/O, without holding
+    // the list-writer lock while waiting for storage.
+    let command_lock = PgAdvisoryLock::new(format!(
+        "lexicon_next.purge/{}/{}",
+        auth.subject, input.request_id
+    ));
+    let connection = state.pool.acquire().await.map_err(AppError::internal)?;
+    let mut connection = command_lock
+        .acquire(connection)
+        .await
+        .map_err(AppError::internal)?;
+    let mut tx = connection.begin().await.map_err(AppError::internal)?;
     super::repository::lock_list_writers(&mut tx).await?;
     if let Some(result) =
         existing_command(&mut tx, auth.subject, &run, input.request_id, &request).await?
@@ -433,20 +457,20 @@ pub async fn purge(
     tx.commit().await.map_err(AppError::internal)?;
 
     if !plan.assets.is_empty() {
-        let audio = StorageSpace::parse("audio").expect("constant space is valid");
-        let store = state.object_storage.get(&audio).map_err(|_| {
-            AppError::unavailable(ErrorCode::ServiceUnavailable, "audio storage unavailable")
+        let config = state.test_resources.as_ref().ok_or_else(|| {
+            AppError::unavailable(ErrorCode::ServiceUnavailable, "test storage unavailable")
         })?;
-        for asset in &plan.assets {
-            store.delete(&asset.object_key).await.map_err(|_| {
-                AppError::unavailable(ErrorCode::ServiceUnavailable, "audio object cleanup failed")
-            })?;
-        }
+        config
+            .purge_audio(&run, plan.assets.iter().map(|asset| &asset.object_key))
+            .await?;
     }
 
-    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let mut tx = connection.begin().await.map_err(AppError::internal)?;
     super::repository::lock_list_writers(&mut tx).await?;
-    let plan = prepare(&mut tx, &run, auth.subject, &input.entry_ids).await?;
+    let current = prepare(&mut tx, &run, auth.subject, &input.entry_ids).await?;
+    if current.assets != plan.assets || current.publication_ids != plan.publication_ids {
+        return Err(conflict("测试资源在清理期间发生变化，请重新核实后重试"));
+    }
     delete_database(&mut tx, &plan).await?;
     let result = TestPurgeResponse {
         run,
