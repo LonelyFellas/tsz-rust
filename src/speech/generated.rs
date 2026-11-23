@@ -125,6 +125,35 @@ pub(crate) fn effect_hash(
     Ok(Sha256::digest(serde_json::to_vec(&value).map_err(AppError::internal)?).to_vec())
 }
 
+#[derive(PartialEq, Eq)]
+pub(crate) enum StoredEffect {
+    Current,
+    LegacyGrammar,
+    Mismatch,
+}
+
+pub(crate) fn compare_stored_effect(
+    request: SynthesisRequest,
+    provider_version: &str,
+    stored: &[u8],
+    grammar: bool,
+) -> Result<StoredEffect, AppError> {
+    let current = effect_hash(&request, provider_version);
+    // Prefer the historical identity if both renders are identical, so existing
+    // publication confirmations stay valid until the asset itself is replaced.
+    if grammar
+        && effect_hash(&request.with_grammar(false), provider_version)
+            .is_ok_and(|legacy| stored == legacy)
+    {
+        return Ok(StoredEffect::LegacyGrammar);
+    }
+    Ok(if stored == current? {
+        StoredEffect::Current
+    } else {
+        StoredEffect::Mismatch
+    })
+}
+
 pub(crate) async fn prepare_effect(
     conn: &mut sqlx::PgConnection,
     source: &GeneratedSpeechSource,
@@ -1063,15 +1092,10 @@ pub(crate) async fn validate_bindings_with_forms(
             let (request, version) =
                 prepare_request(conn, &reference.source, &reference.setting, current, batch)
                     .await?;
-            // Previously bound grammar assets remain savable until the editor replaces them.
-            let matches = match effect_hash(&request, &version).map(|expected| effect == expected) {
-                Ok(true) => true,
-                _ if reference.source.is_grammar() => {
-                    effect == effect_hash(&request.with_grammar(false), &version)?
-                }
-                result => result?,
-            };
-            if row.get::<String, _>("state") != "ready" || !matches {
+            if row.get::<String, _>("state") != "ready"
+                || compare_stored_effect(request, &version, &effect, reference.source.is_grammar())?
+                    == StoredEffect::Mismatch
+            {
                 return Err(AppError::bad_request(
                     ErrorCode::InvalidSpeechPreview,
                     "正式音频与当前声音效果不一致，请重新生成或移除音频",
