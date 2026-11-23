@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    error::Error as _,
     fmt,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,7 +15,7 @@ use reqsign_core::{Context, Signer};
 use thiserror::Error;
 
 use super::{
-    error::{BackendErrorKind, StorageError, StorageOperation},
+    error::{BackendErrorKind, StorageError, StorageOperation, log_presign_read_failure},
     model::{
         MAX_OBJECT_KEY_BYTES, ObjectKey, ObjectMetadata, PresignedRequest, StoragePolicy,
         StorageSpace,
@@ -373,21 +374,49 @@ fn signed_expiration(uri: &str) -> Result<SystemTime, BackendErrorKind> {
         .ok_or_else(invalid)
 }
 
+// Error messages, source formatting and OpenDAL context can contain signed URLs.
+fn log_presign_error(error: &opendal::Error) {
+    let source = error.source();
+    let signer_kind = source
+        .and_then(|source| source.downcast_ref::<reqsign_core::Error>())
+        .map(reqsign_core::Error::kind);
+    let stage = if signer_kind.is_some() {
+        "oss_sign"
+    } else if source.is_some_and(|source| source.is::<http::Error>()) {
+        "oss_request"
+    } else {
+        "oss_presign"
+    };
+    log_presign_read_failure(
+        stage,
+        error.kind().into_static(),
+        signer_kind,
+        error.is_temporary(),
+    );
+}
+
 fn convert_presigned_request(
     request: opendal::raw::PresignedRequest,
     expires_in: Duration,
 ) -> Result<PresignedRequest, BackendErrorKind> {
     let mut headers = BTreeMap::new();
     for (name, value) in request.header() {
-        let value = value.to_str().map_err(|_| BackendErrorKind::Unexpected)?;
+        let value = value.to_str().map_err(|_| {
+            log_presign_read_failure("oss_signed_response", "InvalidHeader", None, false);
+            BackendErrorKind::Unexpected
+        })?;
         headers.insert(name.as_str().to_owned(), value.to_owned());
     }
+    let uri = request.uri().to_string();
+    let expires_at = signed_expiration(&uri).inspect_err(|_| {
+        log_presign_read_failure("oss_signed_response", "InvalidExpiration", None, false);
+    })?;
     Ok(PresignedRequest::new(
         request.method().as_str(),
-        request.uri().to_string(),
+        uri,
         headers,
         expires_in,
-        signed_expiration(&request.uri().to_string())?,
+        expires_at,
     ))
 }
 
@@ -467,7 +496,10 @@ impl ObjectStoreBackend for OssAdapter {
             .operator
             .presign_read(key.as_str(), expires_in)
             .await
-            .map_err(|error| self.map_error(StorageOperation::PresignRead, Some(key), error))?;
+            .map_err(|error| {
+                log_presign_error(&error);
+                self.map_error(StorageOperation::PresignRead, Some(key), error)
+            })?;
         convert_presigned_request(request, expires_in)
             .map_err(|kind| StorageError::backend(&self.space, StorageOperation::PresignRead, kind))
     }
@@ -737,6 +769,65 @@ mod tests {
             }
         );
         assert!(!mapped.to_string().contains("must-never-escape"));
+    }
+
+    #[test]
+    fn presign_diagnostics_log_categories_without_provider_text_or_signed_url() {
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let log = LogWriter::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("http.request", service_version = "test-build");
+            let _entered = span.enter();
+            let source = reqsign_core::Error::credential_invalid("private-access-key");
+            let error = opendal::raw::new_request_sign_error(source.into()).with_context(
+                "uri",
+                "https://example.test/audio?Signature=private-signature",
+            );
+            log_presign_error(&error);
+
+            let result = convert_presigned_request(
+                opendal::raw::PresignedRequest::new(
+                    http::Method::GET,
+                    "https://example.test/audio?Signature=private-signature"
+                        .parse()
+                        .unwrap(),
+                    http::HeaderMap::new(),
+                ),
+                Duration::from_secs(60),
+            );
+            assert!(result.is_err());
+        });
+
+        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("service_version=\"test-build\""));
+        assert!(log.contains(
+            "stage=\"oss_sign\" error_kind=\"Unexpected\" signer_kind=Some(CredentialInvalid)"
+        ));
+        assert!(log.contains("stage=\"oss_signed_response\" error_kind=\"InvalidExpiration\""));
+        assert!(!log.contains("private-access-key"));
+        assert!(!log.contains("private-signature"));
+        assert!(!log.contains("https://"));
     }
 
     #[test]

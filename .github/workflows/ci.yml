@@ -730,6 +730,8 @@ jobs:
 
       # 默认 feature：服务器不开 swagger，产物必须与它一致，不能用 --all-features。
       - name: Build release binary
+        env:
+          TSZ_BUILD_SHA: ${{ github.sha }}
         run: >-
           python3 ops/ci_metrics.py run --name release-build --
           cargo build --locked --release
