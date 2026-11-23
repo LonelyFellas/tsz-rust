@@ -58,7 +58,7 @@ processors:
       - set(log.severity_text, "ERROR") where log.severity_number == SEVERITY_NUMBER_ERROR
       - keep_keys(resource.attributes, [])
       - set(resource.attributes["service.name"], "tsz-rust")
-      - set(resource.attributes["service.version"], log.cache["version"]) where log.cache["version"] != nil and log.cache["version"] != "" and log.cache["version"] != "unknown"
+      - set(log.attributes["service.version"], log.cache["version"]) where log.cache["version"] != nil and log.cache["version"] != "" and log.cache["version"] != "unknown"
       - set(resource.attributes["deployment.environment.name"], "tshb-test")
   filter/request:
     error_mode: propagate
@@ -67,6 +67,9 @@ processors:
         - log.attributes["request_id"] == nil
         - log.attributes["http.response.status_code"] == nil and log.attributes["storage.failure.stage"] == nil
         - log.time_unix_nano < 1795343712518000974
+
+  groupbyattrs/version:
+    keys: [service.version]
 
 exporters:
   otlphttp/signoz:
@@ -90,5 +93,5 @@ service:
   pipelines:
     logs:
       receivers: [journald/tsz-rust]
-      processors: [memory_limiter, transform/request, filter/request]
+      processors: [memory_limiter, transform/request, filter/request, groupbyattrs/version]
       exporters: [otlphttp/signoz]
