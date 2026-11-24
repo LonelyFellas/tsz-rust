@@ -399,6 +399,9 @@ pub struct NextCapabilities {
     pub languages: Vec<NextLanguageCapability>,
     pub manual_drafts: bool,
     pub generation: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub generation_candidates: Option<bool>,
     pub publishing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]

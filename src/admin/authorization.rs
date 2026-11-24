@@ -196,6 +196,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::All(&["words.access", "words.edit"]),
     ),
     (
+        "POST",
+        "/lexicon-next/entries/{id}/generation/candidates",
+        RoutePolicy::All(&["words.access", "words.edit"]),
+    ),
+    (
         "PUT",
         "/lexicon-next/entries/{id}",
         RoutePolicy::All(&["words.access", "words.edit"]),
