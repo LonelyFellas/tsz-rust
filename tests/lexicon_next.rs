@@ -386,12 +386,11 @@ async fn detection_returns_all_source_records_without_creating_or_prefilling(poo
             .0,
         StatusCode::FORBIDDEN
     );
-    let unavailable = call(&state, Some(actor), "POST", "/detections", input.clone()).await;
+    let (status, empty) = call(&state, Some(actor), "POST", "/detections", input.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
     assert_eq!(
-        unavailable.0,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "{}",
-        unavailable.1
+        empty,
+        json!({"surface":"Colour","kind":"word","matches":[]})
     );
     let dataset: i64 = sqlx::query_scalar("INSERT INTO dictionary.datasets(version,source_name,source_version,rules_version,terms_sha256,regions_sha256,status) VALUES('create-matches-fixture','Test dictionary','terms-v1','v1',repeat('a',64),repeat('b',64),'active') RETURNING id")
         .fetch_one(&pool).await.unwrap();

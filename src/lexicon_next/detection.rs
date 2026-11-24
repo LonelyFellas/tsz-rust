@@ -1,6 +1,6 @@
 use super::{language, model::NextEntryKind};
 use crate::{
-    error::{AppError, ErrorCode},
+    error::AppError,
     lexicon::normalization::{NormalizedHeadword, normalize_headword},
 };
 use serde::{Deserialize, Serialize};
@@ -130,14 +130,6 @@ pub async fn detect(pool: &PgPool, input: NextDetectionInput) -> Result<NextDete
         .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let available: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dictionary.datasets d JOIN dictionary.content_imports i ON i.dataset_id=d.id WHERE d.status='active')")
-        .fetch_one(&mut *tx).await.map_err(AppError::internal)?;
-    if !available {
-        return Err(AppError::request_error(
-            ErrorCode::ServiceUnavailable,
-            "内置词典暂时不可用，请稍后重试。",
-        ));
-    }
     // Targets retain source spelling. ICU Unicode lowercase works on PostgreSQL
     // 16 and 18; the frozen Rust normalizer below decides actual equality.
     let regions = sqlx::query_as::<_, Region>(r#"
