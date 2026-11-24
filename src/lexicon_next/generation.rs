@@ -11,6 +11,9 @@ use crate::{
     state::AppState,
 };
 use axum::{Json, extract::State};
+use chrono::{DateTime, Utc};
+use reqwest::{Response, StatusCode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -20,7 +23,7 @@ use std::{
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum NextAgentSection {
     Forms,
@@ -54,6 +57,9 @@ pub struct NextAgentInput {
     pub existing_pos: Vec<String>,
     pub examples: Vec<String>,
     pub senses: Vec<NextAgentSenseContext>,
+    /// Bypass reuse for a single forms or grammar generation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_refresh: bool,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -180,9 +186,31 @@ fn unavailable() -> AppError {
     )
 }
 
-pub async fn available(state: &AppState) -> bool {
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextGenerationCandidate {
+    pub source_run_id: Uuid,
+    pub generated_at: DateTime<Utc>,
+    pub result: NextAgentResult,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextGenerationCandidates {
+    #[schema(required = true)]
+    pub candidate: Option<NextGenerationCandidate>,
+}
+
+#[derive(Default, Deserialize)]
+pub struct GenerationCapability {
+    pub generation: bool,
+    #[serde(default)]
+    pub generation_candidates: bool,
+}
+
+pub async fn capability(state: &AppState) -> GenerationCapability {
     let Some(config) = &state.vocabulary_agent else {
-        return false;
+        return GenerationCapability::default();
     };
     let Ok(response) = config
         .client
@@ -192,16 +220,13 @@ pub async fn available(state: &AppState) -> bool {
         .send()
         .await
     else {
-        return false;
+        return GenerationCapability::default();
     };
-    response.status().is_success()
-        && response
-            .bytes()
-            .await
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| v["generation"].as_bool())
-            == Some(true)
+    if response.status().is_success() {
+        decode(response).await.unwrap_or_default()
+    } else {
+        GenerationCapability::default()
+    }
 }
 
 async fn editable(
@@ -294,18 +319,23 @@ async fn published_materials(
         .collect()
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation",tag="admin-lexicon-next",security(("bearer_auth"=[])),
-    params(("id"=Uuid,Path)),request_body=NextAgentInput,responses((status=200,body=NextAgentResult),(status=401),(status=403),(status=404),(status=409),(status=422),(status=429),(status=503)))]
-pub async fn advance(
-    State(state): State<AppState>,
-    auth: AdminAuth,
-    ApiPath(id): ApiPath<Uuid>,
-    ApiJson(input): ApiJson<NextAgentInput>,
-) -> Result<Json<NextAgentResult>, AppError> {
-    let (kind, medium) = editable(&state, &auth, id, input.base_revision).await?;
-    let config = state.vocabulary_agent.as_ref().ok_or_else(unavailable)?;
+fn reusable_section(input: &NextAgentInput) -> Option<NextAgentSection> {
+    match input.sections.as_slice() {
+        [section @ (NextAgentSection::Forms | NextAgentSection::Grammar)] => Some(*section),
+        _ => None,
+    }
+}
+
+async fn prepare(
+    state: &AppState,
+    auth: &AdminAuth,
+    id: Uuid,
+    input: &NextAgentInput,
+) -> Result<String, AppError> {
+    let (kind, medium) = editable(state, auth, id, input.base_revision).await?;
     language::text(&input.headword, 200)?;
     if input.run_id.is_nil()
+        || (input.force_refresh && reusable_section(input).is_none())
         || input.headword.trim().is_empty()
         || !matches!(input.target.as_str(), "en-GB" | "en-US")
         || input.sections.is_empty()
@@ -360,29 +390,29 @@ pub async fn advance(
         "catalog": catalog, "senses": input.senses, "sections": input.sections,
         "existing_pos": input.existing_pos, "examples": input.examples,
     });
-    let mut response = config
+    Ok(json!({"scope":scope,"materials":materials}).to_string())
+}
+
+async fn send(
+    state: &AppState,
+    operation: &str,
+    body: &str,
+    timeout: Duration,
+) -> Result<Response, AppError> {
+    let config = state.vocabulary_agent.as_ref().ok_or_else(unavailable)?;
+    config
         .client
-        .post(format!("{}/v2/lexicon/advance", config.base_url))
+        .post(format!("{}/v2/lexicon/{operation}", config.base_url))
         .bearer_auth(&config.outbound_token)
         .header("Content-Type", "application/json")
-        .body(json!({"scope":scope,"materials":materials}).to_string())
-        .timeout(Duration::from_secs(50))
+        .body(body.to_owned())
+        .timeout(timeout)
         .send()
         .await
-        .map_err(|_| unavailable())?;
-    if response.status() == reqwest::StatusCode::CONFLICT {
-        return Err(AppError::conflict(
-            ErrorCode::RevisionConflict,
-            None,
-            "生成范围已变化，请重新生成",
-        ));
-    }
-    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Err(AppError::rate_limited(
-            ErrorCode::LexiconAssistantRateLimited,
-            "生成批次过多，稍后再试",
-        ));
-    }
+        .map_err(|_| unavailable())
+}
+
+async fn decode<T: DeserializeOwned>(mut response: Response) -> Result<T, AppError> {
     if !response.status().is_success() {
         return Err(unavailable());
     }
@@ -393,13 +423,100 @@ pub async fn advance(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let output: NextAgentResult = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    serde_json::from_slice(&bytes).map_err(|_| unavailable())
+}
+
+fn validate_binding(output: &NextAgentResult, input: &NextAgentInput) -> Result<(), AppError> {
     if output.run_id != input.run_id
         || output.base_revision != input.base_revision
         || output.snapshot_id != input.snapshot_id
         || !output.requires_human_review
     {
         return Err(unavailable());
+    }
+    Ok(())
+}
+
+fn endpoint_missing(response: &Response) -> bool {
+    matches!(
+        response.status(),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    )
+}
+
+#[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation",tag="admin-lexicon-next",security(("bearer_auth"=[])),
+    params(("id"=Uuid,Path)),request_body=NextAgentInput,responses((status=200,body=NextAgentResult),(status=401),(status=403),(status=404),(status=409),(status=422),(status=429),(status=503)))]
+pub async fn advance(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiJson(input): ApiJson<NextAgentInput>,
+) -> Result<Json<NextAgentResult>, AppError> {
+    let body = prepare(&state, &auth, id, &input).await?;
+    let timeout = Duration::from_secs(50);
+    let response = if input.force_refresh {
+        let refresh = send(&state, "refresh", &body, timeout).await?;
+        if endpoint_missing(&refresh) {
+            send(&state, "advance", &body, timeout).await?
+        } else {
+            refresh
+        }
+    } else {
+        send(&state, "advance", &body, timeout).await?
+    };
+    if response.status() == StatusCode::CONFLICT {
+        return Err(AppError::conflict(
+            ErrorCode::RevisionConflict,
+            None,
+            "生成范围已变化，请重新生成",
+        ));
+    }
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        return Err(AppError::rate_limited(
+            ErrorCode::LexiconAssistantRateLimited,
+            "生成批次过多，稍后再试",
+        ));
+    }
+    let output = decode(response).await?;
+    validate_binding(&output, &input)?;
+    editable(&state, &auth, id, input.base_revision).await?;
+    Ok(Json(output))
+}
+
+#[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation/candidates",tag="admin-lexicon-next",security(("bearer_auth"=[])),
+    params(("id"=Uuid,Path)),request_body=NextAgentInput,responses((status=200,body=NextGenerationCandidates),(status=401),(status=403),(status=404),(status=409),(status=422),(status=503)))]
+pub async fn candidates(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiJson(input): ApiJson<NextAgentInput>,
+) -> Result<Json<NextGenerationCandidates>, AppError> {
+    let body = prepare(&state, &auth, id, &input).await?;
+    let section = reusable_section(&input)
+        .filter(|_| !input.force_refresh)
+        .ok_or_else(language::invalid)?;
+    let response = send(&state, "candidates", &body, Duration::from_secs(8)).await?;
+    let output: NextGenerationCandidates = if endpoint_missing(&response) {
+        NextGenerationCandidates { candidate: None }
+    } else {
+        decode(response).await?
+    };
+    if let Some(candidate) = &output.candidate {
+        let result = &candidate.result;
+        validate_binding(result, &input)?;
+        let populated = match section {
+            NextAgentSection::Forms => !result.proposals.forms.is_empty(),
+            NextAgentSection::Grammar => !result.proposals.grammar.is_empty(),
+            _ => false,
+        };
+        if !result.done
+            || !populated
+            || !matches!(
+                result.steps.as_slice(), [step] if step.section == section && step.state == "completed"
+            )
+        {
+            return Err(unavailable());
+        }
     }
     editable(&state, &auth, id, input.base_revision).await?;
     Ok(Json(output))

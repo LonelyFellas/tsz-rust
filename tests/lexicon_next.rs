@@ -824,6 +824,73 @@ async fn generation_checks_ownership_revision_and_archive_before_agent_dispatch(
 }
 
 #[sqlx::test]
+async fn candidate_lookup_checks_edit_access_and_revision_before_contacting_agent(pool: PgPool) {
+    use std::sync::{Arc, Mutex};
+
+    let owner = admin(&pool, EDIT).await;
+    let outsider = admin(&pool, EDIT).await;
+    let read_only = admin(&pool, &["words.access"]).await;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let upstream = axum::Router::new().route(
+        "/v2/lexicon/candidates",
+        axum::routing::post({
+            let captured = captured.clone();
+            move |axum::Json(body): axum::Json<Value>| {
+                captured.lock().unwrap().push(body);
+                // A previous Agent version has generation but no candidate endpoint.
+                async { StatusCode::NOT_FOUND }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let mut state = AppState::for_test(pool);
+    state.vocabulary_agent = Some(Arc::new(tsz_rust::question_bank::worker::AgentConfig {
+        base_url,
+        outbound_token: "local-test-service-token-000000000".into(),
+        client: reqwest::Client::new(),
+    }));
+
+    let entry = create(&state, owner).await;
+    let id = entry["id"].as_str().unwrap();
+    let path = format!("/entries/{id}/generation/candidates");
+    let input = json!({
+        "run_id": Uuid::new_v4(), "base_revision": entry["revision"],
+        "snapshot_id": "a".repeat(64), "headword": "centre", "target": "en-GB",
+        "sections": ["forms"], "existing_pos": [], "examples": [], "senses": [],
+    });
+
+    for (actor, status) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some(read_only), StatusCode::FORBIDDEN),
+        (Some(outsider), StatusCode::FORBIDDEN),
+    ] {
+        assert_eq!(
+            call(&state, actor, "POST", &path, input.clone()).await.0,
+            status
+        );
+    }
+    let mut stale = input.clone();
+    stale["base_revision"] = json!(0);
+    assert_eq!(
+        call(&state, Some(owner), "POST", &path, stale).await.0,
+        StatusCode::CONFLICT
+    );
+    assert!(captured.lock().unwrap().is_empty());
+
+    assert_eq!(
+        call(&state, Some(owner), "POST", &path, input).await,
+        (StatusCode::OK, json!({"candidate": null}))
+    );
+    let forwarded = captured.lock().unwrap();
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0]["scope"]["actor_id"], json!(owner));
+    assert_eq!(forwarded[0]["scope"]["entry_id"], id);
+    server.abort();
+}
+
+#[sqlx::test]
 async fn current_permissions_and_strict_wire_boundaries(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let outsider = admin(&pool, EDIT).await;
