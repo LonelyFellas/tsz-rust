@@ -56,20 +56,10 @@ pub(super) fn relation_target_entry_ids(
 pub(super) fn map_dictionary_pos(values: &[String]) -> Vec<String> {
     let mut output = Vec::new();
     for value in values {
-        let normalized = value.trim().to_ascii_lowercase();
-        let mapped = match normalized.as_str() {
-            "noun" | "name" | "proper noun" => Some("noun"),
-            "pronoun" | "pron" => Some("pronoun"),
-            "verb" | "auxiliary" | "modal" => Some("verb"),
-            "adjective" | "adj" => Some("adjective"),
-            "adverb" | "adv" => Some("adverb"),
-            "preposition" | "prep" => Some("preposition"),
-            "article" => Some("article"),
-            "determiner" | "det" => Some("determiner"),
-            "conjunction" | "conj" => Some("conjunction"),
-            "numeral" | "number" | "num" => Some("numeral"),
-            "interjection" | "intj" => Some("interjection"),
-            _ => None,
+        let mapped = match crate::dictionary::pos::canonical(value) {
+            Some("proper_name") => Some("noun"),
+            Some("prepositional_phrase") => None,
+            mapped => mapped,
         };
         if let Some(mapped) = mapped
             && !output.iter().any(|existing| existing == mapped)

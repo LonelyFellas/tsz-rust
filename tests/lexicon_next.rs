@@ -394,12 +394,24 @@ async fn detection_returns_all_source_records_without_creating_or_prefilling(poo
     );
     let dataset: i64 = sqlx::query_scalar("INSERT INTO dictionary.datasets(version,source_name,source_version,rules_version,terms_sha256,regions_sha256,status) VALUES('create-matches-fixture','Test dictionary','terms-v1','v1',repeat('a',64),repeat('b',64),'active') RETURNING id")
         .fetch_one(&pool).await.unwrap();
-    sqlx::query("INSERT INTO dictionary.content_imports(dataset_id,input_sha256,source_locator,record_count,source_version) VALUES($1,repeat('c',64),'fixture-only',3,'content-v2')")
+    sqlx::query("INSERT INTO dictionary.content_imports(dataset_id,input_sha256,source_locator,record_count,source_version) VALUES($1,repeat('c',64),'fixture-only',10,'content-v2')")
         .bind(dataset).execute(&pool).await.unwrap();
     for (key, term, pos, gloss) in [
         ("colour-noun-a", "colour", "noun", "visible hue"),
         ("colour-noun-b", "colour", "noun", "a flag"),
         ("color-verb", "color", "verb", "give something a hue"),
+        ("guilty-adj", "guilty", "adj", "responsible"),
+        ("guilty-noun", "guilty", "noun", "a verdict"),
+        (
+            "guilty-raw",
+            "guilty",
+            "particle",
+            "unconfigured source code",
+        ),
+        ("london-name", "london", "name", "a city"),
+        ("ice-cream-noun", "ice cream", "noun", "a frozen dessert"),
+        ("the-article", "the", "article", "definite article"),
+        ("three-num", "three", "num", "a cardinal number"),
     ] {
         sqlx::query("INSERT INTO dictionary.entry_contents(dataset_id,source_key,normalized_term,pos,senses,forms,sounds,source_locator) VALUES($1,$2,$3,$4,$5,$6,$7,'fixture-only')")
             .bind(dataset).bind(key).bind(term).bind(pos)
@@ -435,6 +447,89 @@ async fn detection_returns_all_source_records_without_creating_or_prefilling(poo
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reverse["matches"], detected["matches"]);
+    assert!(detected.get("part_of_speech_mappings").is_none());
+
+    // The test catalog normally contains only the five basic word classes.
+    sqlx::query(
+        "INSERT INTO catalog.parts_of_speech(id, kind, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en)
+         VALUES ($1, 'phrase', 'phrase_noun', '名词性成分', 'Nominal constituent', '名词性成分', 'n.', 'Nominal constituent'),
+                ($2, 'word', 'numural', '数词', 'Numeral', '数词', 'num.', 'Numeral'),
+                ($3, 'word', 'determiner', '限定词', 'Determiner', '限定词', 'det.', 'Determiner')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO catalog.sub_parts_of_speech(id, part_of_speech_id, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en)
+         SELECT $1, id, 'ART', '冠词', 'Article', '冠词', 'art.', 'Article'
+         FROM catalog.parts_of_speech WHERE code = 'determiner'",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (surface, mappings) in [
+        (
+            "guilty",
+            json!([
+                {"source_code":"adj","part_of_speech":"adjective","base_form_only":false},
+                {"source_code":"noun","part_of_speech":"noun","base_form_only":false}
+            ]),
+        ),
+        (
+            "London",
+            json!([
+                {"source_code":"name","part_of_speech":"noun","sub_pos":"N-PROPER","base_form_only":true}
+            ]),
+        ),
+        (
+            "ice cream",
+            json!([
+                {"source_code":"noun","part_of_speech":"phrase_noun","base_form_only":false}
+            ]),
+        ),
+        (
+            "the",
+            json!([
+                {"source_code":"article","part_of_speech":"determiner","sub_pos":"ART","base_form_only":false}
+            ]),
+        ),
+        (
+            "three",
+            json!([
+                {"source_code":"num","part_of_speech":"numural","base_form_only":false}
+            ]),
+        ),
+        ("unlisted phrase", json!([])),
+    ] {
+        let req = Request::post(format!("{ROOT}/detections"))
+            .header("content-type", "application/json")
+            .header("x-tsz-next-dictionary-pos", "v1")
+            .header(
+                "authorization",
+                format!(
+                    "Bearer {}",
+                    state.admin_token_manager.generate(actor, "admin").unwrap()
+                ),
+            )
+            .body(Body::from(
+                json!({"target_language":"en","surface":surface}).to_string(),
+            ))
+            .unwrap();
+        let response = tsz_rust::router(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{surface}");
+        let result: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(result["part_of_speech_mappings"], mappings, "{surface}");
+        if surface == "guilty" {
+            assert_eq!(result["matches"][0]["part_of_speech"], "adj");
+            assert_eq!(result["matches"][2]["part_of_speech"], "particle");
+        }
+    }
     // Unicode lowercase and punctuation/space probes also run on CI's PostgreSQL 16.
     for (surface, kind) in [("i\u{307}", "word"), ("o'clock test", "phrase")] {
         let (status, linked) = call(
