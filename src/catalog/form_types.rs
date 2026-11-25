@@ -135,6 +135,13 @@ SELECT to_jsonb(f) || jsonb_build_object(
         UNION SELECT entry_id FROM lexicon.sentence_associations WHERE resolved_form_type = f.code
         UNION SELECT entry_id FROM lexicon.v3_phrase_sense_component_usages WHERE target_form_type = f.code
         UNION SELECT entry_id FROM lexicon.v3_phrase_variant_component_usages WHERE target_form_type = f.code
+        UNION SELECT e.id FROM lexicon_next.draft_revisions d
+            JOIN lexicon_next.entries e ON e.id = d.entry_id AND e.revision = d.revision
+            WHERE jsonb_path_query_array(d.document, '$.form_editor.pos[*].forms[*].form_type')
+                @> jsonb_build_array(f.code)
+        UNION SELECT p.entry_id FROM lexicon_next.publications p
+            WHERE jsonb_path_query_array(p.snapshot, '$.draft.form_editor.pos[*].forms[*].form_type')
+                @> jsonb_build_array(f.code)
     ) refs))
 FROM catalog.form_types f
 LEFT JOIN admins creator ON creator.id = f.created_by_admin_id
@@ -379,6 +386,8 @@ async fn lock(
         .fetch_optional(&mut **tx)
         .await
         .map_err(database_error)?;
+    // Next 保存会持有词形类型的 KEY SHARE 锁。取得行锁之后重新读取引用，
+    // 可以看到刚提交的草稿，防止和保存竞争时误删。
     let value = config(tx, id).await?;
     if value.revision != revision {
         return Err(AppError::conflict(

@@ -219,7 +219,8 @@ migration 初始化五个**基础词性**（2026-09-06 起：介词、冠词、�
 **词形变化归属**（2026-09-10 起）：词形变化不再是全局目录，每条挂在一个基本词性下，
 由 `catalog.form_types.part_of_speech_id` 记录；原形是唯一例外，对所有词性通用（该列为 null，
 并由 CHECK 约束保证只有原形如此）。展示字段的唯一性收敛到同一基本词性内，所以形容词与副词
-可以各有一个「比较级」；编码仍全局唯一，新建时由「父词性编码前 8 字 + 英文全称」派生。
+可以各有一个「比较级」。编码仍全局唯一。新建单词词形时沿用父词性编码前 8 字和英文全称，
+新建短语词形时由完整父词性编码和英文全称派生稳定编码。
 `allowed_form_types` 随之按词性收窄，词条侧不做硬校验，存量词条不受影响。
 删除基本词性前要求先清空它名下的词形变化（409 `part_of_speech_has_form_types`）。
 
@@ -581,7 +582,7 @@ DELETE 语句触发 `23503` 后当前事务已经失败，不能继续在同一�
 | 409  | `part_of_speech_conflict`      | 编码、名称或缩写冲突                                       |
 | 409  | `sub_part_of_speech_conflict`  | 编码或同父级名称冲突                                       |
 | 409  | `revision_conflict`            | PATCH body 或 DELETE query 的 `base_revision` 已过期       |
-| 400  | `invalid_form_type`            | 词形变化挂到短语词性（`field` 为 `part_of_speech_id`）      |
+| 400  | `invalid_form_type`            | 词形类型字段非法，例如为全局原形指定所属基本词性           |
 | 409  | `part_of_speech_in_use`        | 基本词性已被词条引用                                       |
 | 409  | `sub_part_of_speech_in_use`    | 细分词性已被词义引用                                       |
 | 422  | `invalid_request_body`         | 字段缺失、类型错误或出现未知/只读字段                      |

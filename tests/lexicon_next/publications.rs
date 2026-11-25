@@ -108,14 +108,44 @@ const PUBLISH: &[&str] = &[
     "words.restore",
 ];
 
+async fn assert_form_type_in_use(state: &AppState, actor: Uuid, form_type: Uuid) {
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(format!(
+            "/api/v1/admin/settings/form-types/{form_type}?base_revision=1"
+        ))
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                state.admin_token_manager.generate(actor, "admin").unwrap()
+            ),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "form_type_in_use");
+    assert_eq!(body["meta"]["usage_count"], 1);
+}
+
 #[sqlx::test]
 async fn phrase_form_groups_round_trip_and_publish(pool: PgPool) {
     let pos_id = Uuid::now_v7();
+    let plural_id = Uuid::now_v7();
     sqlx::query("INSERT INTO catalog.parts_of_speech (id, kind, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en) VALUES ($1, 'phrase', 'phrase_noun', '名词性成分', 'Nominal constituent', '名词性成分', 'np.', 'nominal constituent')")
         .bind(pos_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO catalog.form_types (id, part_of_speech_id, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en) VALUES ($1, $2, 'phrase_noun_plural', '复数', 'Plural', '复数', 'pl.', 'plural')")
-        .bind(Uuid::now_v7()).bind(pos_id).execute(&pool).await.unwrap();
-    let actor = admin(&pool, PUBLISH).await;
+        .bind(plural_id).bind(pos_id).execute(&pool).await.unwrap();
+    let mut permissions = PUBLISH.to_vec();
+    permissions.extend(["lexicon_settings.access", "lexicon_settings.delete"]);
+    let actor = admin(&pool, &permissions).await;
     let state = AppState::for_test(pool);
     let (status, entry) = full_call(
         &state,
@@ -167,6 +197,7 @@ async fn phrase_form_groups_round_trip_and_publish(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_form_type_in_use(&state, actor, plural_id).await;
     let (status, reopened) = full_call(&state, actor, "GET", &path, Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{reopened}");
     assert_eq!(
@@ -188,6 +219,7 @@ async fn phrase_form_groups_round_trip_and_publish(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{published}");
+    assert_form_type_in_use(&state, actor, plural_id).await;
     let (status, read) = full_call(
         &state,
         actor,
@@ -202,6 +234,29 @@ async fn phrase_form_groups_round_trip_and_publish(pool: PgPool) {
         read["current"]["snapshot"]["draft"]["form_editor"],
         reopened["draft"]["form_editor"]
     );
+
+    let mut updated = reopened["draft"].clone();
+    let updated_editor = &mut updated["form_editor"];
+    updated_editor["contents"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(1);
+    for field in ["forms", "form_groups"] {
+        updated_editor["pos"][0][field]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+    }
+    let (status, saved) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":updated}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_form_type_in_use(&state, actor, plural_id).await;
 }
 
 #[sqlx::test]
