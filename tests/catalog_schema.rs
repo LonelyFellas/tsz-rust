@@ -1487,12 +1487,17 @@ async fn form_type_ownership_constraint_names_are_stable(pool: PgPool) {
             .await
             .expect("查询名词应成功");
 
-    // 先清空细分词性，让删除只可能撞到词形归属这一个外键。
+    // 移除测试库中名词的细分词性和默认共享成员，单独验证词形归属的外键。
     sqlx::query("DELETE FROM catalog.sub_parts_of_speech WHERE part_of_speech_id = $1")
         .bind(noun)
         .execute(&pool)
         .await
         .expect("清空名词下的细分词性应成功");
+    sqlx::query("DELETE FROM catalog.form_sharing_members WHERE part_of_speech_id = $1")
+        .bind(noun)
+        .execute(&pool)
+        .await
+        .expect("清空名词下的默认共享成员应成功");
     let blocked = sqlx::query("DELETE FROM catalog.parts_of_speech WHERE id = $1")
         .bind(noun)
         .execute(&pool)
@@ -1756,24 +1761,63 @@ async fn parts_of_speech_kind_constraints(pool: PgPool) {
         Some("lexicon_entry_pos_catalog_pos_fkey"),
         "存量错配行仍须挡住删除词性，否则会留下悬空引用",
     );
+}
 
-    // 词形变化只认 word 词性。
-    let form_type_on_phrase = sqlx::query(
-        r#"
-        INSERT INTO catalog.form_types (
-            id, part_of_speech_id, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en
-        ) VALUES ($1, $2, 'phrase_form', '短语词形', 'Phrase form', '短语词形', 'pf', 'phrase form')
-        "#,
+#[sqlx::test]
+async fn phrase_form_type_migration_is_lossless_and_blocks_rollback_when_used(pool: PgPool) {
+    let down = include_str!("../migrations/20261125110000_allow_phrase_form_type_owners.down.sql");
+    let up = include_str!("../migrations/20261125110000_allow_phrase_form_type_owners.up.sql");
+    let snapshot = "SELECT jsonb_agg(to_jsonb(f) ORDER BY id) FROM catalog.form_types f";
+    let before: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(down).execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(up).execute(&mut *tx).await.unwrap();
+    let after: serde_json::Value = sqlx::query_scalar(snapshot)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    tx.commit().await.unwrap();
+
+    let part = insert_part_with_kind(
+        &pool,
+        "phrase",
+        "phrase_noun",
+        [
+            "短语名词",
+            "Nominal phrase",
+            "np.",
+            "短语名词",
+            "nominal phrase",
+        ],
     )
-    .bind(Uuid::now_v7())
-    .bind(phrase_noun)
+    .await
+    .unwrap();
+    let form = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO catalog.form_types (id, part_of_speech_id, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en) VALUES ($1, $2, 'phrase_plural', '复数', 'Plural', '复数', 'pl.', 'plural')",
+    )
+    .bind(form)
+    .bind(part)
     .execute(&pool)
-    .await;
-    assert_db_error(
-        form_type_on_phrase,
-        FOREIGN_KEY_VIOLATION,
-        Some("catalog_form_types_part_of_speech_fkey"),
-        "词形变化不能挂到短语词性下",
+    .await
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let error = sqlx::raw_sql(down).execute(&mut *tx).await.unwrap_err();
+    assert!(
+        error.to_string().contains("phrase form types exist"),
+        "{error}"
+    );
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT part_of_speech_id FROM catalog.form_types WHERE id=$1"
+        )
+        .bind(form)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        part
     );
 }
 

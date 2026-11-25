@@ -1285,9 +1285,6 @@ fn english_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'sta
         (ErrorCode::InvalidFormType, "invalid text length") => {
             Some(("文本长度无效", "文字長度無效"))
         }
-        (ErrorCode::InvalidFormType, "form types belong to word parts of speech only") => {
-            Some(("词形类型仅适用于单词词性", "詞形類型僅適用於單字詞性"))
-        }
         (ErrorCode::InvalidFormType, "invalid form type code") => {
             Some(("词形类型代码无效", "詞形類型代碼無效"))
         }

@@ -4,6 +4,7 @@ use crate::{
     admin::{AdminAuth, permissions},
     api::{ApiJson, ApiPath, ApiQuery, PaginatedResponse},
     error::{AppError, ErrorCode, ProblemMeta},
+    lexicon::dto::EntryKind,
     state::AppState,
 };
 use axum::{
@@ -62,7 +63,9 @@ pub struct FormTypeConfig {
 pub struct FormTypeListQuery {
     /// code、中文名、英文名、缩写、简洁显示或英文全称的忽略大小写字面子串。
     pub q: Option<String>,
-    /// 只看该基本词性名下的词形变化；缺省返回全部（含对所有词性通用的原形）。
+    /// 只看单词或短语一侧的词形变化，缺省为 word；原形在两侧均可见。
+    pub kind: Option<EntryKind>,
+    /// 只看该基本词性名下的词形变化；含对所有词性通用的原形。
     pub part_of_speech_id: Option<Uuid>,
     #[param(default = 1, minimum = 1)]
     pub page: Option<u32>,
@@ -141,6 +144,9 @@ LEFT JOIN admins updater ON updater.id = f.updated_by_admin_id
 macro_rules! scope { () => { r#"
  WHERE ($1::text IS NULL OR strpos(lower(concat_ws(' ',f.code,f.name_zh,f.name_en,f.short_name_zh,f.abbreviation,f.full_name_en)),lower($1)) > 0)
    AND ($2::uuid IS NULL OR f.part_of_speech_id = $2 OR f.part_of_speech_id IS NULL)
+   AND (f.part_of_speech_id IS NULL OR EXISTS (
+       SELECT 1 FROM catalog.parts_of_speech p WHERE p.id = f.part_of_speech_id AND p.kind = $3
+   ))
 "# }; }
 
 fn database_error(error: sqlx::Error) -> AppError {
@@ -219,26 +225,19 @@ fn text(value: String, field: &'static str, max: usize) -> Result<String, AppErr
 }
 
 /// 词形变化必须挂在已存在的基本词性下；不存在时给出和词性接口一致的 404。
-/// 短语没有词形变化：挂到短语词性上是 400，数据库复合外键兜底。
 async fn require_part(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<(), AppError> {
-    let kind =
-        sqlx::query_scalar::<_, String>("SELECT kind FROM catalog.parts_of_speech WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(database_error)?;
-    match kind.as_deref() {
-        Some("word") => Ok(()),
-        Some(_) => Err(AppError::validation(
-            ErrorCode::InvalidFormType,
-            "part_of_speech_id",
-            "form types belong to word parts of speech only",
-        )),
-        None => Err(AppError::not_found_with_code(
-            ErrorCode::PartOfSpeechNotFound,
-            "part of speech not found",
-        )),
-    }
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM catalog.parts_of_speech WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?
+        .map(|_| ())
+        .ok_or_else(|| {
+            AppError::not_found_with_code(
+                ErrorCode::PartOfSpeechNotFound,
+                "part of speech not found",
+            )
+        })
 }
 
 async fn bump(tx: &mut Transaction<'_, Postgres>) -> Result<(), AppError> {
@@ -284,6 +283,7 @@ pub async fn list(
         page_size: query.page_size.unwrap_or(10),
     };
     let pos_filter = query.part_of_speech_id;
+    let kind = query.kind.unwrap_or(EntryKind::Word).as_str();
     if filter.page == 0 || !(1..=100).contains(&filter.page_size) {
         return Err(AppError::bad_request(
             ErrorCode::InvalidQuery,
@@ -302,16 +302,18 @@ pub async fn list(
     ))
     .bind(&filter.q)
     .bind(pos_filter)
+    .bind(kind)
     .fetch_one(&mut *tx)
     .await
     .map_err(database_error)?;
     let items = sqlx::query_scalar::<_, SqlJson<FormTypeConfig>>(concat!(
         select_config!(),
         scope!(),
-        " ORDER BY f.sort_order,f.created_at,f.id LIMIT $3 OFFSET $4"
+        " ORDER BY f.sort_order,f.created_at,f.id LIMIT $4 OFFSET $5"
     ))
     .bind(&filter.q)
     .bind(pos_filter)
+    .bind(kind)
     .bind(filter.limit())
     .bind(filter.offset())
     .fetch_all(&mut *tx)

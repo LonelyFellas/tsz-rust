@@ -101,8 +101,8 @@ WHERE id = TRUE;
   - `abbreviation` 忽略大小写；
   - `short_name_zh`（`catalog_parts_of_speech_short_name_zh_unique_idx`）；
   - `full_name_en` 忽略大小写（`catalog_parts_of_speech_full_name_en_unique_idx`）；
-- `(id, kind)` 另有唯一约束 `catalog_parts_of_speech_id_kind_key`，是 `lexicon_entry_pos_catalog_kind_fkey`
-  与 `catalog_form_types_part_of_speech_fkey` 的引用目标：单词词条只能挂单词词性，词形变化只能挂单词词性。
+- `(id, kind)` 另有唯一约束 `catalog_parts_of_speech_id_kind_key`，是 `lexicon_entry_pos_catalog_kind_fkey` 的引用目标，确保词条与词性类别一致。
+  `catalog_form_types_part_of_speech_fkey` 按词性 ID 引用，支持单词和短语两侧的词形类型。
   引用保护（删词性报 `part_of_speech_in_use`）仍由单列的 `lexicon_entry_pos_catalog_pos_fkey` 承担——
   复合外键对 kind 错配的存量行视同没有引用，收窄它会在数据库层放出悬空引用；
 - `sort_order` 接受完整的 PostgreSQL `INTEGER`（有符号 32 位整数）值域并允许重复；读取时按
