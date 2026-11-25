@@ -326,14 +326,15 @@ async fn published_materials(
         .collect()
 }
 
-fn reusable_section(input: &NextAgentInput) -> Option<NextAgentSection> {
+fn reusable_section(sections: &[NextAgentSection], extended: bool) -> Option<NextAgentSection> {
     use NextAgentSection::*;
-    match input.sections.as_slice() {
+    match sections {
+        [section @ (Forms | Grammar)] => Some(*section),
         [
-            section @ (Forms | Grammar | Groups | Senses | Definitions | Equivalents | Relations
-            | Examples | Translations),
-        ] => Some(*section),
-        [Senses, Dialect] => Some(Senses),
+            section @ (Groups | Senses | Definitions | Equivalents | Relations | Examples
+            | Translations),
+        ] if extended => Some(*section),
+        [Senses, Dialect] if extended => Some(Senses),
         _ => None,
     }
 }
@@ -379,11 +380,12 @@ async fn prepare<'a>(
     id: Uuid,
     input: &NextAgentInput,
     (kind, medium): (String, String),
-    request_grammar_sub_pos: bool,
+    headers: &HeaderMap,
 ) -> Result<(&'a AgentConfig, String, GrammarSubPosCatalog), AppError> {
     language::text(&input.headword, 200)?;
     if input.run_id.is_nil()
-        || (input.force_refresh && reusable_section(input).is_none())
+        || (input.force_refresh
+            && reusable_section(&input.sections, supports_section_candidates(headers)).is_none())
         || input.headword.trim().is_empty()
         || !matches!(input.target.as_str(), "en-GB" | "en-US")
         || input.sections.is_empty()
@@ -407,7 +409,7 @@ async fn prepare<'a>(
     }
     let config = state.vocabulary_agent.as_deref().ok_or_else(unavailable)?;
     // A failed probe must not change the scope of an already admitted run.
-    let recommend_sub_pos = request_grammar_sub_pos
+    let recommend_sub_pos = supports_grammar_sub_pos(headers)
         && input.sections.contains(&NextAgentSection::Grammar)
         && read_capability(config).await?.grammar_sub_pos;
     let parts = CatalogService::new(CatalogRepository::new(state.pool.clone()))
@@ -530,19 +532,12 @@ pub async fn advance(
     ApiJson(input): ApiJson<NextAgentInput>,
 ) -> Result<Json<NextAgentResult>, AppError> {
     let entry = editable(&state, &auth, id, input.base_revision).await?;
-    let (config, body, grammar_sub_pos) = prepare(
-        &state,
-        &auth,
-        id,
-        &input,
-        entry,
-        supports_grammar_sub_pos(&headers),
-    )
-    .await?;
-    let section_candidates = supports_section_candidates(&headers)
-        && reusable_section(&input).is_some_and(|section| {
-            !matches!(section, NextAgentSection::Forms | NextAgentSection::Grammar)
-        });
+    let (config, body, grammar_sub_pos) =
+        prepare(&state, &auth, id, &input, entry, &headers).await?;
+    let section_candidates =
+        reusable_section(&input.sections, supports_section_candidates(&headers)).is_some_and(
+            |section| !matches!(section, NextAgentSection::Forms | NextAgentSection::Grammar),
+        );
     let timeout = Duration::from_secs(50);
     let response = if input.force_refresh {
         let refresh = send(config, "refresh", &body, timeout, section_candidates).await?;
@@ -584,20 +579,13 @@ pub async fn candidates(
     ApiJson(input): ApiJson<NextAgentInput>,
 ) -> Result<Json<NextGenerationCandidates>, AppError> {
     let entry = editable(&state, &auth, id, input.base_revision).await?;
-    let section = reusable_section(&input)
+    let section = reusable_section(&input.sections, supports_section_candidates(&headers))
         .filter(|_| !input.force_refresh)
         .ok_or_else(language::invalid)?;
-    let (config, body, grammar_sub_pos) = prepare(
-        &state,
-        &auth,
-        id,
-        &input,
-        entry,
-        supports_grammar_sub_pos(&headers),
-    )
-    .await?;
-    let section_candidates = supports_section_candidates(&headers)
-        && !matches!(section, NextAgentSection::Forms | NextAgentSection::Grammar);
+    let (config, body, grammar_sub_pos) =
+        prepare(&state, &auth, id, &input, entry, &headers).await?;
+    let section_candidates =
+        !matches!(section, NextAgentSection::Forms | NextAgentSection::Grammar);
     let response = send(
         config,
         "candidates",
@@ -648,6 +636,19 @@ mod tests {
     use super::*;
     use crate::admin::{AdminRepository, AdminRole, NewAdmin};
     use sqlx::PgPool;
+
+    #[test]
+    fn new_reusable_sections_require_client_negotiation() {
+        use NextAgentSection::*;
+
+        assert_eq!(reusable_section(&[Forms], false), Some(Forms));
+        assert_eq!(reusable_section(&[Grammar], false), Some(Grammar));
+        for sections in [&[Senses][..], &[Senses, Dialect]] {
+            assert_eq!(reusable_section(sections, false), None);
+            assert_eq!(reusable_section(sections, true), Some(Senses));
+        }
+        assert_eq!(reusable_section(&[Dialect], true), None);
+    }
 
     #[tokio::test]
     async fn capability_failure_is_distinct_from_a_legacy_response() {
