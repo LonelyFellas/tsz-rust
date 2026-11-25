@@ -2040,7 +2040,7 @@ async fn phrase_parts_of_speech_live_in_their_own_kind(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn form_types_reject_phrase_parts_of_speech(pool: PgPool) {
+async fn phrase_form_types_support_catalog_and_filter_before_paging(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin_id = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
     let bearer = token(&state, admin_id, AdminRole::SuperAdmin);
@@ -2065,11 +2065,6 @@ async fn form_types_reject_phrase_parts_of_speech(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{phrase_noun}");
     let phrase_noun_id = phrase_noun["id"].as_str().unwrap().to_owned();
-    let noun_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
 
     let mut input = json!({
         "part_of_speech_id": phrase_noun_id,
@@ -2081,7 +2076,7 @@ async fn form_types_reject_phrase_parts_of_speech(pool: PgPool) {
         "full_name_en": "phrase variant",
         "sort_order": 100
     });
-    let (status, _, body, _) = call(
+    let (status, _, created, _) = call(
         &state,
         Method::POST,
         path,
@@ -2089,9 +2084,62 @@ async fn form_types_reject_phrase_parts_of_speech(pool: PgPool) {
         Some(input.clone()),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["code"], "invalid_form_type");
-    assert_eq!(body["field"], "part_of_speech_id");
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["part_of_speech_id"], phrase_noun_id);
+    let id = created["id"].as_str().unwrap();
+
+    let (status, _, catalog, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/catalog"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let phrase = catalog["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|part| part["id"] == phrase_noun_id)
+        .unwrap();
+    assert_eq!(phrase["allowed_form_types"], json!(["phrase_variant"]));
+    assert_eq!(phrase["default_form_types"], json!(["phrase_variant"]));
+
+    let (status, _, page, _) = call(
+        &state,
+        Method::GET,
+        &format!("{path}?kind=phrase&page=2&page_size=1"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["pagination"]["total"], 2);
+    assert_eq!(page["items"][0]["id"], id);
+    for query in ["q=phrase_variant", "kind=word&q=phrase_variant"] {
+        let (status, _, page, _) = call(
+            &state,
+            Method::GET,
+            &format!("{path}?{query}"),
+            Some(&bearer),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["pagination"]["total"], 0);
+    }
+    let (status, _, page, _) = call(
+        &state,
+        Method::GET,
+        &format!("{path}?kind=phrase&part_of_speech_id={phrase_noun_id}"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["code"], "base");
+    assert_eq!(page["items"][1]["id"], id);
 
     // 不存在的词性仍是 404，与词性接口一致。
     input["part_of_speech_id"] = json!(Uuid::now_v7());
@@ -2106,22 +2154,11 @@ async fn form_types_reject_phrase_parts_of_speech(pool: PgPool) {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["code"], "part_of_speech_not_found");
 
-    // 建在名词下没问题，改挂到短语词性同样 400。
-    input["part_of_speech_id"] = json!(noun_id);
-    let (status, _, created, _) = call(
-        &state,
-        Method::POST,
-        path,
-        Some(&bearer),
-        Some(input.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{created}");
-    let id = created["id"].as_str().unwrap();
     let mut update = input.clone();
     update.as_object_mut().unwrap().remove("code");
     update["base_revision"] = json!(1);
     update["part_of_speech_id"] = json!(phrase_noun_id);
+    update["is_default"] = json!(false);
     let (status, _, body, _) = call(
         &state,
         Method::PATCH,
@@ -2130,9 +2167,9 @@ async fn form_types_reject_phrase_parts_of_speech(pool: PgPool) {
         Some(update),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["code"], "invalid_form_type");
-    assert_eq!(body["field"], "part_of_speech_id");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["part_of_speech_id"], phrase_noun_id);
+    assert_eq!(body["is_default"], false);
 }
 
 #[sqlx::test]

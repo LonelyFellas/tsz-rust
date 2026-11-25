@@ -1,0 +1,2 @@
+DROP INDEX lexicon_next.publication_form_type_usage_idx;
+DROP INDEX lexicon_next.draft_revision_form_type_usage_idx;

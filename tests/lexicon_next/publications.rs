@@ -108,6 +108,157 @@ const PUBLISH: &[&str] = &[
     "words.restore",
 ];
 
+async fn assert_form_type_in_use(state: &AppState, actor: Uuid, form_type: Uuid) {
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(format!(
+            "/api/v1/admin/settings/form-types/{form_type}?base_revision=1"
+        ))
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                state.admin_token_manager.generate(actor, "admin").unwrap()
+            ),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "form_type_in_use");
+    assert_eq!(body["meta"]["usage_count"], 1);
+}
+
+#[sqlx::test]
+async fn phrase_form_groups_round_trip_and_publish(pool: PgPool) {
+    let pos_id = Uuid::now_v7();
+    let plural_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO catalog.parts_of_speech (id, kind, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en) VALUES ($1, 'phrase', 'phrase_noun', '名词性成分', 'Nominal constituent', '名词性成分', 'np.', 'nominal constituent')")
+        .bind(pos_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO catalog.form_types (id, part_of_speech_id, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en) VALUES ($1, $2, 'phrase_noun_plural', '复数', 'Plural', '复数', 'pl.', 'plural')")
+        .bind(plural_id).bind(pos_id).execute(&pool).await.unwrap();
+    let mut permissions = PUBLISH.to_vec();
+    permissions.extend(["lexicon_settings.access", "lexicon_settings.delete"]);
+    let actor = admin(&pool, &permissions).await;
+    let state = AppState::for_test(pool);
+    let (status, entry) = full_call(
+        &state,
+        actor,
+        "POST",
+        "/entries",
+        json!({"target_language":"en","kind":"phrase","headword":"city centre"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{entry}");
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+
+    let mut editor = form_editor();
+    editor["pos"][0]["pos"] = json!("phrase_noun");
+    editor["contents"][0]["regional_variants"]["uk"]["spelling"] = json!("city centre");
+    editor["contents"][0]["regional_variants"]["us"]["spelling"] = json!("city center");
+    let mut plural = form_editor();
+    plural["contents"][0]["regional_variants"]["uk"]["spelling"] = json!("city centres");
+    plural["contents"][0]["regional_variants"]["us"]["spelling"] = json!("city centers");
+    plural["pos"][0]["forms"][0]["form_type"] = json!("phrase_noun_plural");
+    editor["contents"]
+        .as_array_mut()
+        .unwrap()
+        .push(plural["contents"][0].take());
+    for field in ["forms", "form_groups"] {
+        editor["pos"][0][field]
+            .as_array_mut()
+            .unwrap()
+            .push(plural["pos"][0][field][0].take());
+    }
+
+    let group = Uuid::now_v7();
+    let content = json!({
+        "schema_version":1,"headword":"city centre","forms":[],"form_editor":editor,
+        "sense_groups":[{"id":group,"name_zh":"中心城区","name_en":"central district"}],
+        "senses":[{"id":Uuid::now_v7(),"part_of_speech":"phrase_noun","level":"A1","sense_group_id":group,"equivalents":[],
+            "definitions":[
+                {"id":Uuid::now_v7(),"locale":"en","style":"definition","text":"the central part of a city","level":"A1","grammar_unbound":true},
+                {"id":Uuid::now_v7(),"locale":"zh-Hans","style":"definition","text":"市中心","level":"A1","grammar_unbound":true}
+            ]
+        }]
+    });
+    let (status, saved) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":content}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_form_type_in_use(&state, actor, plural_id).await;
+    let (status, reopened) = full_call(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(
+        reopened["draft"]["form_editor"],
+        saved["draft"]["form_editor"]
+    );
+    assert_eq!(
+        reopened["draft"]["form_editor"]["pos"][0]["form_groups"],
+        editor["pos"][0]["form_groups"]
+    );
+    let preview = checked(&state, actor, &path, 2, 1).await;
+    assert_eq!(preview["can_publish"], true, "{preview}");
+    let (status, published) = full_call(
+        &state,
+        actor,
+        "POST",
+        &format!("{path}/publications"),
+        command(&preview),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    assert_form_type_in_use(&state, actor, plural_id).await;
+    let (status, read) = full_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{path}/publication"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["status"], "published");
+    assert_eq!(
+        read["current"]["snapshot"]["draft"]["form_editor"],
+        reopened["draft"]["form_editor"]
+    );
+
+    let mut updated = reopened["draft"].clone();
+    let updated_editor = &mut updated["form_editor"];
+    updated_editor["contents"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(1);
+    for field in ["forms", "form_groups"] {
+        updated_editor["pos"][0][field]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+    }
+    let (status, saved) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":updated}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_form_type_in_use(&state, actor, plural_id).await;
+}
+
 #[sqlx::test]
 async fn publication_freezes_content_replays_and_preserves_history(pool: PgPool) {
     let actor = admin(&pool, PUBLISH).await;
