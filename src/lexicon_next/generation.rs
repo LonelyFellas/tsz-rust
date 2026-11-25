@@ -11,7 +11,7 @@ use crate::{
     question_bank::worker::AgentConfig,
     state::AppState,
 };
-use axum::{Json, extract::State};
+use axum::{Json, extract::State, http::HeaderMap};
 use chrono::{DateTime, Utc};
 use reqwest::{Response, StatusCode};
 use serde::de::DeserializeOwned;
@@ -58,7 +58,7 @@ pub struct NextAgentInput {
     pub existing_pos: Vec<String>,
     pub examples: Vec<String>,
     pub senses: Vec<NextAgentSenseContext>,
-    /// Bypass reuse for a single forms or grammar generation.
+    /// Bypass reuse for an independent forms, grammar or sense-group generation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force_refresh: bool,
 }
@@ -84,6 +84,10 @@ pub struct NextAgentGroup {
 pub struct NextAgentGrammar {
     pub pos: String,
     pub pattern: String,
+    /// Recommended catalog code under this part of speech, when supported and known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sub_pos: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -207,27 +211,29 @@ pub struct GenerationCapability {
     pub generation: bool,
     #[serde(default)]
     pub generation_candidates: bool,
+    #[serde(default)]
+    pub section_generation_candidates: bool,
+    #[serde(default)]
+    pub grammar_sub_pos: bool,
 }
 
 pub async fn capability(state: &AppState) -> GenerationCapability {
     let Some(config) = &state.vocabulary_agent else {
         return GenerationCapability::default();
     };
-    let Ok(response) = config
+    read_capability(config).await.unwrap_or_default()
+}
+
+async fn read_capability(config: &AgentConfig) -> Result<GenerationCapability, AppError> {
+    let response = config
         .client
         .get(format!("{}/v2/lexicon/capability", config.base_url))
         .bearer_auth(&config.outbound_token)
         .timeout(Duration::from_secs(2))
         .send()
         .await
-    else {
-        return GenerationCapability::default();
-    };
-    if response.status().is_success() {
-        decode(response).await.unwrap_or_default()
-    } else {
-        GenerationCapability::default()
-    }
+        .map_err(|_| unavailable())?;
+    decode(response).await
 }
 
 async fn editable(
@@ -320,10 +326,51 @@ async fn published_materials(
         .collect()
 }
 
-fn reusable_section(input: &NextAgentInput) -> Option<NextAgentSection> {
-    match input.sections.as_slice() {
-        [section @ (NextAgentSection::Forms | NextAgentSection::Grammar)] => Some(*section),
+fn reusable_section(sections: &[NextAgentSection], extended: bool) -> Option<NextAgentSection> {
+    use NextAgentSection::*;
+    match sections {
+        [section @ (Forms | Grammar)] => Some(*section),
+        [
+            section @ (Groups | Senses | Definitions | Equivalents | Relations | Examples
+            | Translations),
+        ] if extended => Some(*section),
+        [Senses, Dialect] if extended => Some(Senses),
         _ => None,
+    }
+}
+
+const SECTION_CANDIDATES_HEADER: &str = "x-tsz-next-section-candidates";
+
+pub(super) fn supports_section_candidates(headers: &HeaderMap) -> bool {
+    headers
+        .get(SECTION_CANDIDATES_HEADER)
+        .is_some_and(|value| value == "v1")
+}
+
+#[derive(Serialize)]
+struct GrammarSubPosOption {
+    code: String,
+    name_zh: String,
+    name_en: String,
+}
+
+type GrammarSubPosCatalog = BTreeMap<String, Vec<GrammarSubPosOption>>;
+
+fn supports_grammar_sub_pos(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-tsz-next-grammar-sub-pos")
+        .is_some_and(|value| value == "v1")
+}
+
+fn retain_grammar_sub_pos(rows: &mut [NextAgentGrammar], catalog: &GrammarSubPosCatalog) {
+    for row in rows {
+        if row.sub_pos.as_ref().is_some_and(|code| {
+            !catalog
+                .get(&row.pos)
+                .is_some_and(|options| options.iter().any(|option| option.code == *code))
+        }) {
+            row.sub_pos = None;
+        }
     }
 }
 
@@ -333,10 +380,12 @@ async fn prepare<'a>(
     id: Uuid,
     input: &NextAgentInput,
     (kind, medium): (String, String),
-) -> Result<(&'a AgentConfig, String), AppError> {
+    headers: &HeaderMap,
+) -> Result<(&'a AgentConfig, String, GrammarSubPosCatalog), AppError> {
     language::text(&input.headword, 200)?;
     if input.run_id.is_nil()
-        || (input.force_refresh && reusable_section(input).is_none())
+        || (input.force_refresh
+            && reusable_section(&input.sections, supports_section_candidates(headers)).is_none())
         || input.headword.trim().is_empty()
         || !matches!(input.target.as_str(), "en-GB" | "en-US")
         || input.sections.is_empty()
@@ -359,15 +408,32 @@ async fn prepare<'a>(
         return Err(language::invalid());
     }
     let config = state.vocabulary_agent.as_deref().ok_or_else(unavailable)?;
+    // A failed probe must not change the scope of an already admitted run.
+    let recommend_sub_pos = supports_grammar_sub_pos(headers)
+        && input.sections.contains(&NextAgentSection::Grammar)
+        && read_capability(config).await?.grammar_sub_pos;
     let parts = CatalogService::new(CatalogRepository::new(state.pool.clone()))
         .catalog()
         .await
         .map_err(AppError::internal)?;
+    let mut grammar_sub_pos = GrammarSubPosCatalog::new();
     let catalog: BTreeMap<_, _> = parts
         .items
         .into_iter()
         .filter(|p| json!(p.kind) == kind)
         .map(|p| {
+            if recommend_sub_pos && !p.sub_parts.is_empty() {
+                let options = p
+                    .sub_parts
+                    .into_iter()
+                    .map(|sub_part| GrammarSubPosOption {
+                        code: sub_part.code,
+                        name_zh: sub_part.name_zh,
+                        name_en: sub_part.full_name_en,
+                    })
+                    .collect();
+                grammar_sub_pos.insert(p.code.clone(), options);
+            }
             let mut forms = vec![json!("base")];
             forms.extend(p.allowed_form_types.iter().map(|f| json!(f)));
             (p.code, forms)
@@ -385,16 +451,20 @@ async fn prepare<'a>(
             status: "no_match".into(),
         });
     }
-    let scope = json!({
+    let mut scope = json!({
         "run_id": input.run_id, "actor_id": auth.subject, "entry_id": id,
         "base_revision": input.base_revision, "snapshot_id": input.snapshot_id,
         "headword": input.headword, "target": input.target, "medium": medium,
         "catalog": catalog, "senses": input.senses, "sections": input.sections,
         "existing_pos": input.existing_pos, "examples": input.examples,
     });
+    if !grammar_sub_pos.is_empty() {
+        scope["grammar_sub_pos"] = json!(grammar_sub_pos);
+    }
     Ok((
         config,
         json!({"scope":scope,"materials":materials}).to_string(),
+        grammar_sub_pos,
     ))
 }
 
@@ -403,17 +473,21 @@ async fn send(
     operation: &str,
     body: &str,
     timeout: Duration,
+    section_candidates: bool,
 ) -> Result<Response, AppError> {
-    config
+    let request = config
         .client
         .post(format!("{}/v2/lexicon/{operation}", config.base_url))
         .bearer_auth(&config.outbound_token)
         .header("Content-Type", "application/json")
         .body(body.to_owned())
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|_| unavailable())
+        .timeout(timeout);
+    let request = if section_candidates {
+        request.header(SECTION_CANDIDATES_HEADER, "v1")
+    } else {
+        request
+    };
+    request.send().await.map_err(|_| unavailable())
 }
 
 async fn decode<T: DeserializeOwned>(mut response: Response) -> Result<T, AppError> {
@@ -449,25 +523,31 @@ fn endpoint_missing(response: &Response) -> bool {
 }
 
 #[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation",tag="admin-lexicon-next",security(("bearer_auth"=[])),
-    params(("id"=Uuid,Path)),request_body=NextAgentInput,responses((status=200,body=NextAgentResult),(status=401),(status=403),(status=404),(status=409),(status=422),(status=429),(status=503)))]
+    params(("id"=Uuid,Path),("x-tsz-next-grammar-sub-pos"=Option<String>,Header,description="v1 accepts catalog-scoped grammar subcategory recommendations."),("x-tsz-next-section-candidates"=Option<String>,Header,description="v1 enables reuse for independent section generation.")),request_body=NextAgentInput,responses((status=200,body=NextAgentResult),(status=401),(status=403),(status=404),(status=409),(status=422),(status=429),(status=503)))]
 pub async fn advance(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
+    headers: HeaderMap,
     ApiJson(input): ApiJson<NextAgentInput>,
 ) -> Result<Json<NextAgentResult>, AppError> {
     let entry = editable(&state, &auth, id, input.base_revision).await?;
-    let (config, body) = prepare(&state, &auth, id, &input, entry).await?;
+    let (config, body, grammar_sub_pos) =
+        prepare(&state, &auth, id, &input, entry, &headers).await?;
+    let section_candidates =
+        reusable_section(&input.sections, supports_section_candidates(&headers)).is_some_and(
+            |section| !matches!(section, NextAgentSection::Forms | NextAgentSection::Grammar),
+        );
     let timeout = Duration::from_secs(50);
     let response = if input.force_refresh {
-        let refresh = send(config, "refresh", &body, timeout).await?;
+        let refresh = send(config, "refresh", &body, timeout, section_candidates).await?;
         if endpoint_missing(&refresh) {
-            send(config, "advance", &body, timeout).await?
+            send(config, "advance", &body, timeout, section_candidates).await?
         } else {
             refresh
         }
     } else {
-        send(config, "advance", &body, timeout).await?
+        send(config, "advance", &body, timeout, section_candidates).await?
     };
     if response.status() == StatusCode::CONFLICT {
         return Err(AppError::conflict(
@@ -482,47 +562,70 @@ pub async fn advance(
             "生成批次过多，稍后再试",
         ));
     }
-    let output = decode(response).await?;
+    let mut output = decode(response).await?;
     validate_binding(&output, &input)?;
+    retain_grammar_sub_pos(&mut output.proposals.grammar, &grammar_sub_pos);
     editable(&state, &auth, id, input.base_revision).await?;
     Ok(Json(output))
 }
 
 #[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation/candidates",tag="admin-lexicon-next",security(("bearer_auth"=[])),
-    params(("id"=Uuid,Path)),request_body=NextAgentInput,responses((status=200,body=NextGenerationCandidates),(status=401),(status=403),(status=404),(status=409),(status=422),(status=503)))]
+    params(("id"=Uuid,Path),("x-tsz-next-grammar-sub-pos"=Option<String>,Header,description="v1 accepts catalog-scoped grammar subcategory recommendations."),("x-tsz-next-section-candidates"=Option<String>,Header,description="v1 enables lookup for independent section generation.")),request_body=NextAgentInput,responses((status=200,body=NextGenerationCandidates),(status=401),(status=403),(status=404),(status=409),(status=422),(status=503)))]
 pub async fn candidates(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
+    headers: HeaderMap,
     ApiJson(input): ApiJson<NextAgentInput>,
 ) -> Result<Json<NextGenerationCandidates>, AppError> {
     let entry = editable(&state, &auth, id, input.base_revision).await?;
-    let section = reusable_section(&input)
+    let section = reusable_section(&input.sections, supports_section_candidates(&headers))
         .filter(|_| !input.force_refresh)
         .ok_or_else(language::invalid)?;
-    let (config, body) = prepare(&state, &auth, id, &input, entry).await?;
-    let response = send(config, "candidates", &body, Duration::from_secs(8)).await?;
-    let output: NextGenerationCandidates = if endpoint_missing(&response) {
+    let (config, body, grammar_sub_pos) =
+        prepare(&state, &auth, id, &input, entry, &headers).await?;
+    let section_candidates =
+        !matches!(section, NextAgentSection::Forms | NextAgentSection::Grammar);
+    let response = send(
+        config,
+        "candidates",
+        &body,
+        Duration::from_secs(8),
+        section_candidates,
+    )
+    .await?;
+    let mut output: NextGenerationCandidates = if endpoint_missing(&response) {
         NextGenerationCandidates { candidate: None }
     } else {
         decode(response).await?
     };
-    if let Some(candidate) = &output.candidate {
-        let result = &candidate.result;
+    if let Some(candidate) = &mut output.candidate {
+        let result = &mut candidate.result;
         validate_binding(result, &input)?;
-        let populated = match section {
+        let populated = input.sections.iter().any(|section| match section {
             NextAgentSection::Forms => !result.proposals.forms.is_empty(),
             NextAgentSection::Grammar => !result.proposals.grammar.is_empty(),
-            _ => false,
-        };
+            NextAgentSection::Groups => !result.proposals.groups.is_empty(),
+            NextAgentSection::Senses => !result.proposals.senses.is_empty(),
+            NextAgentSection::Dialect => !result.proposals.dialect.is_empty(),
+            NextAgentSection::Definitions => !result.proposals.definitions.is_empty(),
+            NextAgentSection::Equivalents => !result.proposals.equivalents.is_empty(),
+            NextAgentSection::Relations => !result.proposals.relations.is_empty(),
+            NextAgentSection::Examples => !result.proposals.examples.is_empty(),
+            NextAgentSection::Translations => !result.proposals.translations.is_empty(),
+        });
         if !result.done
             || !populated
-            || !matches!(
-                result.steps.as_slice(), [step] if step.section == section && step.state == "completed"
-            )
+            || !result.steps.iter().all(|step| step.state == "completed")
+            || !result
+                .steps
+                .iter()
+                .map(|step| step.section)
+                .eq(input.sections.iter().copied())
         {
             return Err(unavailable());
         }
+        retain_grammar_sub_pos(&mut result.proposals.grammar, &grammar_sub_pos);
     }
     editable(&state, &auth, id, input.base_revision).await?;
     Ok(Json(output))
@@ -533,6 +636,89 @@ mod tests {
     use super::*;
     use crate::admin::{AdminRepository, AdminRole, NewAdmin};
     use sqlx::PgPool;
+
+    #[test]
+    fn new_reusable_sections_require_client_negotiation() {
+        use NextAgentSection::*;
+
+        assert_eq!(reusable_section(&[Forms], false), Some(Forms));
+        assert_eq!(reusable_section(&[Grammar], false), Some(Grammar));
+        for sections in [&[Senses][..], &[Senses, Dialect]] {
+            assert_eq!(reusable_section(sections, false), None);
+            assert_eq!(reusable_section(sections, true), Some(Senses));
+        }
+        assert_eq!(reusable_section(&[Dialect], true), None);
+    }
+
+    #[tokio::test]
+    async fn capability_failure_is_distinct_from_a_legacy_response() {
+        use axum::{Router, response::IntoResponse, routing::get};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let router = Router::new().route(
+            "/v2/lexicon/capability",
+            get(move || {
+                let failed_once = failed_once.clone();
+                async move {
+                    if !failed_once.swap(true, Ordering::Relaxed) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    Json(json!({"generation": true, "generation_candidates": true})).into_response()
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let config = AgentConfig {
+            base_url: format!("http://{address}"),
+            outbound_token: "isolated-probe".into(),
+            client: reqwest::Client::new(),
+        };
+
+        assert!(read_capability(&config).await.is_err());
+        let legacy = read_capability(&config).await.unwrap();
+        assert!(legacy.generation && legacy.generation_candidates);
+        assert!(!legacy.grammar_sub_pos);
+        server.abort();
+    }
+
+    #[test]
+    fn grammar_recommendations_only_surface_for_current_catalog_options() {
+        let mut rows: Vec<NextAgentGrammar> = serde_json::from_value(json!([
+            {"pos": "verb", "pattern": "rely on someone", "sub_pos": "V-I"},
+            {"pos": "noun", "pattern": "a reliance", "sub_pos": "V-I"},
+            {"pos": "verb", "pattern": "rely upon someone"}
+        ]))
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        assert!(!supports_grammar_sub_pos(&headers));
+        headers.insert("x-tsz-next-grammar-sub-pos", "v1".parse().unwrap());
+        assert!(supports_grammar_sub_pos(&headers));
+        let catalog = GrammarSubPosCatalog::from([(
+            "verb".into(),
+            vec![GrammarSubPosOption {
+                code: "V-I".into(),
+                name_zh: "不及物动词".into(),
+                name_en: "intransitive verb".into(),
+            }],
+        )]);
+        retain_grammar_sub_pos(&mut rows, &catalog);
+        assert_eq!(rows[0].sub_pos.as_deref(), Some("V-I"));
+        assert!(rows[1].sub_pos.is_none());
+        assert!(rows[2].sub_pos.is_none());
+        retain_grammar_sub_pos(&mut rows, &GrammarSubPosCatalog::new());
+        assert!(
+            serde_json::to_value(&rows[0])
+                .unwrap()
+                .get("sub_pos")
+                .is_none()
+        );
+    }
 
     #[sqlx::test]
     async fn reference_materials_use_only_the_effective_published_snapshot(pool: PgPool) {
