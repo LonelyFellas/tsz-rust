@@ -792,6 +792,23 @@ async fn generation_checks_ownership_revision_and_archive_before_agent_dispatch(
     let path = format!("/entries/{id}/generation");
     let mut input = json!({"run_id":Uuid::new_v4(),"base_revision":1,"snapshot_id":"a".repeat(64),
         "headword":"tomorrow","target":"en-GB","sections":["senses"],"senses":[],"existing_pos":[],"examples":[]});
+    // Simulate unavailable reference materials in this isolated sqlx test database.
+    sqlx::query("ALTER TABLE lexicon_next.publications RENAME TO offline_publications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &state,
+            Some(actor),
+            "POST",
+            &format!("{path}/candidates"),
+            input.clone()
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
     assert_eq!(
         call(&state, Some(other), "POST", &path, input.clone())
             .await
