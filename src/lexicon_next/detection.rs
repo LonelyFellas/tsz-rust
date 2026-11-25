@@ -1,12 +1,13 @@
 use super::{language, model::NextEntryKind};
 use crate::{
+    dictionary::pos,
     error::AppError,
     lexicon::normalization::{NormalizedHeadword, normalize_headword},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use utoipa::ToSchema;
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -51,6 +52,81 @@ pub struct NextDetection {
     pub kind: NextEntryKind,
     /// Independent source records; no primary record or automatic draft prefill.
     pub matches: Vec<NextDictionaryMatch>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextDetectionResult {
+    pub surface: String,
+    pub kind: NextEntryKind,
+    pub matches: Vec<NextDictionaryMatch>,
+    /// Returned for clients opting in to catalog resolution. An empty list means no match resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub part_of_speech_mappings: Option<Vec<NextDictionaryPosMapping>>,
+}
+
+#[derive(Debug, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextDictionaryPosMapping {
+    pub source_code: String,
+    pub part_of_speech: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sub_pos: Option<String>,
+    /// A proper name alone does not imply the parent noun's inflection template.
+    pub base_form_only: bool,
+}
+
+type PosCatalog = BTreeMap<String, Vec<String>>;
+
+fn resolve_pos(
+    source_code: &str,
+    kind: &NextEntryKind,
+    catalog: &PosCatalog,
+) -> Option<NextDictionaryPosMapping> {
+    let canonical = pos::canonical(source_code);
+    let (code, sub_pos, base_form_only): (_, &[_], _) = match (kind, canonical) {
+        _ if catalog.contains_key(source_code) => (source_code, &[], false),
+        (NextEntryKind::Word, Some("proper_name")) => ("noun", &["NOUN-PROPER", "N-PROPER"], true),
+        (NextEntryKind::Word, Some("article")) => ("determiner", &["ART"], false),
+        (NextEntryKind::Word, Some("numeral")) if !catalog.contains_key("numeral") => {
+            ("numural", &[], false)
+        }
+        (NextEntryKind::Word, Some("prepositional_phrase")) => return None,
+        (NextEntryKind::Word, Some(code)) => (code, &[], false),
+        (NextEntryKind::Phrase, Some("noun")) => ("phrase_noun", &[], false),
+        (NextEntryKind::Phrase, Some("proper_name")) => ("phrase_noun", &[], true),
+        (NextEntryKind::Phrase, Some("verb")) => ("phrase_verbal_constituent", &[], false),
+        (NextEntryKind::Phrase, Some("adjective")) => ("phrase_adjectival_constituent", &[], false),
+        (NextEntryKind::Phrase, Some("adverb")) => ("phrase_adverbial_constituent", &[], false),
+        (NextEntryKind::Phrase, Some("pronoun")) => ("phrase_pronominal_constituent", &[], false),
+        (NextEntryKind::Phrase, Some("preposition" | "prepositional_phrase")) => {
+            ("phrase_prepositional_constituent", &[], false)
+        }
+        (NextEntryKind::Phrase, Some("determiner")) => {
+            ("phrase_determinative_constituent", &[], false)
+        }
+        (NextEntryKind::Phrase, Some("conjunction")) => {
+            ("phrase_conjunctive_constituent", &[], false)
+        }
+        (NextEntryKind::Phrase, Some("interjection")) => {
+            ("phrase_interjectional_constituen", &[], false)
+        }
+        (NextEntryKind::Phrase, Some("numeral")) => ("phrase_numeral_constituent", &[], false),
+        _ => (source_code, &[], false),
+    };
+    let sub_parts = catalog.get(code)?;
+    Some(NextDictionaryPosMapping {
+        source_code: source_code.to_owned(),
+        part_of_speech: code.to_owned(),
+        sub_pos: sub_pos
+            .iter()
+            .copied()
+            .find(|sub| sub_parts.iter().any(|item| item == sub))
+            .map(str::to_owned),
+        base_form_only,
+    })
 }
 
 #[derive(sqlx::FromRow)]
@@ -122,7 +198,11 @@ impl Record {
     }
 }
 
-pub async fn detect(pool: &PgPool, input: NextDetectionInput) -> Result<NextDetection, AppError> {
+pub async fn detect(
+    pool: &PgPool,
+    input: NextDetectionInput,
+    include_pos_mappings: bool,
+) -> Result<NextDetectionResult, AppError> {
     language::require_language(&input.target_language)?;
     let surface = NormalizedHeadword::parse(&input.surface).map_err(|_| language::invalid())?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
@@ -167,14 +247,47 @@ pub async fn detect(pool: &PgPool, input: NextDetectionInput) -> Result<NextDete
         WHERE c.normalized_term = ANY($1)
         ORDER BY c.normalized_term,c.pos,c.source_key
     "#).bind(candidates.into_iter().collect::<Vec<_>>()).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
-    tx.commit().await.map_err(AppError::internal)?;
-    Ok(NextDetection {
-        kind: if surface.display.contains(' ') {
-            NextEntryKind::Phrase
+    let (kind, catalog_kind) = if surface.display.contains(' ') {
+        (NextEntryKind::Phrase, "phrase")
+    } else {
+        (NextEntryKind::Word, "word")
+    };
+    let part_of_speech_mappings = if include_pos_mappings {
+        let mappings = if records.is_empty() {
+            Vec::new()
         } else {
-            NextEntryKind::Word
-        },
+            let catalog: PosCatalog = sqlx::query_as::<_, (String, Vec<String>)>(
+                r#"
+                SELECT p.code, ARRAY(
+                    SELECT s.code FROM catalog.sub_parts_of_speech s WHERE s.part_of_speech_id = p.id
+                )
+                FROM catalog.parts_of_speech p
+                WHERE p.kind = $1
+                "#,
+            )
+            .bind(catalog_kind)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(AppError::internal)?
+            .into_iter()
+            .collect();
+            let mut seen = BTreeSet::new();
+            records
+                .iter()
+                .map(|record| record.pos.as_str())
+                .filter(|source_code| seen.insert(*source_code))
+                .filter_map(|source_code| resolve_pos(source_code, &kind, &catalog))
+                .collect()
+        };
+        Some(mappings)
+    } else {
+        None
+    };
+    tx.commit().await.map_err(AppError::internal)?;
+    Ok(NextDetectionResult {
+        kind,
         surface: surface.display,
         matches: records.into_iter().map(Record::into_match).collect(),
+        part_of_speech_mappings,
     })
 }

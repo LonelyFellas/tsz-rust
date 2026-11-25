@@ -125,16 +125,22 @@ pub async fn match_entries(
     Ok(Json(result))
 }
 
-#[utoipa::path(post, path="/api/v1/admin/lexicon-next/detections", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=detection::NextDetectionInput, responses((status=200, body=detection::NextDetection), (status=401), (status=403), (status=422), (status=503)))]
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/detections", tag="admin-lexicon-next", security(("bearer_auth"=[])), request_body=detection::NextDetectionInput, params(("x-tsz-next-dictionary-pos"=Option<String>,Header,description="v1 resolves dictionary labels against the word or phrase part-of-speech catalog.")), responses((status=200, body=detection::NextDetectionResult), (status=401), (status=403), (status=422), (status=503)))]
 pub async fn detect(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<detection::NextDetectionInput>,
-) -> Result<Json<detection::NextDetection>, AppError> {
+) -> Result<Json<detection::NextDetectionResult>, AppError> {
     permissions::load(&state, &auth)
         .await?
         .require("words.create")?;
-    Ok(Json(detection::detect(&state.pool, input).await?))
+    let include_pos_mappings = headers
+        .get("x-tsz-next-dictionary-pos")
+        .is_some_and(|value| value == "v1");
+    Ok(Json(
+        detection::detect(&state.pool, input, include_pos_mappings).await?,
+    ))
 }
 
 #[utoipa::path(get, path="/api/v1/admin/lexicon-next/capabilities", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-generation"=Option<String>,Header,description="v1 probes the generation service; omission keeps generation false."),("x-tsz-next-generation-candidates"=Option<String>,Header,description="v1 negotiates candidate lookup and refresh."),("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-sentence-associations"=Option<String>, Header, description="v1 negotiates normalized sentence word/phrase associations."),("x-tsz-next-grammar-form-links"=Option<String>, Header, description="v1 negotiates normalized grammar form links."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=200, body=NextCapabilities), (status=401), (status=403)))]
