@@ -8,6 +8,7 @@ use crate::{
     catalog::{repository::CatalogRepository, service::CatalogService},
     error::{AppError, ErrorCode},
     lexicon::assistant::candidates::AssistantCandidatePos,
+    question_bank::worker::AgentConfig,
     state::AppState,
 };
 use axum::{Json, extract::State};
@@ -326,13 +327,13 @@ fn reusable_section(input: &NextAgentInput) -> Option<NextAgentSection> {
     }
 }
 
-async fn prepare(
-    state: &AppState,
+async fn prepare<'a>(
+    state: &'a AppState,
     auth: &AdminAuth,
     id: Uuid,
     input: &NextAgentInput,
-) -> Result<String, AppError> {
-    let (kind, medium) = editable(state, auth, id, input.base_revision).await?;
+    (kind, medium): (String, String),
+) -> Result<(&'a AgentConfig, String), AppError> {
     language::text(&input.headword, 200)?;
     if input.run_id.is_nil()
         || (input.force_refresh && reusable_section(input).is_none())
@@ -357,6 +358,7 @@ async fn prepare(
     {
         return Err(language::invalid());
     }
+    let config = state.vocabulary_agent.as_deref().ok_or_else(unavailable)?;
     let parts = CatalogService::new(CatalogRepository::new(state.pool.clone()))
         .catalog()
         .await
@@ -390,16 +392,18 @@ async fn prepare(
         "catalog": catalog, "senses": input.senses, "sections": input.sections,
         "existing_pos": input.existing_pos, "examples": input.examples,
     });
-    Ok(json!({"scope":scope,"materials":materials}).to_string())
+    Ok((
+        config,
+        json!({"scope":scope,"materials":materials}).to_string(),
+    ))
 }
 
 async fn send(
-    state: &AppState,
+    config: &AgentConfig,
     operation: &str,
     body: &str,
     timeout: Duration,
 ) -> Result<Response, AppError> {
-    let config = state.vocabulary_agent.as_ref().ok_or_else(unavailable)?;
     config
         .client
         .post(format!("{}/v2/lexicon/{operation}", config.base_url))
@@ -452,17 +456,18 @@ pub async fn advance(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<NextAgentInput>,
 ) -> Result<Json<NextAgentResult>, AppError> {
-    let body = prepare(&state, &auth, id, &input).await?;
+    let entry = editable(&state, &auth, id, input.base_revision).await?;
+    let (config, body) = prepare(&state, &auth, id, &input, entry).await?;
     let timeout = Duration::from_secs(50);
     let response = if input.force_refresh {
-        let refresh = send(&state, "refresh", &body, timeout).await?;
+        let refresh = send(config, "refresh", &body, timeout).await?;
         if endpoint_missing(&refresh) {
-            send(&state, "advance", &body, timeout).await?
+            send(config, "advance", &body, timeout).await?
         } else {
             refresh
         }
     } else {
-        send(&state, "advance", &body, timeout).await?
+        send(config, "advance", &body, timeout).await?
     };
     if response.status() == StatusCode::CONFLICT {
         return Err(AppError::conflict(
@@ -491,11 +496,12 @@ pub async fn candidates(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<NextAgentInput>,
 ) -> Result<Json<NextGenerationCandidates>, AppError> {
-    let body = prepare(&state, &auth, id, &input).await?;
+    let entry = editable(&state, &auth, id, input.base_revision).await?;
     let section = reusable_section(&input)
         .filter(|_| !input.force_refresh)
         .ok_or_else(language::invalid)?;
-    let response = send(&state, "candidates", &body, Duration::from_secs(8)).await?;
+    let (config, body) = prepare(&state, &auth, id, &input, entry).await?;
+    let response = send(config, "candidates", &body, Duration::from_secs(8)).await?;
     let output: NextGenerationCandidates = if endpoint_missing(&response) {
         NextGenerationCandidates { candidate: None }
     } else {
