@@ -221,21 +221,19 @@ pub async fn capability(state: &AppState) -> GenerationCapability {
     let Some(config) = &state.vocabulary_agent else {
         return GenerationCapability::default();
     };
-    let Ok(response) = config
+    read_capability(config).await.unwrap_or_default()
+}
+
+async fn read_capability(config: &AgentConfig) -> Result<GenerationCapability, AppError> {
+    let response = config
         .client
         .get(format!("{}/v2/lexicon/capability", config.base_url))
         .bearer_auth(&config.outbound_token)
         .timeout(Duration::from_secs(2))
         .send()
         .await
-    else {
-        return GenerationCapability::default();
-    };
-    if response.status().is_success() {
-        decode(response).await.unwrap_or_default()
-    } else {
-        GenerationCapability::default()
-    }
+        .map_err(|_| unavailable())?;
+    decode(response).await
 }
 
 async fn editable(
@@ -408,9 +406,10 @@ async fn prepare<'a>(
         return Err(language::invalid());
     }
     let config = state.vocabulary_agent.as_deref().ok_or_else(unavailable)?;
+    // A failed probe must not change the scope of an already admitted run.
     let recommend_sub_pos = request_grammar_sub_pos
         && input.sections.contains(&NextAgentSection::Grammar)
-        && capability(state).await.grammar_sub_pos;
+        && read_capability(config).await?.grammar_sub_pos;
     let parts = CatalogService::new(CatalogRepository::new(state.pool.clone()))
         .catalog()
         .await
@@ -649,6 +648,43 @@ mod tests {
     use super::*;
     use crate::admin::{AdminRepository, AdminRole, NewAdmin};
     use sqlx::PgPool;
+
+    #[tokio::test]
+    async fn capability_failure_is_distinct_from_a_legacy_response() {
+        use axum::{Router, response::IntoResponse, routing::get};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let router = Router::new().route(
+            "/v2/lexicon/capability",
+            get(move || {
+                let failed_once = failed_once.clone();
+                async move {
+                    if !failed_once.swap(true, Ordering::Relaxed) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    Json(json!({"generation": true, "generation_candidates": true})).into_response()
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let config = AgentConfig {
+            base_url: format!("http://{address}"),
+            outbound_token: "isolated-probe".into(),
+            client: reqwest::Client::new(),
+        };
+
+        assert!(read_capability(&config).await.is_err());
+        let legacy = read_capability(&config).await.unwrap();
+        assert!(legacy.generation && legacy.generation_candidates);
+        assert!(!legacy.grammar_sub_pos);
+        server.abort();
+    }
 
     #[test]
     fn grammar_recommendations_only_surface_for_current_catalog_options() {
