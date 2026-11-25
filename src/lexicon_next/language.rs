@@ -50,6 +50,7 @@ pub fn capabilities() -> NextCapabilities {
         manual_drafts: true,
         generation: false,
         generation_candidates: None,
+        section_generation_candidates: None,
         publishing: true,
         form_editor: None,
         sense_groups: None,

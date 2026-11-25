@@ -143,7 +143,7 @@ pub async fn detect(
     ))
 }
 
-#[utoipa::path(get, path="/api/v1/admin/lexicon-next/capabilities", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-generation"=Option<String>,Header,description="v1 probes the generation service; omission keeps generation false."),("x-tsz-next-generation-candidates"=Option<String>,Header,description="v1 negotiates candidate lookup and refresh."),("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-sentence-associations"=Option<String>, Header, description="v1 negotiates normalized sentence word/phrase associations."),("x-tsz-next-grammar-form-links"=Option<String>, Header, description="v1 negotiates normalized grammar form links."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=200, body=NextCapabilities), (status=401), (status=403)))]
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/capabilities", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-generation"=Option<String>,Header,description="v1 probes the generation service; omission keeps generation false."),("x-tsz-next-generation-candidates"=Option<String>,Header,description="v1 negotiates candidate lookup and refresh."),("x-tsz-next-section-candidates"=Option<String>,Header,description="v1 negotiates additional section candidate lookup and refresh."),("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-sentence-associations"=Option<String>, Header, description="v1 negotiates normalized sentence word/phrase associations."),("x-tsz-next-grammar-form-links"=Option<String>, Header, description="v1 negotiates normalized grammar form links."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save.")), responses((status=200, body=NextCapabilities), (status=401), (status=403)))]
 pub async fn capabilities(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -165,6 +165,13 @@ pub async fn capabilities(
         {
             capability.generation_candidates =
                 Some(availability.generation && availability.generation_candidates);
+        }
+        if generation::supports_section_candidates(&headers) {
+            capability.section_generation_candidates = Some(
+                availability.generation
+                    && availability.generation_candidates
+                    && availability.section_generation_candidates,
+            );
         }
     }
     if supports_creation_snapshot(&headers) {
