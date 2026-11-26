@@ -62,6 +62,80 @@ fn nodes(editor: &SharedFormsStepContentV3) -> Vec<(Uuid, &'static str, Option<U
     nodes
 }
 
+/// Only new bindings inherit the catalog. A legacy write may omit all settings.
+pub(super) async fn prepare_question_eligibility(
+    conn: &mut PgConnection,
+    draft: &mut NextDraft,
+    previous: &NextDraft,
+) -> Result<(), AppError> {
+    let saved_ids: HashSet<_> = previous
+        .form_editor
+        .iter()
+        .flat_map(|e| &e.pos)
+        .flat_map(|p| &p.forms)
+        .map(|f| f.id)
+        .collect();
+    let saved_disabled: HashSet<_> = previous
+        .form_question_eligibility
+        .iter()
+        .filter(|setting| !setting.eligible)
+        .map(|setting| setting.form_id)
+        .collect();
+    let mut submitted = std::collections::HashMap::new();
+    for setting in std::mem::take(&mut draft.form_question_eligibility) {
+        if submitted
+            .insert(setting.form_id, setting.eligible)
+            .is_some()
+        {
+            return Err(language::invalid());
+        }
+    }
+    let mut pending = Vec::new();
+    let mut disabled_ids = Vec::new();
+    for form in draft
+        .form_editor
+        .iter()
+        .flat_map(|e| &e.pos)
+        .flat_map(|p| &p.forms)
+    {
+        match submitted.remove(&form.id) {
+            Some(false) => disabled_ids.push(form.id),
+            Some(true) => {}
+            None if saved_disabled.contains(&form.id) => disabled_ids.push(form.id),
+            None if !saved_ids.contains(&form.id) => pending.push((form.id, &form.form_type)),
+            None => {}
+        }
+    }
+    if !submitted.is_empty() {
+        return Err(language::invalid());
+    }
+    if !pending.is_empty() {
+        let disabled: HashSet<String> = sqlx::query_scalar(
+            "SELECT code FROM catalog.form_types WHERE NOT default_question_eligible",
+        )
+        .fetch_all(conn)
+        .await
+        .map_err(AppError::internal)?
+        .into_iter()
+        .collect();
+        disabled_ids.extend(
+            pending
+                .into_iter()
+                .filter(|(_, kind)| disabled.contains(*kind))
+                .map(|(id, _)| id),
+        );
+    }
+    disabled_ids.sort_unstable();
+    draft.form_question_eligibility = disabled_ids
+        .into_iter()
+        .map(|form_id| NextFormQuestionEligibility {
+            form_id,
+            eligible: false,
+        })
+        .collect();
+    Ok(())
+}
+
 pub(super) fn projection(draft: &NextDraft) -> Result<Vec<NextForm>, AppError> {
     let mut rows = draft.forms.clone();
     if let Some(editor) = &draft.form_editor {

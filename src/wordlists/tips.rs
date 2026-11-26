@@ -132,7 +132,7 @@ pub async fn transfer(
     }
     let ids = service::ids(&mut tx, id).await?;
     service::lock_entries(&mut tx, &ids, true).await?;
-    let requires_review:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM wordlist_items i JOIN lexicon.entries e ON e.id=i.entry_id WHERE i.wordlist_id=$1 AND i.approved_archive_generation IS DISTINCT FROM e.wordlist_archive_generation)").bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+    let requires_review:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM wordlist_items i JOIN learning_source.entries e ON e.id=i.entry_id WHERE i.wordlist_id=$1 AND i.approved_archive_generation IS DISTINCT FROM e.wordlist_archive_generation)").bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     if requires_review {
         return Err(AppError::conflict(
             ErrorCode::WordListConflict,

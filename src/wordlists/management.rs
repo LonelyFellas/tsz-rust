@@ -191,7 +191,7 @@ pub async fn visibility(
     Ok(result)
 }
 pub async fn approve_entries(tx: &mut Tx<'_>, id: Uuid) -> Result<(), AppError> {
-    sqlx::query("UPDATE wordlist_items i SET approved_lifecycle_revision=e.lifecycle_revision,approved_archive_generation=e.wordlist_archive_generation FROM lexicon.entries e WHERE i.wordlist_id=$1 AND e.id=i.entry_id").bind(id).execute(&mut **tx).await.map_err(AppError::internal)?;
+    sqlx::query("UPDATE wordlist_items i SET approved_lifecycle_revision=e.lifecycle_revision,approved_archive_generation=e.wordlist_archive_generation FROM learning_source.entries e WHERE i.wordlist_id=$1 AND e.id=i.entry_id").bind(id).execute(&mut **tx).await.map_err(AppError::internal)?;
     Ok(())
 }
 pub async fn recommend(

@@ -109,6 +109,24 @@ async fn ensure_no_external_references(
     conn: &mut PgConnection,
     entry_ids: &[Uuid],
 ) -> Result<(), AppError> {
+    let used_by_students: bool = sqlx::query_scalar(
+        "SELECT CASE WHEN EXISTS(SELECT FROM learning_source.reviews WHERE entry_id=ANY($1)) THEN
+            EXISTS(SELECT FROM wordlist_items WHERE entry_id=ANY($1))
+            OR EXISTS(SELECT FROM wordlist_review_requests WHERE entry_ids && $1)
+            OR EXISTS(SELECT FROM learning_memories WHERE entry_id=ANY($1))
+            OR EXISTS(SELECT FROM learning_questions WHERE entry_id=ANY($1) OR
+                jsonb_path_exists(answer_snapshot,'$.choice.content.options[*].candidate.source.entry_id ? (@ == $ids[*])', jsonb_build_object('ids',to_jsonb($1::uuid[]))))
+            OR EXISTS(SELECT FROM learning_cycle_units WHERE entry_id=ANY($1) OR
+                jsonb_path_exists(answer_snapshot,'$.choice.content.options[*].candidate.source.entry_id ? (@ == $ids[*])', jsonb_build_object('ids',to_jsonb($1::uuid[]))))
+            ELSE false END",
+    )
+    .bind(entry_ids)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(AppError::internal)?;
+    if used_by_students {
+        return Err(conflict("测试词条仍被学生词表或学习记录引用"));
+    }
     let relation_used: bool = sqlx::query_scalar(
         "SELECT EXISTS(
             SELECT 1 FROM lexicon_next.entries e
@@ -357,6 +375,11 @@ async fn mark_assets(conn: &mut PgConnection, assets: &[AudioAsset]) -> Result<(
 
 async fn delete_database(conn: &mut PgConnection, plan: &PurgePlan) -> Result<(), AppError> {
     let asset_ids = plan.assets.iter().map(|asset| asset.id).collect::<Vec<_>>();
+    let semantic_keys:Vec<(i64,String)>=sqlx::query_as(
+        "SELECT DISTINCT d.dataset_id,d.source_key FROM learning_source.next_choice_candidates c
+         JOIN dictionary.entry_contents d ON d.normalized_term=lexicon.question_candidate_key_v1(c.spelling)
+         WHERE c.publication_id=ANY($1) ORDER BY d.dataset_id,d.source_key"
+    ).bind(&plan.publication_ids).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
     sqlx::query(
         "DELETE FROM lexicon_next.publication_audio_references WHERE publication_id=ANY($1)",
     )
@@ -380,6 +403,14 @@ async fn delete_database(conn: &mut PgConnection, plan: &PurgePlan) -> Result<()
         .await
         .map_err(AppError::internal)?;
 
+    for (dataset, key) in semantic_keys {
+        sqlx::query("SELECT dictionary.refresh_choice_semantics($1,$2)")
+            .bind(dataset)
+            .bind(key)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::internal)?;
+    }
     sqlx::query("DELETE FROM lexicon_next.audio_asset_references WHERE entry_id=ANY($1)")
         .bind(&plan.entry_ids)
         .execute(&mut *conn)

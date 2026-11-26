@@ -125,15 +125,15 @@ pub(super) async fn candidates_for_sources(
     let mut candidates = if choice {
         crate::question_bank::learning::build_pool(
             tx,
-            &access.learning_sources()?,
+            &access.learning_sources(&context.english_variant)?,
             context,
             policy.is_some(),
         )
         .await?
     } else if wordlist {
-        build_wordlist_candidates(&access.learning_sources()?, context)?
+        build_wordlist_candidates(&access.learning_sources(&context.english_variant)?, context)?
     } else {
-        build_candidates(&access.learning_sources()?, context)?
+        build_candidates(&access.learning_sources(&context.english_variant)?, context)?
     };
     candidates.exclusions.unavailable_entries = entries
         .iter()
@@ -144,7 +144,10 @@ pub(super) async fn candidates_for_sources(
         return Ok(candidates);
     }
     if wordlist && choice {
-        let mut spelling = build_wordlist_candidates(&access.learning_sources()?, context)?;
+        let mut spelling = build_wordlist_candidates(
+            &access.learning_sources(&context.english_variant)?,
+            context,
+        )?;
         spelling.candidates.retain(|candidate| {
             !candidates
                 .candidates
@@ -179,7 +182,8 @@ fn strict_choice_preview(
     use super::plans::dto::{
         ChoicePlanPreview, ChoiceUnavailableItem, ChoiceUnavailableReason as Reason,
     };
-    let mut base = build_wordlist_candidates(&access.learning_sources()?, context)?;
+    let mut base =
+        build_wordlist_candidates(&access.learning_sources(&context.english_variant)?, context)?;
     for source in &access.custom {
         if let Some((revision, generation)) = access.lists.get(&source.wordlist_id) {
             match custom_candidate(source, *revision, *generation) {

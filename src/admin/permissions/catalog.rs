@@ -141,6 +141,15 @@ pub const CATALOG: &[PermissionDefinition] = &[
         "high"
     ),
     permission!(
+        "words.review_assessment",
+        "words",
+        "审核测评资格",
+        "审核或撤销当前词条发布版本作为学生测评题源的资格。",
+        "action",
+        ["words.access"],
+        "high"
+    ),
+    permission!(
         "words.publish",
         "words",
         "发布词条",
@@ -582,7 +591,7 @@ mod tests {
             .iter()
             .filter(|permission| matches!(permission.module_key, "words" | "sentences"))
             .collect();
-        assert_eq!(content.len(), 19);
+        assert_eq!(content.len(), 20);
         for permission in content {
             assert_ne!(
                 permission.label, permission.description,

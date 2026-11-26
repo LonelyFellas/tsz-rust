@@ -59,6 +59,9 @@ async fn full_call(
     ] {
         req = req.header(format!("x-tsz-next-{header}"), "v1");
     }
+    if !path.ends_with("?legacy-questions") {
+        req = req.header("x-tsz-next-form-questions", "v1");
+    }
     if pairs {
         req = req.header("x-tsz-next-dialect-pairs", "v1");
     }
@@ -684,6 +687,12 @@ async fn publication_migration_round_trip_preserves_existing_drafts(pool: PgPool
     let state = AppState::for_test(pool.clone());
     let initial = create(&state, actor).await;
     sqlx::raw_sql(include_str!(
+        "../../migrations/20261126020000_assessed_learning_sources.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../../migrations/20261116090000_lexicon_next_publications.down.sql"
     ))
     .execute(&pool)
@@ -691,6 +700,12 @@ async fn publication_migration_round_trip_preserves_existing_drafts(pool: PgPool
     .unwrap();
     sqlx::raw_sql(include_str!(
         "../../migrations/20261116090000_lexicon_next_publications.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261126020000_assessed_learning_sources.up.sql"
     ))
     .execute(&pool)
     .await
@@ -1378,4 +1393,341 @@ async fn dialect_projects_distinct_senses_from_one_peer_revision(pool: PgPool) {
             if i == 0 { "中心" } else { "第二义" }
         );
     }
+}
+
+#[sqlx::test]
+async fn form_question_eligibility_survives_legacy_writes_and_freezes_at_publication(pool: PgPool) {
+    let actor = admin(&pool, PUBLISH).await;
+    sqlx::query("UPDATE catalog.form_types SET default_question_eligible=false WHERE code='base'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = AppState::for_test(pool.clone());
+    let (path, saved) = fixture(&state, &pool, actor).await;
+    let form_id = &saved["draft"]["form_editor"]["pos"][0]["forms"][0]["id"];
+    let disabled = json!([{"form_id": form_id, "eligible": false}]);
+    assert_eq!(saved["draft"]["form_question_eligibility"], disabled);
+    sqlx::query("UPDATE catalog.form_types SET default_question_eligible=true WHERE code='base'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let legacy_path = format!("{path}?legacy-questions");
+    let (status, legacy) = full_call(&state, actor, "GET", &legacy_path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(legacy["draft"].get("form_question_eligibility").is_none());
+    let (status, saved_legacy) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &legacy_path,
+        json!({"expected_revision":saved["revision"],"draft":legacy["draft"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved_legacy}");
+    let (status, edited) = full_call(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(edited["draft"]["form_question_eligibility"], disabled);
+    let preview = checked(
+        &state,
+        actor,
+        &path,
+        edited["revision"].as_i64().unwrap(),
+        1,
+    )
+    .await;
+    let (status, published) = full_call(
+        &state,
+        actor,
+        "POST",
+        &format!("{path}/publications"),
+        command(&preview),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    assert_eq!(
+        published["snapshot"]["draft"]["form_question_eligibility"],
+        disabled
+    );
+    let mut draft = edited["draft"].clone();
+    draft["form_question_eligibility"][0]["form_id"] = json!(Uuid::now_v7());
+    assert_eq!(
+        full_call(
+            &state,
+            actor,
+            "PUT",
+            &path,
+            json!({"expected_revision":edited["revision"],"draft":draft})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    draft["form_question_eligibility"] = json!([{"form_id":form_id,"eligible":true}]);
+    let (status, enabled) = full_call(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":edited["revision"],"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    assert!(enabled["draft"].get("form_question_eligibility").is_none());
+    let (_, current) = full_call(
+        &state,
+        actor,
+        "GET",
+        &format!("{path}/publication"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        current["current"]["snapshot"]["draft"]["form_question_eligibility"],
+        disabled
+    );
+}
+
+#[sqlx::test]
+async fn reviewed_publication_enters_mixed_wordlist_and_revocation_blocks_new_answers(
+    pool: PgPool,
+) {
+    use crate::{
+        account_deletion_support::call as student_call, learning_tasks_support as learning,
+        wordlists_support as lists,
+    };
+    let (state, auth, _) = learning::setup(&pool).await;
+    let author = admin(&pool, PUBLISH).await;
+    let reviewer = admin(&pool, &["words.access", "words.review_assessment"]).await;
+    let (path, saved) = fixture(&state, &pool, author).await;
+    let entry: Uuid = serde_json::from_value(saved["id"].clone()).unwrap();
+    let preview = checked(&state, author, &path, 2, 1).await;
+    let (_, p) = full_call(
+        &state,
+        author,
+        "POST",
+        &format!("{path}/publications"),
+        command(&preview),
+    )
+    .await;
+    let url = format!("{path}/assessment");
+    let (status, pending) = full_call(&state, author, "GET", &url, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    assert_eq!(pending["approved"], false, "{pending}");
+    let mut decision = json!({"publication_id":p["id"],"lifecycle_revision":pending["lifecycle_revision"],"expected_version":0,"approved":true});
+    let search = "/api/v1/wordlists/suggestions?q=centre";
+    let pre = student_call(&state, &auth, "GET", search, Value::Null).await;
+    assert_eq!(pre.0, 200, "{}", pre.1);
+    assert_eq!(pre.1["items"], json!([]));
+    assert_eq!(
+        full_call(&state, author, "PUT", &url, decision.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (s, approved) = full_call(&state, reviewer, "PUT", &url, decision.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{approved}");
+    assert_eq!(approved["approved"], true);
+    let idx: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM learning_source.next_choice_candidates WHERE entry_id=$1",
+    )
+    .bind(entry)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(idx > 0);
+    let found = student_call(&state, &auth, "GET", search, Value::Null).await;
+    assert_eq!(found.1["items"][0]["entry_id"], saved["id"]);
+    let typo = student_call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/wordlists/suggestions?q=centtre",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(typo.1["items"][0]["entry_id"], saved["id"], "{}", typo.1);
+    let old = lists::full_entry(&pool, "legacy").await;
+    let (s, list) = student_call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/wordlists",
+        lists::create_body(&[old, entry]),
+    )
+    .await;
+    assert_eq!(s, 200, "{list}");
+    let id: Uuid = serde_json::from_value(list["id"].clone()).unwrap();
+    let (_, rows) = student_call(
+        &state,
+        &auth,
+        "GET",
+        &format!("/api/v1/me/wordlists/{id}/items?view=full"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(rows["items"].as_array().unwrap().len(), 2, "{rows}");
+    assert_eq!(rows["items"][1]["entry"]["publication_id"], p["id"]);
+    let task = learning::create(&state, &auth, id, "longterm").await;
+    let run = learning::start(&state, &auth, &task).await;
+    let questions = learning::questions(&state, &auth, &run).await;
+    let new = questions["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["prompt"]["definition"] == "某物的中心位置")
+        .expect("reviewed source is included");
+    let (s, answer) = student_call(
+        &state,
+        &auth,
+        "POST",
+        &learning::answer_path(&run),
+        learning::answer_body(new, "centre"),
+    )
+    .await;
+    assert_eq!(s, 200, "{answer}");
+    assert_eq!(answer["is_correct"], true);
+    decision["approved"] = json!(false);
+    assert_eq!(
+        full_call(&state, reviewer, "PUT", &url, decision.clone())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    decision["expected_version"] = approved["version"].clone();
+    let (s, revoked) = full_call(&state, reviewer, "PUT", &url, decision).await;
+    assert_eq!(s, StatusCode::OK, "{revoked}");
+    assert_eq!(revoked["approved"], false);
+    assert_eq!(
+        student_call(&state, &auth, "GET", search, Value::Null)
+            .await
+            .1["items"],
+        json!([])
+    );
+    let (_, rows) = student_call(
+        &state,
+        &auth,
+        "GET",
+        &format!("/api/v1/me/wordlists/{id}/items"),
+        Value::Null,
+    )
+    .await;
+    assert!(rows["items"][1]["entry"].is_null());
+    let fresh = learning::create(&state, &auth, id, "longterm").await;
+    let fresh_run = learning::start(&state, &auth, &fresh).await;
+    let fresh_questions = learning::questions(&state, &auth, &fresh_run).await;
+    assert!(
+        fresh_questions["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["prompt"]["definition"] != "某物的中心位置")
+    );
+    let history: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM learning_answers WHERE question_id=$1 AND is_correct",
+    )
+    .bind(new["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(history, 1);
+}
+
+#[sqlx::test]
+async fn republish_requires_new_assessment_and_closed_forms_remain_readable(pool: PgPool) {
+    use crate::account_deletion_support::{call as student_call, setup_bound};
+    let (state, student) = setup_bound(&pool).await;
+    let author = admin(&pool, PUBLISH).await;
+    let reviewer = admin(&pool, &["words.access", "words.review_assessment"]).await;
+    let (path, saved) = fixture(&state, &pool, author).await;
+    let review_url = format!("{path}/assessment");
+    let publish_url = format!("{path}/publications");
+    let preview = checked(&state, author, &path, 2, 1).await;
+    let (status, first) = full_call(&state, author, "POST", &publish_url, command(&preview)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, initial) = full_call(&state, reviewer, "GET", &review_url, Value::Null).await;
+    let review = |id: &Value, state: &Value| json!({"publication_id":id,"lifecycle_revision":state["lifecycle_revision"],"expected_version":state["version"],"approved":true});
+    let (status, approved) = full_call(
+        &state,
+        reviewer,
+        "PUT",
+        &review_url,
+        review(&first["id"], &initial),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let mut draft = saved["draft"].clone();
+    let form = draft["form_editor"]["pos"][0]["forms"][0]["id"].clone();
+    draft["form_question_eligibility"] = json!([{"form_id":form,"eligible":false}]);
+    let (status, updated) = full_call(
+        &state,
+        author,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let preview = checked(&state, author, &path, 3, 2).await;
+    let (_, second) = full_call(&state, author, "POST", &publish_url, command(&preview)).await;
+    let (_, pending) = full_call(&state, reviewer, "GET", &review_url, Value::Null).await;
+    assert_eq!(pending["approved"], false);
+    assert_eq!(
+        full_call(
+            &state,
+            reviewer,
+            "PUT",
+            &review_url,
+            review(&first["id"], &approved)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let (status, ok) = full_call(
+        &state,
+        reviewer,
+        "PUT",
+        &review_url,
+        review(&second["id"], &pending),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ok}");
+    let matches = student_call(
+        &state,
+        &student,
+        "POST",
+        "/api/v1/wordlists/import-matches",
+        json!({"words":["centre","center"]}),
+    )
+    .await;
+    assert_eq!(matches.0, 200, "{}", matches.1);
+    for row in matches.1["items"].as_array().unwrap() {
+        assert_eq!(row["status"], "matched");
+        assert_eq!(row["candidates"][0]["publication_id"], second["id"]);
+        assert!(row["candidates"][0].get("source_library").is_none());
+    }
+    let available: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM learning_source.choice_candidates WHERE entry_id=$1",
+    )
+    .bind(saved["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(available, 0);
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261126020000_assessed_learning_sources.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261126010000_form_question_eligibility.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .is_err()
+    );
 }

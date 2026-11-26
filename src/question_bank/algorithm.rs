@@ -77,7 +77,7 @@ impl Pool {
     async fn load_next(&mut self, tx: &mut Tx<'_>, key: &Recall) -> Result<(), AppError> {
         let after = self.pages.get(key).and_then(|p| p.after);
         let mut query = sqlx::QueryBuilder::new(
-            "SELECT c.entry_id,c.publication_id,c.pos_id,c.sense_id,c.definition_id,c.form_id,c.spelling,c.accepted_keys,c.definition_keys,c.level FROM lexicon.question_candidate_index c JOIN lexicon.entries e ON e.id=c.entry_id AND e.current_publication_id=c.publication_id WHERE e.archived_at IS NULL AND e.teaching_eligible AND c.answer_profile=",
+            "SELECT c.entry_id,c.publication_id,c.pos_id,c.sense_id,c.definition_id,c.form_id,c.spelling,c.accepted_keys,c.definition_keys,c.level FROM learning_source.choice_candidates c WHERE c.archived_at IS NULL AND c.teaching_eligible AND c.answer_profile=",
         );
         query
             .push_bind(&self.profile)

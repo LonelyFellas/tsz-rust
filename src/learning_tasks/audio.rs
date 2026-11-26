@@ -127,11 +127,17 @@ async fn read_in(
         occurrence: 1,
         audio: None,
     };
-    if let (Some(entry), Some(publication)) = (q.entry_id, publication) {
+    if let (Some(entry), Some(publication)) = (q.entry_id, publication)
+        && !access
+            .entries
+            .get(&entry)
+            .is_some_and(|source| source.is_next)
+    {
         let snapshot: serde_json::Value = sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=$1 AND entry_id=$2 AND content_schema_version=3")
             .bind(publication).bind(entry).fetch_optional(&mut *tx).await.map_err(AppError::internal)?.ok_or_else(unavailable)?;
         let word: AdminWordV3 = serde_json::from_value(snapshot).map_err(AppError::internal)?;
         let native = PublishedContentV3 {
+            excluded_form_ids: Default::default(),
             forms: word.forms,
             meanings: word.meanings,
         };

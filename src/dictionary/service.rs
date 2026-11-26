@@ -669,7 +669,11 @@ mod recording_default_tests {
         let mut value = json!({"pos":[{"pos_id":Uuid::now_v7(),"pos":"noun","form_groups":[],"forms":[{"id":Uuid::now_v7(),"form_type":"base","regional_variants":{"mode":"common","common":{"id":Uuid::now_v7(),"dialect":"common","spelling":"far","origin":"manual","spelling_speech":speech("en-GB"),"pronunciations":[{"id":target,"dict_phonetic":"far","actual_pron":"far","style":"normal","synthesis":{"alphabet":"ipa","ipa":"","ups":"","uk":{"source":"none","ipa":"fɑː","ups":"F AA","ipa_speech":speech("en-GB")},"us":{"source":"upload","ipa":"fɑɹ","ups":"F AA R","ipa_speech":speech("en-US")}},"audio_assets":[{"id":uploaded,"locale":"en-US","gender":"female","content_type":"audio/mpeg","size_bytes":1,"original_name":"fixture.mp3","created_at":"2026-11-12T00:00:00Z"}]}]}}}]}]});
         let forms = serde_json::from_value(value.clone()).unwrap();
         let meanings = serde_json::from_value(json!({"pos":[],"sense_groups":[]})).unwrap();
-        let native = published::PublishedContentV3 { forms, meanings };
+        let native = published::PublishedContentV3 {
+            forms,
+            meanings,
+            excluded_form_ids: Default::default(),
+        };
         let audio = own_audio(&native);
         assert_eq!(audio.len(), 1);
         assert_eq!(audio[0].target_id, target);
@@ -693,6 +697,7 @@ mod recording_default_tests {
             .unwrap()
             .push(cached);
         let cancelled = published::PublishedContentV3 {
+            excluded_form_ids: Default::default(),
             forms: serde_json::from_value(value.clone()).unwrap(),
             meanings: Default::default(),
         };
@@ -707,6 +712,7 @@ mod recording_default_tests {
         value["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]["synthesis"]
             ["us"]["source"] = json!("ipa");
         let next = published::PublishedContentV3 {
+            excluded_form_ids: Default::default(),
             forms: serde_json::from_value(value).unwrap(),
             meanings: native.meanings,
         };
@@ -762,6 +768,7 @@ mod recording_default_tests {
             // Explicit false survives the DTO round trip without becoming a legacy fallback.
             let forms = serde_json::from_value(serde_json::to_value(forms).unwrap()).unwrap();
             own_audio(&published::PublishedContentV3 {
+                excluded_form_ids: Default::default(),
                 forms,
                 meanings: Default::default(),
             })
@@ -770,6 +777,7 @@ mod recording_default_tests {
             .map(|item| item.asset_id)
         };
         let native = published::PublishedContentV3 {
+            excluded_form_ids: Default::default(),
             forms: serde_json::from_value(forms.clone()).unwrap(),
             meanings: Default::default(),
         };

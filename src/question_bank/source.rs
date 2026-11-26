@@ -28,14 +28,16 @@ pub async fn candidates(
     profile: &str,
 ) -> Result<Vec<QuestionCandidate>, AppError> {
     validate_context(level, profile)?;
-    let allowed:Vec<Uuid> = sqlx::query_scalar("SELECT id FROM lexicon.entries WHERE id=ANY($1) AND teaching_eligible AND archived_at IS NULL ORDER BY id FOR SHARE").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
-    let publications = published::read_current_in(tx, &allowed).await?;
+    let publications = published::read_learning_in(tx, ids).await?;
+    let mut allowed: Vec<_> = publications
+        .values()
+        .filter(|p| p.teaching_eligible)
+        .collect();
+    allowed.sort_unstable_by_key(|p| p.entry_id);
     let mut result = vec![];
-    for id in allowed {
-        let Some(publication) = publications.get(&id) else {
-            continue;
-        };
-        let content = publication.content_v3()?;
+    for publication in allowed {
+        let id = publication.entry_id;
+        let content = publication.question_content(Some(profile))?;
         for pos in &content.forms.pos {
             let Some(meanings) = content.meanings.pos.iter().find(|m| m.pos_id == pos.pos_id)
             else {
@@ -49,7 +51,8 @@ pub async fn candidates(
                     .forms
                     .iter()
                     .filter(|form| {
-                        form.form_type.as_str() == "base"
+                        !content.excluded_form_ids.contains(&form.id)
+                            && form.form_type.as_str() == "base"
                             && published::allowed_form_senses(pos, &content.meanings, form.id)
                                 .any(|s| s.id == sense.id)
                     })
@@ -119,6 +122,7 @@ pub async fn candidates(
                                 _ => None,
                             })
                             .filter(|s| !s.is_empty())
+                            .chain(publication.known_equivalents().map(str::to_owned))
                             .collect::<Vec<_>>();
                         if other_definitions.len() > 100 {
                             continue;
@@ -155,12 +159,13 @@ pub async fn candidates(
                         {
                             continue;
                         }
-                        candidate.content_fingerprint = Sha256::digest(
-                            serde_json::to_vec(&candidate).map_err(AppError::internal)?,
-                        )
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
+                        let mut hash = Sha256::new();
+                        hash.update(serde_json::to_vec(&candidate).map_err(AppError::internal)?);
+                        if publication.is_next {
+                            hash.update(publication.archive_generation.to_be_bytes());
+                        }
+                        candidate.content_fingerprint =
+                            hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
                         result.push(candidate);
                     }
                 }
@@ -278,7 +283,7 @@ pub async fn synonym_refs(
     ),
     AppError,
 > {
-    let publications = published::read_current_in(tx, &[entry]).await?;
+    let publications = published::read_learning_in(tx, &[entry]).await?;
     let mut ids = std::collections::HashSet::new();
     let mut words = std::collections::HashSet::new();
     if let Some(p) = publications.get(&entry) {
