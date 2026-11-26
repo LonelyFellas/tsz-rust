@@ -49,16 +49,17 @@ impl TestRoutedStore {
             || StorageError::backend(self.space(), operation, BackendErrorKind::AccessDenied);
         if key.as_str().starts_with(TEST_PREFIX) {
             let (run, space, inner) = test_key_parts(key.as_str()).ok_or_else(denied)?;
-            if space != self.space().as_str()
-                || self.run.as_ref().is_some_and(|expected| expected != run)
-            {
+            if space != self.space().as_str() {
                 return Err(denied());
+            }
+            if self.run.as_ref().is_some_and(|expected| expected != run) {
+                return Err(StorageError::TestScopeMismatch);
             }
             let physical =
                 ObjectKey::parse(format!("{run}/{space}/{inner}")).map_err(|_| denied())?;
             Ok((&self.temporary, physical))
         } else if self.run.is_some() {
-            Err(denied())
+            Err(StorageError::TestScopeMismatch)
         } else {
             Ok((&self.normal, key.clone()))
         }

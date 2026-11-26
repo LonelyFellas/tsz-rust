@@ -8,7 +8,7 @@ use axum::{
 use crate::{
     admin::{AdminAuth, authorization::require_active_admin},
     api::{ApiJson, ApiPath},
-    error::{AppError, ErrorCode},
+    error::{AppError, ErrorCode, ProblemMeta},
     lexicon::audio_assets::{
         dto::{
             AudioAssetPath, AudioAssetUrlResponse, ConfirmAudioAssetRequest,
@@ -18,7 +18,7 @@ use crate::{
         repository::AudioAssetRepository,
         service::{AudioAssetService, AudioAssetServiceError},
     },
-    platform::storage::StorageSpace,
+    platform::storage::{StorageError, StorageSpace},
     state::AppState,
 };
 
@@ -140,7 +140,7 @@ pub async fn update_audio_asset(
     responses(
         (status = 200, description = "短期只读 URL", body = AudioAssetUrlResponse),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号不可用或没有词条、例句读取权限"),
+        (status = 403, description = "账号不可用、没有词条或例句读取权限，或音频不属于当前测试批次"),
         (status = 404, description = "音频资产不存在或不可读"),
         (status = 501, description = "音频存储未开通"),
         (status = 503, description = "音频存储不可用")
@@ -217,6 +217,14 @@ fn map_error(error: AudioAssetServiceError) -> AppError {
         AudioAssetServiceError::NotFound => {
             AppError::not_found_with_code(ErrorCode::AudioAssetNotFound, "audio asset not found")
         }
+        AudioAssetServiceError::Storage(StorageError::TestScopeMismatch) => AppError::forbidden(
+            ErrorCode::Forbidden,
+            "audio is outside the current test batch; switch to the matching batch or exit test mode for regular audio",
+        )
+        .with_meta(ProblemMeta {
+            code: Some("test_resource_scope_mismatch".into()),
+            ..ProblemMeta::default()
+        }),
         // 对外只给一个笼统的 503，但服务端要留下痕迹：copy 半成功之类的故障
         // 只能靠这条日志定位，响应体里不会有任何线索。
         AudioAssetServiceError::Storage(error) => {
