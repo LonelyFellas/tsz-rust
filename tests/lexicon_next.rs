@@ -2339,6 +2339,142 @@ fn form_editor() -> Value {
             }}],"form_groups":[{"id":Uuid::now_v7(),"is_regular":true,"scope":"general","members":[{"id":Uuid::now_v7(),"form_id":form}]}]}]})
 }
 
+async fn merge_regional_pronunciations(pool: PgPool, kept: &str, retired: &str) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool);
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut draft = entry["draft"].clone();
+    let mut editor = form_editor();
+    let content = &mut editor["contents"][0];
+    content["dialect_rules"]["spelling_mode"] = json!("unified");
+    content["regional_variants"]["us"]["spelling"] = json!("centre");
+    draft["form_editor"] = editor;
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let mut draft = saved["draft"].clone();
+    let editor = &mut draft["form_editor"];
+    let original_bindings = editor["pos"][0]["forms"][0]["regional_bindings"].clone();
+    let content = &mut editor["contents"][0];
+    let mut variants = content["regional_variants"].take();
+    let mut common = variants[kept].clone();
+    let selected_reading = common["pronunciations"][0]["actual_pron"].clone();
+    let common_variant_id = Uuid::now_v7();
+    let common_pronunciation_id = Uuid::now_v7();
+    common["id"] = json!(common_variant_id);
+    common["pronunciations"][0]["id"] = json!(common_pronunciation_id);
+    content["dialect_rules"]["phonetic_mode"] = json!("unified");
+    content["regional_variants"] = json!({"mode":"common","common":common});
+
+    // The editor links the selected reading to the new common slot and retains
+    // the unselected reading's original identity for later region switches.
+    let mut retained_mapping = json!({"id":Uuid::now_v7()});
+    retained_mapping[retired] = form_pronunciation_slot(&variants[retired]);
+    let mut common_mapping = json!({
+        "id":Uuid::now_v7(),
+        "common":{"id":common_pronunciation_id,"variant_slot_id":common_variant_id}
+    });
+    common_mapping[kept] = form_pronunciation_slot(&variants[kept]);
+    let mut mappings = json!([retained_mapping, common_mapping]);
+    content["pronunciation_slots"] = mappings.clone();
+    editor["pos"][0]["forms"][0]["regional_bindings"] = json!({
+        "mode":"common",
+        "common":{
+            "id":Uuid::now_v7(),"content_slot_id":common_variant_id,"is_regular":true,
+            "pronunciations":[{"id":Uuid::now_v7(),"content_slot_id":common_pronunciation_id}]
+        }
+    });
+
+    let (status, merged) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "keeping {kept}: {merged}");
+    let (status, reopened) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["revision"], 3);
+    let content = &reopened["draft"]["form_editor"]["contents"][0];
+    assert_eq!(content["regional_variants"]["mode"], "common");
+    assert_eq!(
+        content["regional_variants"]["common"]["pronunciations"][0]["actual_pron"],
+        selected_reading
+    );
+    assert_eq!(content["pronunciation_slots"], mappings);
+
+    // Reopening and splitting copies the chosen reading to the other region while
+    // the replaced reading remains a separate historical slot.
+    let mut draft = reopened["draft"].clone();
+    let editor = &mut draft["form_editor"];
+    let content = &mut editor["contents"][0];
+    let mut copied_reading = variants[kept]["pronunciations"][0].clone();
+    let new_slot_id = Uuid::now_v7();
+    copied_reading["id"] = json!(new_slot_id);
+    variants[retired]["pronunciations"][0] = copied_reading;
+    mappings[1][retired] = form_pronunciation_slot(&variants[retired]);
+    content["dialect_rules"]["phonetic_mode"] = json!("distinguish");
+    content["regional_variants"] = variants;
+    content["pronunciation_slots"] = mappings.clone();
+    let mut bindings = original_bindings;
+    bindings[retired]["pronunciations"][0] = json!({
+        "id":Uuid::now_v7(),"content_slot_id":new_slot_id
+    });
+    editor["pos"][0]["forms"][0]["regional_bindings"] = bindings;
+    let (status, split) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":draft}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "splitting after keeping {kept}: {split}"
+    );
+    let (status, reopened) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["revision"], 4);
+    let content = &reopened["draft"]["form_editor"]["contents"][0];
+    assert_eq!(content["regional_variants"]["mode"], "uk_us");
+    for side in [kept, retired] {
+        assert_eq!(
+            content["regional_variants"][side]["pronunciations"][0]["actual_pron"],
+            selected_reading
+        );
+    }
+    assert_eq!(content["pronunciation_slots"], mappings);
+}
+
+fn form_pronunciation_slot(variant: &Value) -> Value {
+    json!({
+        "id":variant["pronunciations"][0]["id"],
+        "variant_slot_id":variant["id"]
+    })
+}
+
+#[sqlx::test]
+async fn merge_pronunciations_keeping_uk_saves_and_reopens(pool: PgPool) {
+    merge_regional_pronunciations(pool, "uk", "us").await;
+}
+
+#[sqlx::test]
+async fn merge_pronunciations_keeping_us_saves_and_reopens(pool: PgPool) {
+    merge_regional_pronunciations(pool, "us", "uk").await;
+}
+
 async fn workspace_list_with_names(state: &AppState, actor: Uuid) -> Value {
     let req = Request::builder()
         .uri(format!("{ROOT}/workspace/entries?headword=center&pos=noun"))

@@ -1877,12 +1877,18 @@ async fn shared_forms_pronunciation_correspondence_persists_and_cannot_be_reassi
     let mut forms = read["word"]["forms"].clone();
     add_verb_binding(&mut forms);
     let common = json!({"id":Uuid::now_v7(),"variant_slot_id":Uuid::now_v7()});
+    let retired_uk_reading = Uuid::now_v7();
+    let uk_variant = forms["contents"][0]["regional_variants"]["uk"]["id"].clone();
     let mapping = json!({
         "id":Uuid::now_v7(),"common":common,
         "uk":{"id":forms["contents"][0]["regional_variants"]["uk"]["pronunciations"][0]["id"],"variant_slot_id":forms["contents"][0]["regional_variants"]["uk"]["id"]},
         "us":{"id":forms["contents"][0]["regional_variants"]["us"]["pronunciations"][0]["id"],"variant_slot_id":forms["contents"][0]["regional_variants"]["us"]["id"]}
     });
-    forms["contents"][0]["pronunciation_slots"] = json!([mapping]);
+    let unpaired = json!({
+        "id":Uuid::now_v7(),
+        "uk":{"id":retired_uk_reading,"variant_slot_id":uk_variant}
+    });
+    forms["contents"][0]["pronunciation_slots"] = json!([mapping, unpaired]);
     let saved = save_shared(
         &state,
         &bearer,
@@ -1910,6 +1916,14 @@ async fn shared_forms_pronunciation_correspondence_persists_and_cannot_be_reassi
             true
         )
     );
+    let unpaired_is_retired: bool = sqlx::query_scalar(
+        "SELECT retired_at IS NOT NULL FROM lexicon.v3_form_content_slots WHERE id=$1",
+    )
+    .bind(retired_uk_reading)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(unpaired_is_retired);
     let revision = saved["word"]["revision"].as_i64().unwrap();
     for change_mapping in [false, true] {
         let mut invalid = forms.clone();
@@ -1938,7 +1952,7 @@ async fn shared_forms_pronunciation_correspondence_persists_and_cannot_be_reassi
     }
     let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM lexicon.v3_form_pronunciation_mappings WHERE entry_id=$1),(SELECT count(*) FROM lexicon.v3_form_pronunciation_mapping_slots WHERE entry_id=$1)")
         .bind(entry_id).fetch_one(&pool).await.unwrap();
-    assert_eq!(counts, (1, 3), "失败事务不得留下映射");
+    assert_eq!(counts, (2, 4), "失败事务不得留下映射");
     let (_, fresh) = shared_call(
         &state,
         &bearer,

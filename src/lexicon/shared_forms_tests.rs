@@ -199,6 +199,10 @@ fn pronunciation_correspondence_roundtrips_and_rejects_changed_parent_or_region(
     invalid.contents[0].pronunciation_slots[0].uk =
         invalid.contents[0].pronunciation_slots[0].common.clone();
     assert!(invalid.resolve().is_err());
+    let mut invalid = shared.clone();
+    invalid.contents[0].pronunciation_slots[0].common = None;
+    invalid.contents[0].pronunciation_slots[0].uk = None;
+    assert!(invalid.resolve().is_err());
     let mut invalid = shared;
     invalid.contents[0].pronunciation_slots[0].id = invalid.contents[0].id;
     assert!(invalid.resolve().is_err());

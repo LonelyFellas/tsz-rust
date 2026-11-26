@@ -433,9 +433,13 @@ pub(crate) fn localize_issue(
         ("form_content_mapping_invalid", "pronunciation slot identity differs") => {
             Some(("发音槽位标识不一致", "發音槽位識別碼不一致"))
         }
-        ("form_content_mapping_invalid", "pronunciation correspondence requires two regions") => {
-            Some(("发音对应关系需要两个地区", "發音對應關係需要兩個地區"))
-        }
+        (
+            "form_content_mapping_invalid",
+            "pronunciation correspondence requires at least one region",
+        ) => Some((
+            "发音对应关系至少需要一个地区",
+            "發音對應關係至少需要一個地區",
+        )),
         (
             "form_content_mapping_invalid",
             "pronunciation mapping ID collides with a content slot",
