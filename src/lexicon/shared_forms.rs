@@ -811,10 +811,11 @@ impl SharedFormsStepContentV3 {
                         }
                     }
                 }
-                if sides < 2 {
+                // An explicit merge keeps the unselected reading as a single-region history slot.
+                if sides == 0 {
                     return Err(content_error(
                         content.id,
-                        "pronunciation correspondence requires two regions".into(),
+                        "pronunciation correspondence requires at least one region".into(),
                     ));
                 }
             }
