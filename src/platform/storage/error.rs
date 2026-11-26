@@ -28,6 +28,8 @@ pub enum StorageError {
     SpaceNotConfigured(StorageSpace),
     #[error("storage space '{0}' is configured more than once")]
     DuplicateSpace(StorageSpace),
+    #[error("object is outside the requested test batch")]
+    TestScopeMismatch,
     #[error("object '{key}' was not found in storage space '{space}'")]
     ObjectNotFound { space: StorageSpace, key: ObjectKey },
     #[error("object size {actual} exceeds the {max} byte limit for storage space '{space}'")]

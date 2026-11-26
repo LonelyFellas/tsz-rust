@@ -1211,6 +1211,13 @@ fn english_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'sta
         (ErrorCode::Forbidden, "audio asset permission required") => {
             Some(("需要音频资源权限", "需要音訊資源權限"))
         }
+        (
+            ErrorCode::Forbidden,
+            "audio is outside the current test batch; switch to the matching batch or exit test mode for regular audio",
+        ) => Some((
+            "音频不属于当前测试批次。请切换到匹配的批次，或退出测试模式后访问普通音频。",
+            "音訊不屬於目前測試批次。請切換到相符的批次，或退出測試模式後存取一般音訊。",
+        )),
         (ErrorCode::Forbidden, "audio upload is not owned by this admin") => {
             Some(("音频上传不属于当前管理员", "音訊上傳不屬於目前管理員"))
         }

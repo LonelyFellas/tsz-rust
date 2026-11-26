@@ -11,10 +11,11 @@ use tower::ServiceExt;
 use tsz_rust::{
     admin::{AdminRepository, AdminRole, NewAdmin},
     platform::storage::{
-        CacheControl, MemoryAdapter, ObjectContentType, ObjectKey, ObjectStore, PutOptions,
-        StoragePolicy, StoragePrivacy, StorageRegistry, StorageSpace,
+        CacheControl, MemoryAdapter, ObjectContentType, ObjectKey, ObjectStorageConfig,
+        ObjectStore, PutOptions, StoragePolicy, StoragePrivacy, StorageRegistry, StorageSpace,
     },
     state::AppState,
+    test_resources::TestResourcesConfig,
 };
 use uuid::Uuid;
 
@@ -140,6 +141,121 @@ async fn upload_asset(
     .await;
     assert_eq!(status, StatusCode::CREATED, "{asset}");
     asset
+}
+
+#[sqlx::test]
+async fn audio_url_reports_test_scope_mismatch_without_weakening_isolation(pool: PgPool) {
+    const MATCHING: &str = "audio-scope-fixture";
+    const OTHER: &str = "audio-scope-other";
+    let actor = seed_admin(&pool).await;
+    let test_asset = Uuid::now_v7();
+    let normal_asset = Uuid::now_v7();
+    let test_prefix = format!("temporary-tests/{MATCHING}/audio/");
+    for (id, prefix) in [(test_asset, test_prefix.as_str()), (normal_asset, "")] {
+        sqlx::query(
+            "INSERT INTO lexicon.audio_assets
+             (id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id)
+             VALUES($1,$2,$3,'audio/mpeg',4,'en-GB','female','scope-fixture.mp3',$4)",
+        )
+        .bind(id)
+        .bind(format!("{prefix}assets/{id}.mp3"))
+        .bind(format!("{prefix}uploads/{id}.mp3"))
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let pairs = [
+        ("OBJECT_STORAGE_SPACES", "audio"),
+        ("OBJECT_STORAGE_AUDIO_BACKEND", "oss"),
+        (
+            "OBJECT_STORAGE_AUDIO_OSS_ENDPOINT",
+            "https://oss-cn-heyuan.aliyuncs.com",
+        ),
+        ("OBJECT_STORAGE_AUDIO_OSS_REGION", "cn-heyuan"),
+        ("OBJECT_STORAGE_AUDIO_OSS_BUCKET", "scope-fixture-assets"),
+        ("OBJECT_STORAGE_AUDIO_OSS_ROOT", "/audio"),
+        ("OBJECT_STORAGE_AUDIO_OSS_ACCESS_KEY_ID", "fixture-id"),
+        (
+            "OBJECT_STORAGE_AUDIO_OSS_ACCESS_KEY_SECRET",
+            "fixture-secret",
+        ),
+        ("OBJECT_STORAGE_AUDIO_PRIVACY", "private"),
+        ("OBJECT_STORAGE_AUDIO_MAX_OBJECT_SIZE_BYTES", "1024"),
+        ("OBJECT_STORAGE_AUDIO_PRESIGN_TTL_SECONDS", "60"),
+        ("OBJECT_STORAGE_AUDIO_CACHE_CONTROL", "none"),
+        (
+            "TEST_RESOURCES_OSS_ENDPOINT",
+            "https://oss-cn-heyuan.aliyuncs.com",
+        ),
+        ("TEST_RESOURCES_OSS_REGION", "cn-heyuan"),
+        ("TEST_RESOURCES_OSS_ACCESS_KEY_ID", "fixture-test-id"),
+        (
+            "TEST_RESOURCES_OSS_ACCESS_KEY_SECRET",
+            "fixture-test-secret",
+        ),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .chain([("TEST_RESOURCES_ADMIN_IDS".to_owned(), actor.to_string())])
+    .collect::<Vec<_>>();
+    let storage = ObjectStorageConfig::from_pairs(pairs.clone()).unwrap();
+    let config = TestResourcesConfig::from_pairs(&pairs, &storage)
+        .unwrap()
+        .unwrap();
+    opendal::install_default();
+    let mut state = AppState::for_test(pool);
+    state.object_storage = config.registry(None).unwrap();
+    state.test_resources = Some(Arc::new(config));
+    let bearer = token(&state, actor);
+    let router = tsz_rust::router(state);
+
+    for (id, scope, expected) in [
+        (test_asset, Some(MATCHING), StatusCode::OK),
+        (test_asset, None, StatusCode::OK),
+        (normal_asset, None, StatusCode::OK),
+        (test_asset, Some(OTHER), StatusCode::FORBIDDEN),
+        (normal_asset, Some(MATCHING), StatusCode::FORBIDDEN),
+    ] {
+        let mut request = Request::get(format!("{ASSETS_URL}/{id}/url"))
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(header::ACCEPT_LANGUAGE, "zh-Hans")
+            .header("X-TSZ-Localization", "v1");
+        if let Some(scope) = scope {
+            request = request.header("X-TSZ-Test-Run", scope);
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "asset {id}, scope {scope:?}");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        if expected == StatusCode::OK {
+            let url = body["url"].as_str().unwrap();
+            let expected_key = if id == test_asset {
+                format!("/{test_prefix}assets/{id}.mp3")
+            } else {
+                format!("/audio/assets/{id}.mp3")
+            };
+            assert!(
+                reqwest::Url::parse(url)
+                    .unwrap()
+                    .path()
+                    .ends_with(&expected_key)
+            );
+        } else {
+            assert_eq!(body["code"], "forbidden");
+            assert_eq!(body["meta"]["code"], "test_resource_scope_mismatch");
+            assert_eq!(
+                body["detail"],
+                "音频不属于当前测试批次。请切换到匹配的批次，或退出测试模式后访问普通音频。"
+            );
+            assert!(body.get("url").is_none());
+        }
+    }
 }
 
 #[sqlx::test]
