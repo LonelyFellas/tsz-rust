@@ -110,6 +110,11 @@ fn liaison_adjustments_preserve_ssml_and_preview_cache() {
             end_len: 1,
             left_offset_pct,
             right_offset_pct,
+            bowl: (left_offset_pct != 0).then_some(crate::lexicon::dto::LiaisonBowl {
+                curve_pct: 50,
+                left_tip_pct: -100,
+                right_tip_pct: 30,
+            }),
         });
         // A distinct arc with the same outer range must not reorder when the
         // first arc receives a display-only offset.
@@ -120,6 +125,7 @@ fn liaison_adjustments_preserve_ssml_and_preview_cache() {
             end_len: 1,
             left_offset_pct: 0,
             right_offset_pct: 0,
+            bowl: None,
         });
         request(content)
     };

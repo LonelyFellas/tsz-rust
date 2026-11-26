@@ -564,6 +564,7 @@ use utoipa::{
             crate::lexicon::dto::RichTextPhonemeAlphabet,
             crate::lexicon::dto::RichTextHighlightColor,
             crate::lexicon::dto::RichTextAnnotation,
+            crate::lexicon::dto::LiaisonBowl,
             crate::lexicon::dto::RichTextV1,
             crate::lexicon::dto::RichTextV2,
             crate::lexicon::dto::PersistedWordStep,

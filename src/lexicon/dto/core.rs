@@ -164,6 +164,39 @@ where
     }
 }
 
+/// 显式碗形布局。空对象表示推荐；缺少 bowl 的旧弧继续按原算法绘制。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LiaisonBowl {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_liaison_offset",
+        skip_serializing_if = "liaison_adjustment_is_zero"
+    )]
+    #[schema(default = 0, minimum = -100, maximum = 100)]
+    pub curve_pct: i8,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_liaison_offset",
+        skip_serializing_if = "liaison_adjustment_is_zero"
+    )]
+    #[schema(default = 0, minimum = -100, maximum = 100)]
+    pub left_tip_pct: i8,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_liaison_offset",
+        skip_serializing_if = "liaison_adjustment_is_zero"
+    )]
+    #[schema(default = 0, minimum = -100, maximum = 100)]
+    pub right_tip_pct: i8,
+}
+
+pub(crate) fn deserialize_liaison_bowl<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<LiaisonBowl>, D::Error> {
+    LiaisonBowl::deserialize(d).map(Some)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RichTextAnnotation {
@@ -221,6 +254,13 @@ pub enum RichTextAnnotation {
         )]
         #[schema(default = 0, minimum = -100, maximum = 100)]
         right_offset_pct: i8,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_liaison_bowl",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[schema(nullable = false)]
+        bowl: Option<LiaisonBowl>,
     },
     Highlight {
         start: usize,
@@ -256,14 +296,18 @@ impl RichTextAnnotation {
                 end_len,
                 left_offset_pct,
                 right_offset_pct,
-            } if left_offset_pct != 0 || right_offset_pct != 0 => Some(Self::Liaison {
-                start,
-                end,
-                start_len,
-                end_len,
-                left_offset_pct: 0,
-                right_offset_pct: 0,
-            }),
+                bowl,
+            } if left_offset_pct != 0 || right_offset_pct != 0 || bowl.is_some() => {
+                Some(Self::Liaison {
+                    start,
+                    end,
+                    start_len,
+                    end_len,
+                    left_offset_pct: 0,
+                    right_offset_pct: 0,
+                    bowl: None,
+                })
+            }
             _ => None,
         }
     }

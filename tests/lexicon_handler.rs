@@ -18766,7 +18766,7 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
     )
     .await;
     let pronunciation = &mut variant["pronunciations"][0];
-    pronunciation["actual_pron_rich"] = json!({"version":2,"text":pronunciation["actual_pron"],"annotations":[{"type":"liaison","start":0,"end":2,"left_offset_pct":-20,"right_offset_pct":15}]});
+    pronunciation["actual_pron_rich"] = json!({"version":2,"text":pronunciation["actual_pron"],"annotations":[{"type":"liaison","start":0,"end":2,"bowl":{"curve_pct":-20,"right_tip_pct":-100}}]});
     let (_, saved) = save_v3_forms_after_impact(
         &state,
         &bearer,
@@ -18789,8 +18789,7 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
         saved["word"]["forms"].pointer(path).unwrap().clone()
     );
     let liaison = &expected["pronunciations"][0]["actual_pron_rich"]["annotations"][0];
-    assert_eq!(liaison["left_offset_pct"], -20);
-    assert_eq!(liaison["right_offset_pct"], 15);
+    assert_eq!(liaison["bowl"], json!({"curve_pct":-20,"right_tip_pct":-100}));
     let mut empty = published["word"]["forms"].clone();
     let variant = empty.pointer_mut(path).unwrap();
     variant["spelling_rich"]["annotations"] = json!([]);

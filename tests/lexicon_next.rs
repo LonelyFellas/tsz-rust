@@ -2660,7 +2660,7 @@ async fn liaison_adjustments_out_of_range_do_not_overwrite_lexicon_next_draft(po
     let mut editor = form_editor();
     let variant = &mut editor["contents"][0]["regional_variants"]["uk"];
     variant["spelling_rich"] = json!({"version":2,"text":"centre","annotations":[{"type":"italic","start":0,"end":2},{"type":"liaison","start":1,"end":5,"right_offset_pct":15}]});
-    variant["pronunciations"][0]["actual_pron_rich"] = json!({"version":2,"text":"sentə","annotations":[{"type":"liaison","start":1,"end":4,"left_offset_pct":20}]});
+    variant["pronunciations"][0]["actual_pron_rich"] = json!({"version":2,"text":"sentə","annotations":[{"type":"liaison","start":1,"end":4,"bowl":{"left_tip_pct":-100}}]});
     draft["form_editor"] = editor;
     let (status, saved) = call(
         &state,
@@ -2673,7 +2673,7 @@ async fn liaison_adjustments_out_of_range_do_not_overwrite_lexicon_next_draft(po
     assert_eq!(status, StatusCode::OK, "{saved}");
     let draft = &saved["draft"];
     for leaf in [
-        "/form_editor/contents/0/regional_variants/uk/pronunciations/0/actual_pron_rich/annotations/0/left_offset_pct",
+        "/form_editor/contents/0/regional_variants/uk/pronunciations/0/actual_pron_rich/annotations/0/bowl/left_tip_pct",
         "/form_editor/contents/0/regional_variants/uk/spelling_rich/annotations/1/right_offset_pct",
     ] {
         let mut invalid = draft.clone();

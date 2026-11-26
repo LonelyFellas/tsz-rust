@@ -179,6 +179,7 @@ fn canonicalization_is_idempotent_and_uses_frontend_type_order() {
                 end_len: 1,
                 left_offset_pct: 0,
                 right_offset_pct: 0,
+                bowl: None,
             },
             RichTextAnnotation::Highlight {
                 start: 0,
@@ -323,6 +324,7 @@ fn keeps_liaison_anchor_widths_and_leaves_defaults_off_the_wire() {
             end_len: 1,
             left_offset_pct: 0,
             right_offset_pct: 0,
+            bowl: None,
         }],
     });
     canonicalize(&mut value).unwrap();
@@ -366,6 +368,7 @@ fn rejects_liaison_anchors_outside_the_span() {
                 end_len,
                 left_offset_pct: 0,
                 right_offset_pct: 0,
+                bowl: None,
             }],
         });
         assert!(
@@ -387,6 +390,7 @@ fn liaisons_stay_apart_and_only_exact_duplicates_collapse() {
         end_len,
         left_offset_pct: 0,
         right_offset_pct: 0,
+        bowl: None,
     };
     // [0,3) 与 [3,6) 首尾相接、与 [1,5) 交叠、同区间换了起点宽度，都是各自的弧；
     // 只有四个字段全同的那条是重复。
