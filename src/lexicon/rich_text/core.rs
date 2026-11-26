@@ -393,6 +393,7 @@ pub(super) fn validate_v2(value: &RichTextV2) -> Vec<RichTextIssue> {
                 end_len,
                 left_offset_pct,
                 right_offset_pct,
+                ..
             } => {
                 validate_range(&mut issues, &value.text, *start, *end, &path);
                 if !(-100..=100).contains(left_offset_pct)

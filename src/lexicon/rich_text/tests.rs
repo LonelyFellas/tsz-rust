@@ -179,6 +179,7 @@ fn canonicalization_is_idempotent_and_uses_frontend_type_order() {
                 end_len: 1,
                 left_offset_pct: 0,
                 right_offset_pct: 0,
+                bowl: None,
             },
             RichTextAnnotation::Highlight {
                 start: 0,
@@ -312,6 +313,31 @@ fn rejects_nul_in_all_persisted_rich_text_strings() {
 }
 
 #[test]
+fn liaison_bowl_requires_an_object_in_both_wire_formats() {
+    use crate::lexicon::dto::RichTextAnnotationV3;
+    use serde_json::json;
+
+    for bowl in [json!([]), json!([10, 20, 30]), json!(null)] {
+        let mark = json!({"type": "liaison", "start": 0, "end": 2, "bowl": bowl});
+        assert!(
+            serde_json::from_value::<RichTextAnnotation>(mark.clone()).is_err(),
+            "{mark}"
+        );
+        assert!(
+            serde_json::from_value::<RichTextAnnotationV3>(mark.clone()).is_err(),
+            "{mark}"
+        );
+    }
+    for bowl in [json!({}), json!({"curve_pct": -100, "right_tip_pct": 100})] {
+        let mark = json!({"type": "liaison", "start": 0, "end": 2, "bowl": bowl});
+        let v2: RichTextAnnotation = serde_json::from_value(mark.clone()).unwrap();
+        let v3: RichTextAnnotationV3 = serde_json::from_value(mark.clone()).unwrap();
+        assert_eq!(serde_json::to_value(v2).unwrap(), mark);
+        assert_eq!(serde_json::to_value(v3).unwrap(), mark);
+    }
+}
+
+#[test]
 fn keeps_liaison_anchor_widths_and_leaves_defaults_off_the_wire() {
     let mut value = RichText::V2(RichTextV2 {
         version: 2,
@@ -323,6 +349,7 @@ fn keeps_liaison_anchor_widths_and_leaves_defaults_off_the_wire() {
             end_len: 1,
             left_offset_pct: 0,
             right_offset_pct: 0,
+            bowl: None,
         }],
     });
     canonicalize(&mut value).unwrap();
@@ -366,6 +393,7 @@ fn rejects_liaison_anchors_outside_the_span() {
                 end_len,
                 left_offset_pct: 0,
                 right_offset_pct: 0,
+                bowl: None,
             }],
         });
         assert!(
@@ -387,6 +415,7 @@ fn liaisons_stay_apart_and_only_exact_duplicates_collapse() {
         end_len,
         left_offset_pct: 0,
         right_offset_pct: 0,
+        bowl: None,
     };
     // [0,3) 与 [3,6) 首尾相接、与 [1,5) 交叠、同区间换了起点宽度，都是各自的弧；
     // 只有四个字段全同的那条是重复。

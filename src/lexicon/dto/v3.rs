@@ -949,6 +949,13 @@ pub enum RichTextAnnotationV3 {
         )]
         #[schema(default = 0, minimum = -100, maximum = 100)]
         right_offset_pct: i8,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_liaison_bowl",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[schema(nullable = false)]
+        bowl: Option<LiaisonBowl>,
     },
     Highlight {
         start: usize,
@@ -3331,6 +3338,7 @@ mod tests {
                     end_len: 1,
                     left_offset_pct: 0,
                     right_offset_pct: 0,
+                    bowl: None,
                 },
                 RichTextAnnotationV3::Emphasis {
                     start: 0,
