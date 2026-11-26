@@ -55,6 +55,21 @@ FROM (SELECT DISTINCT ON (entry_id) entry_id,version,approved,publication_id,lif
 JOIN lexicon_next.entries e ON e.id=r.entry_id
 CROSS JOIN LATERAL (SELECT e.status='published' AND e.lifecycle_revision=r.lifecycle_revision AND r.approved AS ok) active;
 
+-- Search appearances from both libraries in one ranking. Word lists store stable entry IDs.
+CREATE INDEX next_surfaces_spelling_trgm ON learning_source.next_surfaces USING gin(surface gin_trgm_ops);
+CREATE VIEW learning_source.search_surfaces AS
+SELECT s.entry_id,s.publication_id,s.surface,s.normalized_surface
+FROM lexicon.surface_sources s
+JOIN lexicon.entries e ON e.id=s.entry_id AND e.current_publication_id=s.publication_id
+JOIN lexicon.entry_publications p ON p.id=s.publication_id AND p.entry_id=s.entry_id
+WHERE s.language='en' AND s.dialect_scope IN ('uk','us')
+  AND s.normalization_version=1 AND s.content_schema_version=3 AND s.source_kind='form_variant'
+  AND s.content_scope='current_publication' AND NOT s.is_deleted AND e.archived_at IS NULL AND p.content_schema_version=3
+UNION ALL
+SELECT p.entry_id,p.id,n.surface,n.surface FROM learning_source.next_surfaces n
+JOIN learning_source.reviewed_publications p ON p.id=n.publication_id
+JOIN learning_source.next_entries e ON e.id=p.entry_id AND e.current_publication_id=p.id;
+
 CREATE VIEW learning_source.entries AS
 SELECT id,current_publication_id,archived_at,lifecycle_revision,wordlist_archive_generation,teaching_eligible FROM lexicon.entries
 UNION ALL SELECT * FROM learning_source.next_entries;

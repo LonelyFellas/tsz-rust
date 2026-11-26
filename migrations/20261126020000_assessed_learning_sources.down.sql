@@ -37,7 +37,7 @@ CREATE OR REPLACE FUNCTION dictionary.refresh_choice_semantics(dataset bigint, s
  WHERE lexicon.question_candidate_key_v1(i.spelling)=c.normalized_term);
 $$;
 
-DROP VIEW learning_source.current_publications, learning_source.choice_candidates, learning_source.publications, learning_source.entries, learning_source.next_entries;
+DROP VIEW learning_source.search_surfaces, learning_source.current_publications, learning_source.choice_candidates, learning_source.publications, learning_source.entries, learning_source.next_entries;
 DROP TABLE learning_source.next_choice_candidates, learning_source.next_surfaces, learning_source.reviews, learning_source.reviewed_publications, learning_source.identities;
 DROP FUNCTION learning_source.register_legacy();
 DROP SCHEMA learning_source;

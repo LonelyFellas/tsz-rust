@@ -44,24 +44,7 @@ pub async fn for_user(
 ) -> Result<WordlistSuggestions, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     service::lock_user(&mut tx, auth).await?;
-    let mut matches = entry_search::search(&mut tx, &query.q, None).await?;
-    if !query.q.trim().is_empty() {
-        let key = crate::lexicon::normalization::normalize_headword(&query.q)
-            .map_err(|_| AppError::bad_request(crate::error::ErrorCode::InvalidQuery, "词面无效"))?
-            .key;
-        let mut reviewed = super::reviewed_suggestions::prefix(&mut tx, &key).await?;
-        if !reviewed.is_empty() {
-            let mut ranked = entry_search::exact_batch(&mut tx, std::slice::from_ref(&query.q))
-                .await?
-                .pop()
-                .unwrap_or_default();
-            let mut ids: std::collections::HashSet<_> = ranked.iter().map(|s| s.entry_id).collect();
-            matches.append(&mut reviewed);
-            ranked.extend(matches.into_iter().filter(|s| ids.insert(s.entry_id)));
-            ranked.truncate(3);
-            matches = ranked;
-        }
-    }
+    let matches = entry_search::search_wordlist(&mut tx, &query.q).await?;
     let result = WordlistSuggestions {
         items: matches
             .into_iter()

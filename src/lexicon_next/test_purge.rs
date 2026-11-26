@@ -375,6 +375,11 @@ async fn mark_assets(conn: &mut PgConnection, assets: &[AudioAsset]) -> Result<(
 
 async fn delete_database(conn: &mut PgConnection, plan: &PurgePlan) -> Result<(), AppError> {
     let asset_ids = plan.assets.iter().map(|asset| asset.id).collect::<Vec<_>>();
+    let semantic_keys:Vec<(i64,String)>=sqlx::query_as(
+        "SELECT DISTINCT d.dataset_id,d.source_key FROM learning_source.next_choice_candidates c
+         JOIN dictionary.entry_contents d ON d.normalized_term=lexicon.question_candidate_key_v1(c.spelling)
+         WHERE c.publication_id=ANY($1) ORDER BY d.dataset_id,d.source_key"
+    ).bind(&plan.publication_ids).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
     sqlx::query(
         "DELETE FROM lexicon_next.publication_audio_references WHERE publication_id=ANY($1)",
     )
@@ -398,6 +403,14 @@ async fn delete_database(conn: &mut PgConnection, plan: &PurgePlan) -> Result<()
         .await
         .map_err(AppError::internal)?;
 
+    for (dataset, key) in semantic_keys {
+        sqlx::query("SELECT dictionary.refresh_choice_semantics($1,$2)")
+            .bind(dataset)
+            .bind(key)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::internal)?;
+    }
     sqlx::query("DELETE FROM lexicon_next.audio_asset_references WHERE entry_id=ANY($1)")
         .bind(&plan.entry_ids)
         .execute(&mut *conn)

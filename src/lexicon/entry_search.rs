@@ -103,18 +103,45 @@ pub(crate) async fn search(
     q: &str,
     exclude: Option<Uuid>,
 ) -> Result<Vec<EntrySuggestionSummary>, AppError> {
+    search_sources(tx, q, exclude, false).await
+}
+
+/// Reviewed publications are selectable only in the student wordlist picker.
+pub(crate) async fn search_wordlist(
+    tx: &mut Tx<'_>,
+    q: &str,
+) -> Result<Vec<EntrySuggestionSummary>, AppError> {
+    search_sources(tx, q, None, true).await
+}
+
+async fn search_sources(
+    tx: &mut Tx<'_>,
+    q: &str,
+    exclude: Option<Uuid>,
+    wordlist: bool,
+) -> Result<Vec<EntrySuggestionSummary>, AppError> {
+    let (exact, prefix, fuzzy_word, fuzzy_phrase) = if wordlist {
+        (
+            include_str!("search_sql/student_exact.sql"),
+            include_str!("search_sql/student_prefix.sql"),
+            include_str!("search_sql/student_fuzzy_word.sql"),
+            include_str!("search_sql/student_fuzzy_phrase.sql"),
+        )
+    } else {
+        (EXACT, PREFIX, FUZZY_WORD, FUZZY)
+    };
     if q.trim().is_empty() {
         return Ok(vec![]);
     }
     let normalized = normalize_headword(q)
         .map_err(|_| AppError::bad_request(ErrorCode::InvalidQuery, "请输入 1–200 字的词条名称"))?;
     let mut ids = Vec::with_capacity(LIMIT);
-    append(tx, EXACT, &normalized.key, &mut ids, exclude).await?;
+    append(tx, exact, &normalized.key, &mut ids, exclude).await?;
     // Short words remain searchable, without broad prefix/fuzzy scans for a/an.
     if normalized.key.chars().count() >= 3 && ids.len() < LIMIT {
         if let Some(end) = prefix_end(&normalized.key) {
             while ids.len() < LIMIT {
-                let found: Vec<Uuid> = sqlx::query_scalar(PREFIX)
+                let found: Vec<Uuid> = sqlx::query_scalar(prefix)
                     .bind(&normalized.key)
                     .bind(exclusions(&ids, exclude))
                     .bind((LIMIT - ids.len()) as i64)
@@ -140,19 +167,23 @@ pub(crate) async fn search(
             if normalized.key.contains(' ') && normalized.key.chars().count() >= 8 {
                 while ids.len() < LIMIT {
                     let before = ids.len();
-                    append(tx, FUZZY, &normalized.display, &mut ids, exclude).await?;
+                    append(tx, fuzzy_phrase, &normalized.display, &mut ids, exclude).await?;
                     if ids.len() == before {
                         break;
                     }
                 }
             } else {
-                append(tx, FUZZY_WORD, &normalized.display, &mut ids, exclude).await?;
+                append(tx, fuzzy_word, &normalized.display, &mut ids, exclude).await?;
             }
         }
     }
     // Serialize with archive/publication writers only for the selected entries.
     // Save still checks availability/revision; autocomplete cannot reserve a word.
-    published::lock_entries_in(tx, &ids).await?;
+    if wordlist {
+        published::lock_learning_entries(tx, &ids).await?;
+    } else {
+        published::lock_entries_in(tx, &ids).await?;
+    }
     let items = sqlx::query_as(SUMMARY)
         .bind(ids)
         .fetch_all(&mut **tx)

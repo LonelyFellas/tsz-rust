@@ -1537,6 +1537,15 @@ async fn reviewed_publication_enters_mixed_wordlist_and_revocation_blocks_new_an
     assert!(idx > 0);
     let found = student_call(&state, &auth, "GET", search, Value::Null).await;
     assert_eq!(found.1["items"][0]["entry_id"], saved["id"]);
+    let typo = student_call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/wordlists/suggestions?q=centtre",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(typo.1["items"][0]["entry_id"], saved["id"], "{}", typo.1);
     let old = lists::full_entry(&pool, "legacy").await;
     let (s, list) = student_call(
         &state,

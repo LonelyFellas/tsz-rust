@@ -399,6 +399,15 @@ mod tests {
             assert!(status.is_success(), "{entry}");
             entries.push(entry["id"].clone());
         }
+        // The reviewed fixture was the only learning source for this dictionary spelling.
+        let entry: Uuid = serde_json::from_value(entries[0].clone()).unwrap();
+        let publication = Uuid::now_v7();
+        sqlx::query("INSERT INTO lexicon_next.publications(id,entry_id,revision,lifecycle_revision,published_by_admin_id,snapshot) VALUES ($1,$2,1,1,$3,'{}')").bind(publication).bind(entry).bind(actor).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO learning_source.reviewed_publications(id,entry_id,snapshot) VALUES($1,$2,'{}')").bind(publication).bind(entry).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO learning_source.next_choice_candidates(publication_id,entry_id,pos_id,sense_id,definition_id,form_id,answer_profile,level,part_of_speech,spelling,definition,accepted_keys,definition_keys) VALUES ($1,$2,gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),'BrE','A1','noun','alpha','甲',ARRAY['alpha'],ARRAY['甲'])").bind(publication).bind(entry).execute(&pool).await.unwrap();
+        let dataset:i64=sqlx::query_scalar("INSERT INTO dictionary.datasets(version,source_name,source_version,rules_version,terms_sha256,regions_sha256,status) VALUES('purge','Kaikki','test','test','test','test','active') RETURNING id").fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO dictionary.entry_contents(dataset_id,source_key,normalized_term,pos,senses,source_locator) VALUES($1,'alpha','alpha','noun','[]','test')").bind(dataset).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO dictionary.choice_semantics(dataset_id,source_key,normalized_term,pos,domains,equivalents,antonyms,meanings) VALUES($1,'alpha','alpha','noun','{}','{}','{}','[]')").bind(dataset).execute(&pool).await.unwrap();
         let command = |action, ids: &[Value], lifecycle| {
             json!({"action":action,"request_id":Uuid::now_v7(),
             "items":ids.iter().map(|id| json!({"entry_id":id,"base_revision":1,"base_lifecycle_revision":lifecycle})).collect::<Vec<_>>()})
@@ -431,6 +440,8 @@ mod tests {
             "{a:?} {b:?} {receipts:?}"
         );
         assert_eq!(receipts[0].to_string(), mixed["request_id"]);
+        let retained:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM dictionary.entry_contents WHERE dataset_id=$1),(SELECT count(*) FROM dictionary.choice_semantics WHERE dataset_id=$1)").bind(dataset).fetch_one(&pool).await.unwrap();
+        assert_eq!(retained, (1, 0));
         assert_eq!(a, b);
         assert_eq!(a, call("test-resources/purge", input).await);
     }
