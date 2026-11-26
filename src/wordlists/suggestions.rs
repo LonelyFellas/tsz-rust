@@ -6,6 +6,7 @@ use sqlx::PgPool;
 pub async fn match_import(
     pool: &PgPool,
     auth: &AuthUser,
+    include_library: bool,
     input: WordlistImportMatchRequest,
 ) -> Result<WordlistImportMatches, AppError> {
     if input.words.is_empty() || input.words.len() > 100 {
@@ -27,12 +28,7 @@ pub async fn match_import(
             },
             candidates: row
                 .into_iter()
-                .map(|item| WordlistCandidate {
-                    entry_id: item.entry_id,
-                    publication_id: item.publication_id,
-                    label: item.label,
-                    glosses: item.glosses,
-                })
+                .map(|row| candidate(row, include_library))
                 .collect(),
         })
         .collect();
@@ -43,23 +39,50 @@ pub async fn match_import(
 pub async fn for_user(
     pool: &PgPool,
     auth: &AuthUser,
+    include_library: bool,
     query: WordlistSuggestionQuery,
 ) -> Result<WordlistSuggestions, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     service::lock_user(&mut tx, auth).await?;
-    let items = entry_search::search(&mut tx, &query.q, None).await?;
+    let mut matches = entry_search::search(&mut tx, &query.q, None).await?;
+    if !query.q.trim().is_empty() {
+        let key = crate::lexicon::normalization::normalize_headword(&query.q)
+            .map_err(|_| AppError::bad_request(crate::error::ErrorCode::InvalidQuery, "词面无效"))?
+            .key;
+        let mut reviewed = super::reviewed_suggestions::prefix(&mut tx, &key).await?;
+        if !reviewed.is_empty() {
+            let mut ranked = entry_search::exact_batch(&mut tx, std::slice::from_ref(&query.q))
+                .await?
+                .pop()
+                .unwrap_or_default();
+            let mut ids: std::collections::HashSet<_> = ranked.iter().map(|s| s.entry_id).collect();
+            matches.append(&mut reviewed);
+            ranked.extend(matches.into_iter().filter(|s| ids.insert(s.entry_id)));
+            ranked.truncate(3);
+            matches = ranked;
+        }
+    }
     let result = WordlistSuggestions {
-        items: items
+        items: matches
             .into_iter()
-            .map(|item| WordlistCandidate {
-                entry_id: item.entry_id,
-                publication_id: item.publication_id,
-                label: item.label,
-                glosses: item.glosses,
-            })
+            .map(|row| candidate(row, include_library))
             .collect(),
     };
     crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(result)
+}
+
+fn candidate(s: entry_search::EntrySuggestionSummary, include_library: bool) -> WordlistCandidate {
+    WordlistCandidate {
+        source_library: include_library.then_some(if s.is_next {
+            WordlistSourceLibrary::LexiconNext
+        } else {
+            WordlistSourceLibrary::Legacy
+        }),
+        entry_id: s.entry_id,
+        publication_id: s.publication_id,
+        label: s.label,
+        glosses: s.glosses,
+    }
 }

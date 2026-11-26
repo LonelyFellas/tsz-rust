@@ -1,6 +1,6 @@
 -- Only the selected (at most three) current publications are inspected. Never
 -- transfer full publication JSON, forms, sentences or administrative data.
-SELECT e.id AS entry_id,p.id AS publication_id,
+SELECT p.is_next,p.entry_id,p.publication_id,
        p.snapshot#>>'{presentation,label}' AS label,
        ARRAY(
            SELECT left(gloss.text,200)
@@ -17,7 +17,6 @@ SELECT e.id AS entry_id,p.id AS publication_id,
        ) AS glosses,
        (SELECT COALESCE(sum(jsonb_array_length(pos.value->'senses')),0)::bigint
         FROM jsonb_array_elements(p.snapshot#>'{meanings,pos}') pos(value)) AS sense_count
-FROM lexicon.entries e
-JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id
-WHERE e.id=ANY($1) AND e.archived_at IS NULL AND p.content_schema_version=3
-ORDER BY array_position($1,e.id)
+FROM learning_source.current_publications p
+WHERE p.entry_id=ANY($1)
+ORDER BY array_position($1,p.entry_id)

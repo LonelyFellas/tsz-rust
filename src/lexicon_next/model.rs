@@ -248,7 +248,17 @@ pub struct NextGrammarIssue {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct NextFormQuestionEligibility {
+    pub form_id: Uuid,
+    pub eligible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NextDraft {
+    /// Per concrete form binding, independent of shared spelling and pronunciation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub form_question_eligibility: Vec<NextFormQuestionEligibility>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -352,6 +362,8 @@ pub struct NextLanguageCapability {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form_question_eligibility: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub creation_snapshot: Option<bool>,

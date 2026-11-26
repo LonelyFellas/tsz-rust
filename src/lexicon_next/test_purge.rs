@@ -109,6 +109,24 @@ async fn ensure_no_external_references(
     conn: &mut PgConnection,
     entry_ids: &[Uuid],
 ) -> Result<(), AppError> {
+    let used_by_students: bool = sqlx::query_scalar(
+        "SELECT CASE WHEN EXISTS(SELECT FROM learning_source.reviews WHERE entry_id=ANY($1)) THEN
+            EXISTS(SELECT FROM wordlist_items WHERE entry_id=ANY($1))
+            OR EXISTS(SELECT FROM wordlist_review_requests WHERE entry_ids && $1)
+            OR EXISTS(SELECT FROM learning_memories WHERE entry_id=ANY($1))
+            OR EXISTS(SELECT FROM learning_questions WHERE entry_id=ANY($1) OR
+                jsonb_path_exists(answer_snapshot,'$.choice.content.options[*].candidate.source.entry_id ? (@ == $ids[*])', jsonb_build_object('ids',to_jsonb($1::uuid[]))))
+            OR EXISTS(SELECT FROM learning_cycle_units WHERE entry_id=ANY($1) OR
+                jsonb_path_exists(answer_snapshot,'$.choice.content.options[*].candidate.source.entry_id ? (@ == $ids[*])', jsonb_build_object('ids',to_jsonb($1::uuid[]))))
+            ELSE false END",
+    )
+    .bind(entry_ids)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(AppError::internal)?;
+    if used_by_students {
+        return Err(conflict("测试词条仍被学生词表或学习记录引用"));
+    }
     let relation_used: bool = sqlx::query_scalar(
         "SELECT EXISTS(
             SELECT 1 FROM lexicon_next.entries e

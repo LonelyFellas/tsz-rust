@@ -28,3 +28,5 @@ fn private_json(value: impl Serialize) -> Response {
         .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     response
 }
+
+mod reviewed_suggestions;

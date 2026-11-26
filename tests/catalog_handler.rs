@@ -2286,6 +2286,7 @@ async fn form_type_default_template_controls_catalog_without_disabling_type(pool
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["is_default"], false);
+    assert_eq!(created["default_question_eligible"], true);
     let id = created["id"].as_str().unwrap();
     let (status, _, list, _) = call(
         &state,
@@ -2327,6 +2328,7 @@ async fn form_type_default_template_controls_catalog_without_disabling_type(pool
     let mut update = input.clone();
     update.as_object_mut().unwrap().remove("is_default");
     update["base_revision"] = json!(1);
+    update["default_question_eligible"] = json!(false);
     // 旧客户端编辑名称不传开关，也不能把已关闭的设置重新打开。
     let (status, _, saved, _) = call(
         &state,
@@ -2338,6 +2340,11 @@ async fn form_type_default_template_controls_catalog_without_disabling_type(pool
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["is_default"], false);
+    assert_eq!(saved["default_question_eligible"], false);
+    update
+        .as_object_mut()
+        .unwrap()
+        .remove("default_question_eligible");
     update["is_default"] = json!(true);
     let (status, _, conflict, _) = call(
         &state,
@@ -2359,6 +2366,7 @@ async fn form_type_default_template_controls_catalog_without_disabling_type(pool
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["is_default"], true);
+    assert_eq!(saved["default_question_eligible"], false);
     let (_, _, after, _) = call(
         &state,
         Method::GET,

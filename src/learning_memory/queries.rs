@@ -12,15 +12,14 @@ const READY_AT: &str = "GREATEST(m.due_at,COALESCE(m.last_feedback_at+interval '
 // A memory is not a grant. Every query checks a registered, still-current source.
 pub(super) const SOURCE: &str = r#"
 SELECT s.wordlist_id,s.membership_id,s.public_generation,s.entry_archive_generation,
-       e.current_publication_id AS publication_id,p.snapshot
+       p.publication_id,p.snapshot
 FROM learning_memory_sources s
 JOIN wordlists w ON w.id=s.wordlist_id
 JOIN wordlist_items i ON i.wordlist_id=w.id AND i.entry_id=m.entry_id AND i.learning_membership_id=s.membership_id
-JOIN lexicon.entries e ON e.id=m.entry_id AND e.archived_at IS NULL
-JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3
+JOIN learning_source.current_publications p ON p.entry_id=m.entry_id
 LEFT JOIN users owner ON owner.id=w.owner_user_id
 WHERE s.memory_id=m.id AND s.user_id=m.user_id AND w.deleted_at IS NULL
-  AND e.wordlist_archive_generation=s.entry_archive_generation
+  AND p.wordlist_archive_generation=s.entry_archive_generation
   AND (w.owner_admin_id IS NOT NULL OR (owner.status='active' AND NOT EXISTS(
     SELECT 1 FROM account_deletion_requests d WHERE d.user_id=owner.id AND d.status='pending' AND d.effective_at<=clock_timestamp())))
   AND (w.owner_user_id=m.user_id OR (w.state='published' AND w.learning_public_generation=s.public_generation))
@@ -69,7 +68,7 @@ pub(super) async fn overview(
           FROM learning_memories m WHERE user_id=$1 AND answer_profile=$2) x
     "#))).bind(auth.subject).bind(&context.english_variant).bind(at)
         .bind(crate::learning_tasks::question::business_window(at).0).bind(&context.cefr_level).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
-    let session:Option<Uuid>=sqlx::query_scalar("SELECT s.id FROM learning_review_sessions s WHERE s.user_id=$1 AND s.expires_at>$2 AND s.settings_snapshot->>'english_variant'=$3 AND EXISTS(SELECT 1 FROM learning_review_items i JOIN learning_memories m ON m.id=i.memory_id JOIN learning_memory_sources ms ON ms.memory_id=m.id AND ms.wordlist_id=i.source_wordlist_id AND ms.membership_id=i.source_membership_id JOIN wordlists w ON w.id=i.source_wordlist_id AND w.deleted_at IS NULL JOIN wordlist_items wi ON wi.wordlist_id=w.id AND wi.entry_id=i.entry_id AND wi.learning_membership_id=i.source_membership_id JOIN lexicon.entries e ON e.id=i.entry_id AND e.archived_at IS NULL AND e.wordlist_archive_generation=i.entry_archive_generation JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3 LEFT JOIN users owner ON owner.id=w.owner_user_id WHERE i.session_id=s.id AND i.active AND i.expires_at>$2 AND NOT m.paused AND (w.owner_admin_id IS NOT NULL OR (owner.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=owner.id AND d.status='pending' AND d.effective_at<=clock_timestamp()))) AND (w.owner_user_id=$1 OR (w.state='published' AND w.learning_public_generation=i.source_public_generation)) AND (i.kind<>'retest' OR (m.revision=i.memory_revision AND m.memory_epoch=i.memory_epoch))) ORDER BY s.created_at DESC LIMIT 1")
+    let session:Option<Uuid>=sqlx::query_scalar("SELECT s.id FROM learning_review_sessions s WHERE s.user_id=$1 AND s.expires_at>$2 AND s.settings_snapshot->>'english_variant'=$3 AND EXISTS(SELECT 1 FROM learning_review_items i JOIN learning_memories m ON m.id=i.memory_id JOIN learning_memory_sources ms ON ms.memory_id=m.id AND ms.wordlist_id=i.source_wordlist_id AND ms.membership_id=i.source_membership_id JOIN wordlists w ON w.id=i.source_wordlist_id AND w.deleted_at IS NULL JOIN wordlist_items wi ON wi.wordlist_id=w.id AND wi.entry_id=i.entry_id AND wi.learning_membership_id=i.source_membership_id JOIN learning_source.entries e ON e.id=i.entry_id AND e.archived_at IS NULL AND e.wordlist_archive_generation=i.entry_archive_generation JOIN learning_source.publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3 LEFT JOIN users owner ON owner.id=w.owner_user_id WHERE i.session_id=s.id AND i.active AND i.expires_at>$2 AND NOT m.paused AND (w.owner_admin_id IS NOT NULL OR (owner.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=owner.id AND d.status='pending' AND d.effective_at<=clock_timestamp()))) AND (w.owner_user_id=$1 OR (w.state='published' AND w.learning_public_generation=i.source_public_generation)) AND (i.kind<>'retest' OR (m.revision=i.memory_revision AND m.memory_epoch=i.memory_epoch))) ORDER BY s.created_at DESC LIMIT 1")
         .bind(auth.subject).bind(at).bind(&context.english_variant).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(MemoryOverview {
@@ -236,7 +235,7 @@ impl Selected {
             entry_id: self.entry_id,
             archive_generation: self.entry_archive_generation,
             publication_id: publication.publication_id,
-            content: publication.content_v3()?,
+            content: publication.question_content(Some(&context.english_variant))?,
         };
         Ok(build_candidates(&[source], context)?
             .candidates

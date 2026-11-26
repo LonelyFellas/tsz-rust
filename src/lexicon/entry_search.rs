@@ -11,6 +11,7 @@ use uuid::Uuid;
 type Tx<'a> = Transaction<'a, Postgres>;
 #[derive(Clone, sqlx::FromRow)]
 pub(crate) struct EntrySuggestionSummary {
+    pub is_next: bool,
     pub entry_id: Uuid,
     pub publication_id: Uuid,
     pub label: String,
@@ -42,7 +43,7 @@ pub(crate) async fn exact_batch(
             .await
             .map_err(AppError::internal)?;
     let ids: Vec<_> = matches.iter().map(|(_, id, _)| *id).collect();
-    published::lock_entries_in(tx, &ids).await?;
+    published::lock_learning_entries(tx, &ids).await?;
     let summaries: Vec<EntrySuggestionSummary> = sqlx::query_as(SUMMARY)
         .bind(&ids)
         .fetch_all(&mut **tx)

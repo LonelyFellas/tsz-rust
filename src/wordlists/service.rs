@@ -122,9 +122,15 @@ pub async fn lock_entries(
     ids: &[Uuid],
     require_all: bool,
 ) -> Result<(), AppError> {
-    let locked = crate::lexicon::published::lock_entries_in(tx, ids).await?;
+    let locked = crate::lexicon::published::lock_learning_entries(tx, ids).await?;
     if require_all {
-        let supported:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=ANY($1) AND e.archived_at IS NULL AND p.content_schema_version=3").bind(ids).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
+        let supported: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM learning_source.current_publications p WHERE p.entry_id=ANY($1)",
+        )
+        .bind(ids)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(AppError::internal)?;
         if locked != ids.len() || supported as usize != ids.len() {
             return Err(invalid("包含未发布、归档或不支持的词条"));
         }
@@ -548,7 +554,7 @@ pub async fn availability(
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     let (owner, _, revision) = read_lock_metadata(&mut tx, id, auth).await?;
     let (available_count, unavailable_count, custom_count) = sqlx::query_as(
-        "SELECT count(*) FILTER(WHERE p.id IS NOT NULL OR i.custom_word IS NOT NULL),count(*) FILTER(WHERE p.id IS NULL AND i.custom_word IS NULL),count(*) FILTER(WHERE i.custom_word IS NOT NULL) FROM wordlist_items i LEFT JOIN lexicon.entries e ON e.id=i.entry_id AND e.archived_at IS NULL LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3 WHERE i.wordlist_id=$1",
+        "SELECT count(*) FILTER(WHERE p.publication_id IS NOT NULL OR i.custom_word IS NOT NULL),count(*) FILTER(WHERE p.publication_id IS NULL AND i.custom_word IS NULL),count(*) FILTER(WHERE i.custom_word IS NOT NULL) FROM wordlist_items i LEFT JOIN learning_source.current_publications p ON p.entry_id=i.entry_id WHERE i.wordlist_id=$1",
     ).bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     eligible_owner(&mut tx, owner).await?;
     tx.commit().await.map_err(AppError::internal)?;
@@ -637,20 +643,41 @@ pub async fn read_entries_view(
     } else {
         None
     };
-    let rows:Vec<(Uuid,Uuid,serde_json::Value)>=sqlx::query_as("SELECT e.id,p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=ANY($1) AND e.archived_at IS NULL AND p.content_schema_version=3").bind(entry_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let rows:Vec<(Uuid,Uuid,serde_json::Value,bool)>=sqlx::query_as("SELECT p.entry_id,p.publication_id,p.snapshot,p.is_next FROM learning_source.current_publications p WHERE p.entry_id=ANY($1)").bind(entry_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     rows.into_iter()
-        .map(|(id, p, s)| Ok((id, projection::project(id, p, s, form_labels.as_ref())?)))
+        .map(|(id, p, s, is_next)| {
+            let entry = if is_next {
+                let doc: crate::lexicon_next::assessment_document::StudentDocument =
+                    serde_json::from_value(s).map_err(AppError::internal)?;
+                projection::project_content(
+                    id,
+                    p,
+                    doc.presentation.label,
+                    doc.kind,
+                    &doc.forms,
+                    &doc.meanings,
+                    form_labels.as_ref(),
+                )
+            } else {
+                projection::project(id, p, s, form_labels.as_ref())?
+            };
+            Ok((id, entry))
+        })
         .collect()
 }
 pub async fn unavailable_reasons(
     tx: &mut Tx<'_>,
     entry_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, WordlistUnavailableReason>, AppError> {
-    let rows: Vec<(Uuid, bool, Option<i16>)> = sqlx::query_as("SELECT e.id,e.archived_at IS NOT NULL,p.content_schema_version FROM lexicon.entries e LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=ANY($1)")
+    let rows: Vec<(Uuid, bool, Option<i16>,bool)> = sqlx::query_as("SELECT e.id,e.archived_at IS NOT NULL,p.content_schema_version,EXISTS(SELECT FROM learning_source.identities s WHERE s.next_id=e.id) FROM learning_source.entries e LEFT JOIN learning_source.publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=ANY($1)")
         .bind(entry_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     Ok(rows
         .into_iter()
-        .filter_map(|(id, archived, schema)| {
+        .filter_map(|(id, archived, schema, is_next)| {
+            // A published entry can lose assessment approval without being unpublished.
+            if is_next && !archived && schema.is_none() {
+                return None;
+            }
             let reason = match (archived, schema) {
                 (true, _) => WordlistUnavailableReason::Archived,
                 (false, None) => WordlistUnavailableReason::Unpublished,
@@ -673,7 +700,7 @@ pub async fn item_rows(
         page_size: query.page_size,
     })?;
     // Use only visible current publication labels for both matching and ordering.
-    let from = "wordlist_items i LEFT JOIN lexicon.entries e ON e.id=i.entry_id AND e.archived_at IS NULL LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3";
+    let from = "wordlist_items i LEFT JOIN learning_source.current_publications p ON p.entry_id=i.entry_id";
     let filter = "i.wordlist_id=$1 AND ($2='' OR strpos(lower(COALESCE(i.custom_word->>'word',p.snapshot#>>'{presentation,label}')),lower($2))>0)";
     let total = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT count(*) FROM {from} WHERE {filter}"
@@ -714,9 +741,15 @@ pub async fn catalog_in(
     size: u32,
     q: String,
 ) -> Result<WordlistCatalog, AppError> {
-    let filter = "e.archived_at IS NULL AND p.content_schema_version=3 AND (strpos(lower(p.snapshot#>>'{presentation,label}'),lower($1))>0 OR (char_length($1)>=3 AND similarity(lower(p.snapshot#>>'{presentation,label}'),lower($1))>=0.3))";
-    let total=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE {filter}"))).bind(&q).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
-    let entry_ids:Vec<Uuid>=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT e.id FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE {filter} ORDER BY (lower(p.snapshot#>>'{{presentation,label}}')=lower($1)) DESC,(strpos(lower(p.snapshot#>>'{{presentation,label}}'),lower($1))=1) DESC,similarity(lower(p.snapshot#>>'{{presentation,label}}'),lower($1)) DESC,p.snapshot#>>'{{presentation,label}}',e.id LIMIT $2 OFFSET $3"))).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let filter = "(strpos(lower(p.snapshot#>>'{presentation,label}'),lower($1))>0 OR (char_length($1)>=3 AND similarity(lower(p.snapshot#>>'{presentation,label}'),lower($1))>=0.3))";
+    let total = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM learning_source.current_publications p WHERE {filter}"
+    )))
+    .bind(&q)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AppError::internal)?;
+    let entry_ids:Vec<Uuid>=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT p.entry_id FROM learning_source.current_publications p WHERE {filter} ORDER BY (lower(p.snapshot#>>'{{presentation,label}}')=lower($1)) DESC,(strpos(lower(p.snapshot#>>'{{presentation,label}}'),lower($1))=1) DESC,similarity(lower(p.snapshot#>>'{{presentation,label}}'),lower($1)) DESC,p.snapshot#>>'{{presentation,label}}',p.entry_id LIMIT $2 OFFSET $3"))).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     let mut entries = read_entries(tx, &entry_ids).await?;
     let items = entry_ids
         .iter()

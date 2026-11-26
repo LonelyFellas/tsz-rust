@@ -14,6 +14,13 @@ use axum::{
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
+    let vary = axum::middleware::map_response(async |mut response: axum::response::Response| {
+        response.headers_mut().append(
+            axum::http::header::VARY,
+            axum::http::HeaderValue::from_static("X-TSZ-Wordlist-Source"),
+        );
+        response
+    });
     Router::new()
         .merge(super::library::router())
         .merge(super::custom_audio::handler::router())
@@ -53,10 +60,13 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(publish),
         )
         .route("/api/v1/wordlists/catalog", get(catalog))
-        .route("/api/v1/wordlists/suggestions", get(suggestions))
+        .route(
+            "/api/v1/wordlists/suggestions",
+            get(suggestions).layer(vary.clone()),
+        )
         .route(
             "/api/v1/wordlists/import-matches",
-            axum::routing::post(import_matches),
+            axum::routing::post(import_matches).layer(vary),
         )
         .route("/api/v1/wordlists/{id}", get(public_detail))
         .route("/api/v1/wordlists/{id}/items", get(public_items))
@@ -215,7 +225,7 @@ pub async fn my_items(
         .get("X-TSZ-Wordlist-Entry-Labels")
         .is_some_and(|value| value == "v1")
     {
-        let labels: Vec<(Uuid, String)> = sqlx::query_as("SELECT DISTINCT ON (entry_id) entry_id, snapshot#>>'{presentation,label}' FROM lexicon.entry_publications WHERE entry_id=ANY($1) AND NULLIF(snapshot#>>'{presentation,label}', '') IS NOT NULL ORDER BY entry_id, publication_number DESC")
+        let labels: Vec<(Uuid, String)> = sqlx::query_as("SELECT DISTINCT ON (entry_id) entry_id, snapshot#>>'{presentation,label}' FROM learning_source.publications WHERE entry_id=ANY($1) AND NULLIF(snapshot#>>'{presentation,label}', '') IS NOT NULL ORDER BY entry_id, publication_number DESC")
             .bind(&unavailable).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
         labels
             .into_iter()
@@ -356,24 +366,42 @@ pub async fn publish(
     Ok(Json(review::submit(&state.pool, &auth, id, input).await?))
 }
 
-#[utoipa::path(get,path="/api/v1/wordlists/suggestions",tag="wordlists",params(WordlistSuggestionQuery),security(("bearer_auth"=[])),responses((status=200,description="最多三个词条候选，无总数和分页",body=WordlistSuggestions),(status=400,description="查询无效"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号")))]
+#[utoipa::path(get,path="/api/v1/wordlists/suggestions",tag="wordlists",params(WordlistSuggestionQuery,("X-TSZ-Wordlist-Source"=Option<String>,Header,description="v1 includes source_library in suggestions")),security(("bearer_auth"=[])),responses((status=200,description="最多三个词条候选，无总数和分页",body=WordlistSuggestions),(status=400,description="查询无效"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号")))]
 pub async fn suggestions(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: axum::http::HeaderMap,
     ApiQuery(query): ApiQuery<WordlistSuggestionQuery>,
 ) -> Result<Json<WordlistSuggestions>, AppError> {
     Ok(Json(
-        super::suggestions::for_user(&state.pool, &auth, query).await?,
+        super::suggestions::for_user(
+            &state.pool,
+            &auth,
+            headers
+                .get("X-TSZ-Wordlist-Source")
+                .is_some_and(|v| v == "v1"),
+            query,
+        )
+        .await?,
     ))
 }
 
-#[utoipa::path(post,path="/api/v1/wordlists/import-matches",tag="wordlists",request_body=WordlistImportMatchRequest,security(("bearer_auth"=[])),responses((status=200,description="按输入顺序返回精确匹配，不写入词表",body=WordlistImportMatches),(status=400,description="每批 1–100 个词汇，每词 1–200 字"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号")))]
+#[utoipa::path(post,path="/api/v1/wordlists/import-matches",tag="wordlists",params(("X-TSZ-Wordlist-Source"=Option<String>,Header,description="v1 includes source_library in matches")),request_body=WordlistImportMatchRequest,security(("bearer_auth"=[])),responses((status=200,description="按输入顺序返回精确匹配，不写入词表",body=WordlistImportMatches),(status=400,description="每批 1–100 个词汇，每词 1–200 字"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号")))]
 pub async fn import_matches(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<WordlistImportMatchRequest>,
 ) -> Result<Json<WordlistImportMatches>, AppError> {
     Ok(Json(
-        super::suggestions::match_import(&state.pool, &auth, input).await?,
+        super::suggestions::match_import(
+            &state.pool,
+            &auth,
+            headers
+                .get("X-TSZ-Wordlist-Source")
+                .is_some_and(|v| v == "v1"),
+            input,
+        )
+        .await?,
     ))
 }

@@ -22,12 +22,30 @@ pub fn project(
             "publication entry mismatch",
         )));
     }
-    let pos = word
-        .forms
+    Ok(project_content(
+        entry_id,
+        publication_id,
+        word.presentation.label,
+        word.kind,
+        &word.forms,
+        &word.meanings,
+        form_labels,
+    ))
+}
+pub(super) fn project_content(
+    entry_id: Uuid,
+    publication_id: Uuid,
+    label: String,
+    kind: WordEntryKindV3,
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+    form_labels: Option<&ReadingLabels>,
+) -> WordlistEntry {
+    let pos = forms
         .pos
         .iter()
         .map(|form| {
-            let meanings = word.meanings.pos.iter().find(|m| m.pos_id == form.pos_id);
+            let matching_meanings = meanings.pos.iter().find(|m| m.pos_id == form.pos_id);
             WordlistPos {
                 pos_id: form.pos_id,
                 pos: form.pos.clone(),
@@ -44,9 +62,7 @@ pub fn project(
                                 .cloned()
                                 .unwrap_or_else(|| item.form_type.as_str().to_owned()),
                             sense_ids: crate::lexicon::published::allowed_form_senses(
-                                form,
-                                &word.meanings,
-                                item.id,
+                                form, meanings, item.id,
                             )
                             .map(|sense| sense.id)
                             .collect(),
@@ -61,7 +77,7 @@ pub fn project(
                         })
                         .collect()
                 }),
-                senses: meanings
+                senses: matching_meanings
                     .map(|m| {
                         m.senses
                             .iter()
@@ -80,7 +96,7 @@ pub fn project(
                             .collect()
                     })
                     .unwrap_or_default(),
-                grammar_structures: meanings
+                grammar_structures: matching_meanings
                     .map(|m| {
                         m.grammar_structures
                             .iter()
@@ -101,13 +117,13 @@ pub fn project(
             }
         })
         .collect();
-    Ok(WordlistEntry {
+    WordlistEntry {
         entry_id,
         publication_id,
-        label: word.presentation.label,
-        kind: word.kind,
+        label,
+        kind,
         pos,
-    })
+    }
 }
 fn english(content: &EnglishTextV3) -> Vec<WordlistText> {
     match content {
@@ -210,6 +226,7 @@ pub fn candidate(entry: WordlistEntry) -> WordlistCandidate {
         .take(2)
         .collect();
     WordlistCandidate {
+        source_library: None,
         entry_id: entry.entry_id,
         publication_id: entry.publication_id,
         label: entry.label,

@@ -24,10 +24,18 @@ fn issue(id: Uuid, field: &str, message: &str) -> NextPublicationIssue {
     }
 }
 const SELECT_PUBLICATION: &str = "SELECT id,entry_id,revision,lifecycle_revision,published_by_admin_id,published_at,snapshot FROM lexicon_next.publications WHERE entry_id=$1 ORDER BY lifecycle_revision DESC LIMIT 1";
-fn decode(row: sqlx::postgres::PgRow) -> Result<NextPublication, AppError> {
+fn decode(
+    row: sqlx::postgres::PgRow,
+    headers: &axum::http::HeaderMap,
+) -> Result<NextPublication, AppError> {
     let mut snapshot: serde_json::Value = row.get("snapshot");
     if let Some(draft) = snapshot.get_mut("draft") {
         super::model::strip_legacy_creation_detection(draft);
+        if !super::supports_form_questions(headers)
+            && let Some(fields) = draft.as_object_mut()
+        {
+            fields.remove("form_question_eligibility");
+        }
     }
     Ok(NextPublication {
         id: row.get("id"),
@@ -40,7 +48,7 @@ fn decode(row: sqlx::postgres::PgRow) -> Result<NextPublication, AppError> {
     })
 }
 
-#[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}/publication", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("id"=Uuid, Path),("x-tsz-next-dialect-pairs"=Option<String>, Header, description="v1: only reciprocal currently published peers are navigable")), responses((status=200, body=NextPublicationState), (status=401), (status=403), (status=404)))]
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}/publication", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("id"=Uuid, Path),("x-tsz-next-dialect-pairs"=Option<String>, Header, description="v1: only reciprocal currently published peers are navigable")), responses((status=200, body=NextPublicationState), (status=401), (status=403), (status=404)))]
 pub async fn read(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -68,7 +76,7 @@ pub async fn read(
         .fetch_optional(&mut *tx)
         .await
         .map_err(AppError::internal)?
-        .map(decode)
+        .map(|row| decode(row, &headers))
         .transpose()?;
     let mut changed = current.as_ref().is_none_or(|p| p.revision != row.1);
     if let Some(publication) = &current {
@@ -607,11 +615,12 @@ pub async fn preview(
     Ok(Json(prepared.preview))
 }
 
-#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries/{id}/publications", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("id"=Uuid, Path)), request_body=NextPublishInput, responses((status=200, body=NextPublication), (status=401), (status=403), (status=404), (status=409), (status=422)))]
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries/{id}/publications", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("id"=Uuid, Path)), request_body=NextPublishInput, responses((status=200, body=NextPublication), (status=401), (status=403), (status=404), (status=409), (status=422)))]
 pub async fn publish(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
+    headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<NextPublishInput>,
 ) -> Result<Json<NextPublication>, AppError> {
     if input.request_id.is_nil()
@@ -642,7 +651,7 @@ pub async fn publish(
             .fetch_one(&mut *tx)
             .await
             .map_err(AppError::internal)?;
-        return Ok(Json(decode(row)?));
+        return Ok(Json(decode(row, &headers)?));
     }
     let prepared = prepare(
         &mut tx,
@@ -675,5 +684,5 @@ pub async fn publish(
     }
     sqlx::query("INSERT INTO lexicon_next.publication_commands(actor_id,request_id,request,publication_id) VALUES($1,$2,$3,$4)").bind(auth.subject).bind(input.request_id).bind(request).bind(publication).execute(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(Json(decode(row)?))
+    Ok(Json(decode(row, &headers)?))
 }

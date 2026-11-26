@@ -3,7 +3,7 @@ pub mod dto;
 pub mod handler;
 pub(crate) mod learning;
 mod semantics;
-mod source;
+pub(crate) mod source;
 pub mod worker;
 
 use crate::error::{AppError, ErrorCode};

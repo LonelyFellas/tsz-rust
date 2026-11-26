@@ -57,6 +57,7 @@ fn representative_language_structures_preserve_core_identity_without_enabling_ca
             grammar_structures: None,
             sense_groups: None,
             form_editor: None,
+            form_question_eligibility: Default::default(),
             schema_version: 1,
             headword: surface.into(),
             forms: vec![NextForm {
