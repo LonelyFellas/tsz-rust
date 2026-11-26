@@ -194,7 +194,21 @@ pub struct LiaisonBowl {
 pub(crate) fn deserialize_liaison_bowl<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<Option<LiaisonBowl>, D::Error> {
-    LiaisonBowl::deserialize(d).map(Some)
+    use serde::de::{MapAccess, Visitor, value::MapAccessDeserializer};
+
+    struct BowlObject;
+    impl<'de> Visitor<'de> for BowlObject {
+        type Value = LiaisonBowl;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a liaison bowl object")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            LiaisonBowl::deserialize(MapAccessDeserializer::new(map))
+        }
+    }
+    d.deserialize_map(BowlObject).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

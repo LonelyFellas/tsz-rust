@@ -313,6 +313,31 @@ fn rejects_nul_in_all_persisted_rich_text_strings() {
 }
 
 #[test]
+fn liaison_bowl_requires_an_object_in_both_wire_formats() {
+    use crate::lexicon::dto::RichTextAnnotationV3;
+    use serde_json::json;
+
+    for bowl in [json!([]), json!([10, 20, 30]), json!(null)] {
+        let mark = json!({"type": "liaison", "start": 0, "end": 2, "bowl": bowl});
+        assert!(
+            serde_json::from_value::<RichTextAnnotation>(mark.clone()).is_err(),
+            "{mark}"
+        );
+        assert!(
+            serde_json::from_value::<RichTextAnnotationV3>(mark.clone()).is_err(),
+            "{mark}"
+        );
+    }
+    for bowl in [json!({}), json!({"curve_pct": -100, "right_tip_pct": 100})] {
+        let mark = json!({"type": "liaison", "start": 0, "end": 2, "bowl": bowl});
+        let v2: RichTextAnnotation = serde_json::from_value(mark.clone()).unwrap();
+        let v3: RichTextAnnotationV3 = serde_json::from_value(mark.clone()).unwrap();
+        assert_eq!(serde_json::to_value(v2).unwrap(), mark);
+        assert_eq!(serde_json::to_value(v3).unwrap(), mark);
+    }
+}
+
+#[test]
 fn keeps_liaison_anchor_widths_and_leaves_defaults_off_the_wire() {
     let mut value = RichText::V2(RichTextV2 {
         version: 2,
