@@ -298,6 +298,7 @@ use utoipa::{
         crate::lexicon_next::capabilities,
         crate::lexicon_next::generation::advance,
         crate::lexicon_next::generation::candidates,
+        crate::lexicon_next::generation::dictionary_reference,
         crate::lexicon_next::draft_schema,
         crate::lexicon_next::test_fixtures::create,
         crate::lexicon_next::test_purge::purge,

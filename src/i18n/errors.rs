@@ -1729,6 +1729,12 @@ fn extra_detail(code: ErrorCode, source: &str, locale: Locale) -> Option<&'stati
             "請輸入有效的英文詞條名稱",
             "Enter a valid English entry name.",
         )),
+        (ErrorCode::LexiconAssistantRateLimited, "词典刷新过于频繁，请稍后重试") => {
+            Some((
+                "詞典重新整理過於頻繁，請稍後重試",
+                "Dictionary refreshes are too frequent. Try again later.",
+            ))
+        }
         (ErrorCode::LexiconAssistantRateLimited, "助手正在回答或提问过于频繁，请稍后重试") => {
             Some((
                 "助手正在回答或提問過於頻繁，請稍後重試",
