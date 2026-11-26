@@ -933,6 +933,14 @@ pub enum RichTextAnnotationV3 {
         )]
         #[schema(default = 1, minimum = 1)]
         end_len: usize,
+        /// 弧顶左半弧在可调高度内的偏移百分比，正值向上。
+        #[serde(default, skip_serializing_if = "liaison_adjustment_is_zero")]
+        #[schema(default = 0, minimum = -100, maximum = 100)]
+        left_offset_pct: i8,
+        /// 右半弧在可调高度内的偏移百分比，正值向上。
+        #[serde(default, skip_serializing_if = "liaison_adjustment_is_zero")]
+        #[schema(default = 0, minimum = -100, maximum = 100)]
+        right_offset_pct: i8,
     },
     Highlight {
         start: usize,
@@ -3313,6 +3321,8 @@ mod tests {
                     end: 2,
                     start_len: 1,
                     end_len: 1,
+                    left_offset_pct: 0,
+                    right_offset_pct: 0,
                 },
                 RichTextAnnotationV3::Emphasis {
                     start: 0,

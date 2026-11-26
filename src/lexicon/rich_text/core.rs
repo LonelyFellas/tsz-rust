@@ -229,6 +229,7 @@ fn canonicalize_v2(value: &mut RichTextV2) -> Result<(), Vec<RichTextIssue>> {
     ranges.sort_by(compare_range_annotations);
 
     let mut merged: Vec<RichTextAnnotation> = Vec::new();
+    let mut liaison_anchors = std::collections::HashSet::new();
     for annotation in ranges {
         if matches!(
             annotation,
@@ -239,10 +240,16 @@ fn canonicalize_v2(value: &mut RichTextV2) -> Result<(), Vec<RichTextIssue>> {
             merged.push(annotation);
             continue;
         }
-        // 连读是「两点之间的一条连线」，不是一段文字的属性：连读链首尾相接、交叠的两条
-        // 都是各自独立的弧，合并会让读回的弧线与编辑时画的对不上。只去掉四个字段全同的重复。
-        if matches!(annotation, RichTextAnnotation::Liaison { .. }) {
-            if !merged.contains(&annotation) {
+        // 每组锚点只对应一条连读；形状是这条连读的显示属性。
+        if let RichTextAnnotation::Liaison {
+            start,
+            end,
+            start_len,
+            end_len,
+            ..
+        } = annotation
+        {
+            if liaison_anchors.insert((start, end, start_len, end_len)) {
                 merged.push(annotation);
             }
             continue;
@@ -384,8 +391,20 @@ pub(super) fn validate_v2(value: &RichTextV2) -> Vec<RichTextIssue> {
                 end,
                 start_len,
                 end_len,
+                left_offset_pct,
+                right_offset_pct,
             } => {
                 validate_range(&mut issues, &value.text, *start, *end, &path);
+                if !(-100..=100).contains(left_offset_pct)
+                    || !(-100..=100).contains(right_offset_pct)
+                {
+                    push_issue(
+                        &mut issues,
+                        "invalid_liaison_adjustment",
+                        &path,
+                        "连读弧左右两侧的高度偏移均须在 -100 到 100 之间",
+                    );
+                }
                 let start_anchor_end = start.checked_add(*start_len);
                 let end_anchor_start = end.checked_sub(*end_len);
                 if *start_len == 0

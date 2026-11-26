@@ -146,6 +146,10 @@ pub(crate) fn is_liaison_anchor_len_default(value: &usize) -> bool {
     *value == liaison_anchor_len_default()
 }
 
+pub(crate) fn liaison_adjustment_is_zero(value: &i8) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RichTextAnnotation {
@@ -187,6 +191,14 @@ pub enum RichTextAnnotation {
         )]
         #[schema(default = 1, minimum = 1)]
         end_len: usize,
+        /// 弧顶左半弧在可调高度内的偏移百分比，正值向上。
+        #[serde(default, skip_serializing_if = "liaison_adjustment_is_zero")]
+        #[schema(default = 0, minimum = -100, maximum = 100)]
+        left_offset_pct: i8,
+        /// 右半弧在可调高度内的偏移百分比，正值向上。
+        #[serde(default, skip_serializing_if = "liaison_adjustment_is_zero")]
+        #[schema(default = 0, minimum = -100, maximum = 100)]
+        right_offset_pct: i8,
     },
     Highlight {
         start: usize,

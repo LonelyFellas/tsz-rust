@@ -441,9 +441,21 @@ impl SynthesisRequest {
         }
         let mut rich_text = RichText::V2(content);
         rich_text::canonicalize(&mut rich_text).map_err(|_| SpeechModelError::InvalidRichText)?;
-        let RichText::V2(content) = rich_text else {
+        let RichText::V2(mut content) = rich_text else {
             unreachable!("the input variant is V2")
         };
+        // 弧线形状只影响排版，试听缓存仍使用原来的连读锚点。
+        for annotation in &mut content.annotations {
+            if let crate::lexicon::dto::RichTextAnnotation::Liaison {
+                left_offset_pct,
+                right_offset_pct,
+                ..
+            } = annotation
+            {
+                *left_offset_pct = 0;
+                *right_offset_pct = 0;
+            }
+        }
         let normalized_content = serde_json::to_vec(&content)
             .expect("RichTextV2 serialization cannot fail for an in-memory value");
         Ok(Self {
