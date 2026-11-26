@@ -2589,6 +2589,50 @@ async fn workspace_names_use_saved_base_forms_and_deduplicate_shared_spellings(p
 }
 
 #[sqlx::test]
+async fn liaison_adjustments_out_of_range_do_not_overwrite_lexicon_next_draft(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool);
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut draft = entry["draft"].clone();
+    let mut editor = form_editor();
+    let variant = &mut editor["contents"][0]["regional_variants"]["uk"];
+    variant["spelling_rich"] = json!({"version":2,"text":"centre","annotations":[{"type":"italic","start":0,"end":2},{"type":"liaison","start":1,"end":5,"right_offset_pct":15}]});
+    variant["pronunciations"][0]["actual_pron_rich"] = json!({"version":2,"text":"sentə","annotations":[{"type":"liaison","start":1,"end":4,"left_offset_pct":20}]});
+    draft["form_editor"] = editor;
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let draft = &saved["draft"];
+    for leaf in [
+        "/form_editor/contents/0/regional_variants/uk/pronunciations/0/actual_pron_rich/annotations/0/left_offset_pct",
+        "/form_editor/contents/0/regional_variants/uk/spelling_rich/annotations/1/right_offset_pct",
+    ] {
+        let mut invalid = draft.clone();
+        *invalid.pointer_mut(leaf).unwrap() = json!(101);
+        let (status, problem) = call(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":2,"draft":invalid}),
+        )
+        .await;
+        assert!(status.is_client_error(), "{status} {problem}");
+        let (status, reopened) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{reopened}");
+        assert_eq!(reopened["revision"], 2);
+        assert_eq!(&reopened["draft"], draft);
+    }
+}
+
+#[sqlx::test]
 async fn v1_forms_editor_round_trips_and_projects_without_legacy_entry_data(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let state = AppState::for_test(pool.clone());

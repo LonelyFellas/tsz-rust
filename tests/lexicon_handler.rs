@@ -2477,7 +2477,7 @@ async fn sentence_formats_persist_in_definitions_and_shared_sentences(pool: PgPo
 }
 
 #[sqlx::test]
-async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
+async fn v3_grammar_annotations_keep_levels_and_liaison_adjustments(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -2496,7 +2496,7 @@ async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
             {"type": "italic", "start": 1, "end": 12},
             {"type": "emphasis", "start": 10, "end": 14, "level": "grammar"},
             // 起点锚点是 "le"、终点锚点是 "n"：两端宽度不同，退化成单字母就会被这条测出来。
-            {"type": "liaison", "start": 7, "end": 11, "start_len": 2, "end_len": 1},
+            {"type": "liaison", "start": 7, "end": 11, "start_len": 2, "left_offset_pct": -15, "right_offset_pct": 20, "end_len": 1},
             {"type": "emphasis", "start": 0, "end": 9, "level": "function"}
         ]
     });
@@ -2520,13 +2520,13 @@ async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
     let canonical = json!([
         {"type": "emphasis", "start": 0, "end": 9, "level": "function"},
         {"type": "italic", "start": 1, "end": 12},
-        {"type": "liaison", "start": 7, "end": 11, "start_len": 2},
+        {"type": "liaison", "start": 7, "end": 11, "start_len": 2, "left_offset_pct": -15, "right_offset_pct": 20},
         {"type": "emphasis", "start": 10, "end": 14, "level": "grammar"}
     ]);
     assert_eq!(
         saved["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["content"]["annotations"],
         canonical,
-        "保存响应应原样带回三分类与连读端点宽度"
+        "保存响应应原样带回三分类、连读端点宽度与偏移"
     );
 
     let (status, refetched) = call(
@@ -18576,9 +18576,14 @@ async fn v3_spelling_rich_roundtrips_and_preserves_legacy_writes(pool: PgPool) {
     for side in ["uk", "us"] {
         let variant = &mut forms.pointer_mut(path).unwrap()[side];
         let spelling = variant["spelling"].as_str().unwrap().to_owned();
+        let mut liaison =
+            json!({"type":"liaison","start":1,"end":spelling.chars().count(),"start_len":2});
+        if side == "uk" {
+            liaison["left_offset_pct"] = json!(15);
+            liaison["right_offset_pct"] = json!(-20);
+        }
         variant["spelling_rich"] = json!({"version":2,"text":spelling,"annotations":[
-            {"type":"italic","start":0,"end":2},
-            {"type":"liaison","start":1,"end":spelling.chars().count(),"start_len":2}
+            {"type":"italic","start":0,"end":2}, liaison
         ]});
     }
     let (_, saved) = save_v3_forms_after_impact(
@@ -18596,6 +18601,13 @@ async fn v3_spelling_rich_roundtrips_and_preserves_legacy_writes(pool: PgPool) {
         ready["word"]["completed_steps"]
     );
     let expected = saved["word"]["forms"].clone();
+    let variants = expected.pointer(path).unwrap();
+    let adjusted = &variants["uk"]["spelling_rich"]["annotations"][1];
+    assert_eq!(adjusted["left_offset_pct"], 15);
+    assert_eq!(adjusted["right_offset_pct"], -20);
+    let automatic = &variants["us"]["spelling_rich"]["annotations"][1];
+    assert!(automatic.get("left_offset_pct").is_none());
+    assert!(automatic.get("right_offset_pct").is_none());
     for side in ["uk", "us"] {
         assert_eq!(
             expected.pointer(path).unwrap()[side]["id"],
@@ -18754,7 +18766,7 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
     )
     .await;
     let pronunciation = &mut variant["pronunciations"][0];
-    pronunciation["actual_pron_rich"] = json!({"version":2,"text":pronunciation["actual_pron"],"annotations":[{"type":"liaison","start":0,"end":2}]});
+    pronunciation["actual_pron_rich"] = json!({"version":2,"text":pronunciation["actual_pron"],"annotations":[{"type":"liaison","start":0,"end":2,"left_offset_pct":-20,"right_offset_pct":15}]});
     let (_, saved) = save_v3_forms_after_impact(
         &state,
         &bearer,
@@ -18776,6 +18788,9 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
         expected,
         saved["word"]["forms"].pointer(path).unwrap().clone()
     );
+    let liaison = &expected["pronunciations"][0]["actual_pron_rich"]["annotations"][0];
+    assert_eq!(liaison["left_offset_pct"], -20);
+    assert_eq!(liaison["right_offset_pct"], 15);
     let mut empty = published["word"]["forms"].clone();
     let variant = empty.pointer_mut(path).unwrap();
     variant["spelling_rich"]["annotations"] = json!([]);

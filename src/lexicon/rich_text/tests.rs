@@ -177,6 +177,8 @@ fn canonicalization_is_idempotent_and_uses_frontend_type_order() {
                 end: 1,
                 start_len: 1,
                 end_len: 1,
+                left_offset_pct: 0,
+                right_offset_pct: 0,
             },
             RichTextAnnotation::Highlight {
                 start: 0,
@@ -319,6 +321,8 @@ fn keeps_liaison_anchor_widths_and_leaves_defaults_off_the_wire() {
             end: 8,
             start_len: 2,
             end_len: 1,
+            left_offset_pct: 0,
+            right_offset_pct: 0,
         }],
     });
     canonicalize(&mut value).unwrap();
@@ -360,6 +364,8 @@ fn rejects_liaison_anchors_outside_the_span() {
                 end: 4,
                 start_len,
                 end_len,
+                left_offset_pct: 0,
+                right_offset_pct: 0,
             }],
         });
         assert!(
@@ -379,6 +385,8 @@ fn liaisons_stay_apart_and_only_exact_duplicates_collapse() {
         end,
         start_len,
         end_len,
+        left_offset_pct: 0,
+        right_offset_pct: 0,
     };
     // [0,3) 与 [3,6) 首尾相接、与 [1,5) 交叠、同区间换了起点宽度，都是各自的弧；
     // 只有四个字段全同的那条是重复。
@@ -406,6 +414,22 @@ fn liaisons_stay_apart_and_only_exact_duplicates_collapse() {
     );
     canonicalize(&mut value).unwrap();
     assert_eq!(serde_json::to_value(&value).unwrap(), once);
+}
+
+#[test]
+fn liaison_adjustments_do_not_override_the_first_arc_with_the_same_anchors() {
+    let first = serde_json::json!({"type":"liaison","start":2,"end":6});
+    let mut duplicate = first.clone();
+    duplicate["left_offset_pct"] = serde_json::json!(10);
+    let mut value: RichText = serde_json::from_value(serde_json::json!({
+        "version":2,"text":"abcdef","annotations":[first,duplicate]
+    }))
+    .unwrap();
+    canonicalize(&mut value).unwrap();
+    assert_eq!(
+        serde_json::to_value(value).unwrap()["annotations"],
+        serde_json::json!([first])
+    );
 }
 
 #[test]
