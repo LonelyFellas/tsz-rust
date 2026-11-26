@@ -13,6 +13,7 @@ use crate::{
 };
 use axum::{Json, extract::State, http::HeaderMap};
 use chrono::{DateTime, Utc};
+use deadpool_redis::redis::Script;
 use reqwest::{Response, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -139,6 +140,26 @@ pub struct NextAgentTranslation {
     pub text: String,
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize, ToSchema)]
+pub enum NextDictionarySource {
+    #[serde(rename = "有道")]
+    Youdao,
+    #[serde(rename = "Oxford Learner’s Dictionaries")]
+    Oxford,
+    #[serde(rename = "Merriam-Webster")]
+    MerriamWebster,
+    #[serde(rename = "Cambridge Dictionary")]
+    Cambridge,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextDictionaryRefreshInput {
+    pub base_revision: i64,
+    pub headword: String,
+    pub source: NextDictionarySource,
+}
+
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextAgentSource {
@@ -215,6 +236,8 @@ pub struct GenerationCapability {
     pub section_generation_candidates: bool,
     #[serde(default)]
     pub grammar_sub_pos: bool,
+    #[serde(default)]
+    pub dictionary_refresh: bool,
 }
 
 pub async fn capability(state: &AppState) -> GenerationCapability {
@@ -569,6 +592,74 @@ pub async fn advance(
     Ok(Json(output))
 }
 
+async fn reserve_dictionary_refresh(state: &AppState, actor: Uuid) -> Result<(), AppError> {
+    let key = format!(
+        "{}lexicon-next:dictionary-refresh:{actor}",
+        state.login_throttle_prefix
+    );
+    let mut conn = state.redis.get().await.map_err(|_| unavailable())?;
+    let retry_after: u64 = Script::new(
+        r#"
+        if tonumber(redis.call('GET', KEYS[1]) or '0') >= tonumber(ARGV[1]) then
+            return math.max(redis.call('TTL', KEYS[1]), 1)
+        end
+        if redis.call('INCR', KEYS[1]) == 1 then
+            redis.call('EXPIRE', KEYS[1], ARGV[2])
+        end
+        return 0
+        "#,
+    )
+    .key(key)
+    .arg(12)
+    .arg(600)
+    .invoke_async(&mut conn)
+    .await
+    .map_err(|_| unavailable())?;
+    if retry_after > 0 {
+        return Err(AppError::rate_limited(
+            ErrorCode::LexiconAssistantRateLimited,
+            "词典刷新过于频繁，请稍后重试",
+        )
+        .with_retry_after(retry_after));
+    }
+    Ok(())
+}
+
+#[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation/dictionary-reference",tag="admin-lexicon-next",security(("bearer_auth"=[])),
+    params(("id"=Uuid,Path)),request_body=NextDictionaryRefreshInput,responses((status=200,body=NextAgentSource),(status=401),(status=403),(status=404),(status=409),(status=422),(status=429),(status=503)))]
+pub async fn dictionary_reference(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiJson(input): ApiJson<NextDictionaryRefreshInput>,
+) -> Result<Json<NextAgentSource>, AppError> {
+    language::text(&input.headword, 200)?;
+    let headword = input.headword.trim();
+    editable(&state, &auth, id, input.base_revision).await?;
+    let config = state.vocabulary_agent.as_deref().ok_or_else(unavailable)?;
+    reserve_dictionary_refresh(&state, auth.subject).await?;
+    let source = json!(input.source);
+    let response = send(
+        config,
+        "dictionary-reference",
+        &json!({ "headword": headword, "source": source }).to_string(),
+        Duration::from_secs(15),
+        false,
+    )
+    .await?;
+    let output: NextAgentSource = decode(response).await?;
+    if source.as_str() != Some(output.source.as_str())
+        || !matches!(
+            output.status.as_str(),
+            "found" | "no_match" | "unavailable" | "not_configured"
+        )
+    {
+        return Err(unavailable());
+    }
+    editable(&state, &auth, id, input.base_revision).await?;
+    Ok(Json(output))
+}
+
 #[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation/candidates",tag="admin-lexicon-next",security(("bearer_auth"=[])),
     params(("id"=Uuid,Path),("x-tsz-next-grammar-sub-pos"=Option<String>,Header,description="v1 accepts catalog-scoped grammar subcategory recommendations."),("x-tsz-next-section-candidates"=Option<String>,Header,description="v1 enables lookup for independent section generation.")),request_body=NextAgentInput,responses((status=200,body=NextGenerationCandidates),(status=401),(status=403),(status=404),(status=409),(status=422),(status=503)))]
 pub async fn candidates(
@@ -683,7 +774,7 @@ mod tests {
         assert!(read_capability(&config).await.is_err());
         let legacy = read_capability(&config).await.unwrap();
         assert!(legacy.generation && legacy.generation_candidates);
-        assert!(!legacy.grammar_sub_pos);
+        assert!(!legacy.grammar_sub_pos && !legacy.dictionary_refresh);
         server.abort();
     }
 

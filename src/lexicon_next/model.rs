@@ -405,6 +405,9 @@ pub struct NextCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub section_generation_candidates: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub dictionary_refresh: Option<bool>,
     pub publishing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]

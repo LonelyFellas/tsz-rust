@@ -936,24 +936,42 @@ async fn generation_checks_ownership_revision_and_archive_before_agent_dispatch(
 }
 
 #[sqlx::test]
-async fn candidate_lookup_checks_edit_access_and_revision_before_contacting_agent(pool: PgPool) {
+async fn candidate_lookup_and_dictionary_reference_check_edit_access_and_revision(pool: PgPool) {
     use std::sync::{Arc, Mutex};
 
     let owner = admin(&pool, EDIT).await;
     let outsider = admin(&pool, EDIT).await;
     let read_only = admin(&pool, &["words.access"]).await;
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let upstream = axum::Router::new().route(
-        "/v2/lexicon/candidates",
-        axum::routing::post({
-            let captured = captured.clone();
-            move |axum::Json(body): axum::Json<Value>| {
-                captured.lock().unwrap().push(body);
-                // A previous Agent version has generation but no candidate endpoint.
-                async { StatusCode::NOT_FOUND }
-            }
-        }),
-    );
+    let upstream = axum::Router::new()
+        .route(
+            "/v2/lexicon/candidates",
+            axum::routing::post({
+                let captured = captured.clone();
+                move |axum::Json(body): axum::Json<Value>| {
+                    captured.lock().unwrap().push(body);
+                    // A previous Agent version has generation but no candidate endpoint.
+                    async { StatusCode::NOT_FOUND }
+                }
+            }),
+        )
+        .route(
+            "/v2/lexicon/dictionary-reference",
+            axum::routing::post({
+                let captured = captured.clone();
+                move |axum::Json(body): axum::Json<Value>| {
+                    captured.lock().unwrap().push(body);
+                    async {
+                        axum::Json(json!({
+                            "source": "Cambridge Dictionary",
+                            "locator": "https://dictionary.cambridge.org/dictionary/english/centre",
+                            "excerpt": "centre · 词性 noun",
+                            "status": "found",
+                        }))
+                    }
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
@@ -995,10 +1013,62 @@ async fn candidate_lookup_checks_edit_access_and_revision_before_contacting_agen
         call(&state, Some(owner), "POST", &path, input).await,
         (StatusCode::OK, json!({"candidate": null}))
     );
-    let forwarded = captured.lock().unwrap();
-    assert_eq!(forwarded.len(), 1);
-    assert_eq!(forwarded[0]["scope"]["actor_id"], json!(owner));
-    assert_eq!(forwarded[0]["scope"]["entry_id"], id);
+    {
+        let forwarded = captured.lock().unwrap();
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(forwarded[0]["scope"]["actor_id"], json!(owner));
+        assert_eq!(forwarded[0]["scope"]["entry_id"], id);
+    }
+    let reference_path = format!("/entries/{id}/generation/dictionary-reference");
+    let reference = json!({
+        "base_revision": entry["revision"], "headword": "centre", "source": "Cambridge Dictionary"
+    });
+    assert_eq!(
+        call(
+            &state,
+            Some(outsider),
+            "POST",
+            &reference_path,
+            reference.clone()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let mut stale_reference = reference.clone();
+    stale_reference["base_revision"] = json!(0);
+    assert_eq!(
+        call(
+            &state,
+            Some(owner),
+            "POST",
+            &reference_path,
+            stale_reference
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(captured.lock().unwrap().len(), 1);
+    for _ in 0..12 {
+        let (status, output) = call(
+            &state,
+            Some(owner),
+            "POST",
+            &reference_path,
+            reference.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(output["status"], "found");
+    }
+    let (status, _) = call(&state, Some(owner), "POST", &reference_path, reference).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(captured.lock().unwrap().len(), 13);
+    assert_eq!(
+        captured.lock().unwrap()[1],
+        json!({ "headword": "centre", "source": "Cambridge Dictionary" })
+    );
     server.abort();
 }
 

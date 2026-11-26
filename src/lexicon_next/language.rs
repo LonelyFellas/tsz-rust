@@ -51,6 +51,7 @@ pub fn capabilities() -> NextCapabilities {
         generation: false,
         generation_candidates: None,
         section_generation_candidates: None,
+        dictionary_refresh: None,
         publishing: true,
         form_editor: None,
         sense_groups: None,
