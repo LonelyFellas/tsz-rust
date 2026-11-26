@@ -15,6 +15,7 @@ pub mod list_model;
 pub mod model;
 pub mod publication_model;
 pub mod publications;
+mod relation_candidates;
 mod relations;
 mod repository;
 mod sentence_details;

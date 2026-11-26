@@ -1,6 +1,7 @@
 use super::{
     language,
     model::{NextDraft, strip_legacy_creation_detection},
+    relation_candidates,
 };
 use crate::{
     admin::{AdminAuth, permissions},
@@ -117,6 +118,17 @@ pub struct NextAgentRelation {
     pub word: String,
     pub gloss: String,
     pub score: f64,
+    /// Verified against the current published lexicon and a live target sense.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target: Option<NextAgentRelationTarget>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct NextAgentRelationTarget {
+    pub entry_id: Uuid,
+    pub sense_id: Uuid,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -417,7 +429,7 @@ async fn prepare<'a>(
     input: &NextAgentInput,
     (kind, medium): (String, String),
     headers: &HeaderMap,
-) -> Result<(&'a AgentConfig, String, GrammarSubPosCatalog), AppError> {
+) -> Result<(&'a AgentConfig, String, GrammarSubPosCatalog, String), AppError> {
     language::text(&input.headword, 200)?;
     if input.run_id.is_nil()
         || (input.force_refresh
@@ -479,6 +491,11 @@ async fn prepare<'a>(
         return Err(language::unavailable());
     }
     let mut materials = published_materials(&state.pool, &input.headword, &medium).await?;
+    if input.sections.contains(&NextAgentSection::Relations) {
+        materials.extend(
+            relation_candidates::materials(&state.pool, id, &input.headword, &medium).await?,
+        );
+    }
     if materials.is_empty() {
         materials.push(NextAgentSource {
             source: "智能词库".into(),
@@ -501,6 +518,7 @@ async fn prepare<'a>(
         config,
         json!({"scope":scope,"materials":materials}).to_string(),
         grammar_sub_pos,
+        medium,
     ))
 }
 
@@ -561,7 +579,7 @@ fn endpoint_missing(response: &Response) -> bool {
 }
 
 #[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation",tag="admin-lexicon-next",security(("bearer_auth"=[])),
-    params(("id"=Uuid,Path),("x-tsz-next-grammar-sub-pos"=Option<String>,Header,description="v1 accepts catalog-scoped grammar subcategory recommendations."),("x-tsz-next-section-candidates"=Option<String>,Header,description="v1 enables reuse for independent section generation.")),request_body=NextAgentInput,responses((status=200,body=NextAgentResult),(status=401),(status=403),(status=404),(status=409),(status=422),(status=429),(status=503)))]
+    params(("id"=Uuid,Path),("x-tsz-next-grammar-sub-pos"=Option<String>,Header,description="v1 accepts catalog-scoped grammar subcategory recommendations."),("x-tsz-next-section-candidates"=Option<String>,Header,description="v1 enables reuse for independent section generation."),("x-tsz-next-relation-targets"=Option<String>,Header,description="v1 accepts optional published lexicon targets on relation candidates.")),request_body=NextAgentInput,responses((status=200,body=NextAgentResult),(status=401),(status=403),(status=404),(status=409),(status=422),(status=429),(status=503)))]
 pub async fn advance(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -570,7 +588,7 @@ pub async fn advance(
     ApiJson(input): ApiJson<NextAgentInput>,
 ) -> Result<Json<NextAgentResult>, AppError> {
     let entry = editable(&state, &auth, id, input.base_revision, &input.sections).await?;
-    let (config, body, grammar_sub_pos) =
+    let (config, body, grammar_sub_pos, medium) =
         prepare(&state, &auth, id, &input, entry, &headers).await?;
     let shared_candidates =
         supports_section_candidates(&headers) && reusable_section(&input.sections, true).is_some();
@@ -601,6 +619,14 @@ pub async fn advance(
     let mut output = decode(response).await?;
     validate_binding(&output, &input)?;
     retain_grammar_sub_pos(&mut output.proposals.grammar, &grammar_sub_pos);
+    relation_candidates::resolve(
+        &state.pool,
+        id,
+        &medium,
+        &headers,
+        &mut output.proposals.relations,
+    )
+    .await?;
     editable(&state, &auth, id, input.base_revision, &input.sections).await?;
     Ok(Json(output))
 }
@@ -674,7 +700,7 @@ pub async fn dictionary_reference(
 }
 
 #[utoipa::path(post,path="/api/v1/admin/lexicon-next/entries/{id}/generation/candidates",tag="admin-lexicon-next",security(("bearer_auth"=[])),
-    params(("id"=Uuid,Path),("x-tsz-next-grammar-sub-pos"=Option<String>,Header,description="v1 accepts catalog-scoped grammar subcategory recommendations."),("x-tsz-next-section-candidates"=Option<String>,Header,description="v1 enables lookup for independent section generation.")),request_body=NextAgentInput,responses((status=200,body=NextGenerationCandidates),(status=401),(status=403),(status=404),(status=409),(status=422),(status=503)))]
+    params(("id"=Uuid,Path),("x-tsz-next-grammar-sub-pos"=Option<String>,Header,description="v1 accepts catalog-scoped grammar subcategory recommendations."),("x-tsz-next-section-candidates"=Option<String>,Header,description="v1 enables lookup for independent section generation."),("x-tsz-next-relation-targets"=Option<String>,Header,description="v1 accepts optional published lexicon targets on relation candidates.")),request_body=NextAgentInput,responses((status=200,body=NextGenerationCandidates),(status=401),(status=403),(status=404),(status=409),(status=422),(status=503)))]
 pub async fn candidates(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -687,7 +713,7 @@ pub async fn candidates(
     reusable_section(&input.sections, shared_candidates)
         .filter(|_| !input.force_refresh)
         .ok_or_else(language::invalid)?;
-    let (config, body, grammar_sub_pos) =
+    let (config, body, grammar_sub_pos, medium) =
         prepare(&state, &auth, id, &input, entry, &headers).await?;
     let response = send(
         config,
@@ -729,6 +755,14 @@ pub async fn candidates(
             return Err(unavailable());
         }
         retain_grammar_sub_pos(&mut result.proposals.grammar, &grammar_sub_pos);
+        relation_candidates::resolve(
+            &state.pool,
+            id,
+            &medium,
+            &headers,
+            &mut result.proposals.relations,
+        )
+        .await?;
     }
     editable(&state, &auth, id, input.base_revision, &input.sections).await?;
     Ok(Json(output))
