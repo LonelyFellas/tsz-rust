@@ -240,10 +240,10 @@ fn build_with_policy(
                     normalization_version: ANSWER_NORMALIZATION_VERSION,
                 };
                 let mut form_ids = vec![];
-                for form in forms
-                    .into_iter()
-                    .filter(|f| (all_content && !has_base) || f.form_type.as_str() == "base")
-                {
+                for form in forms.into_iter().filter(|f| {
+                    !source.content.excluded_form_ids.contains(&f.id)
+                        && ((all_content && !has_base) || f.form_type.as_str() == "base")
+                }) {
                     for spelling in form
                         .regional_variants
                         .variants()

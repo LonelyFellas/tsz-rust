@@ -368,7 +368,7 @@ async fn source_access(
     if entry_ids.len() > 1000 {
         return Err(invalid("来源超过 1000 个词条，请拆分任务"));
     }
-    let entries = published::read_current_in(tx, &entry_ids).await?;
+    let entries = published::read_learning_in(tx, &entry_ids).await?;
     // Entry locks may have waited across an owner's deletion deadline or the grace
     // deadline. Project only after rechecking both with the database clock.
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -465,7 +465,7 @@ impl SourceAccess {
                 == Some(&q.source_membership_id)
             && entry_available
     }
-    pub fn learning_sources(&self) -> Result<Vec<LearningSource>, AppError> {
+    pub fn learning_sources(&self, profile: &str) -> Result<Vec<LearningSource>, AppError> {
         self.ordered
             .iter()
             .filter(|(list, _)| !self.grace.contains_key(list))
@@ -485,7 +485,7 @@ impl SourceAccess {
                     entry_id: *e,
                     publication_id: publication.publication_id,
                     archive_generation: publication.archive_generation,
-                    content: publication.content_v3()?,
+                    content: publication.question_content(Some(profile))?,
                 })
             })
             .collect()

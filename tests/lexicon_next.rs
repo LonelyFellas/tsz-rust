@@ -2001,6 +2001,12 @@ async fn workspace_migration_round_trip_preserves_language_content(pool: PgPool)
     .await
     .unwrap();
     sqlx::raw_sql(include_str!(
+        "../migrations/20261126020000_assessed_learning_sources.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20261111120000_lexicon_next_list.down.sql"
     ))
     .execute(&pool)
@@ -2008,6 +2014,12 @@ async fn workspace_migration_round_trip_preserves_language_content(pool: PgPool)
     .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20261111120000_lexicon_next_list.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261126020000_assessed_learning_sources.up.sql"
     ))
     .execute(&pool)
     .await
@@ -6033,3 +6045,7 @@ async fn archived_fixture_cannot_be_restored_or_deleted_during_audio_purge(pool:
         .bind(publication).bind(asset).bind(id).execute(&pool).await.unwrap();
     assert_eq!(command("restore", 2).await.0, StatusCode::CONFLICT);
 }
+
+mod account_deletion_support;
+mod learning_tasks_support;
+mod wordlists_support;

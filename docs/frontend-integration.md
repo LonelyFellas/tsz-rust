@@ -429,3 +429,9 @@ TASK#190 与后续 #402 的耦合：录音 `is_default` 保留 absent／true／f
 ### 新版词库：词义方言配对（#177）
 
 协商 `x-tsz-next-dialect-pairs: v1`：能力目录返回 `dialect_pairs`，读取和保存草稿、语言视图以及当前已发布状态可返回 `dialect_senses`。完整草稿 PUT 的可选 `dialect_changes` 与词条一起提交；修改涉及的每个对方均须具备编辑权限并匹配版本。已配词义的旧目标版本使用 `previous_target_revision`，新目标使用 `target.revision`。两端发布顺序不限，发布状态的 `paired: true, target: null` 表示本侧已记录配对但当前无可用的双向发布链接，不得用草稿补全。兼容顺序、回退限制与验收见前端主记录 `docs/features/lexicon-next-dialect-pairs/README.md`。
+
+## TASK#232 词形出题资格与双题源
+
+跨仓主记录见前端仓库 `docs/features/zentao-232-form-eligibility/README.md`。目录字段 `default_question_eligible` 只初始化新增词形。新版词条和发布读写使用 `x-tsz-next-form-questions: v1`，以具体词形 ID 保存设置，旧客户端省略时保留既有值。
+
+`GET /api/v1/admin/lexicon-next/entries/{id}/assessment` 读取当前发布版本和测评资格。`PUT` 需要 `words.review_assessment`，提交 `publication_id`、`lifecycle_revision`、`expected_version` 和 `approved`，版本过期返回 409。学生词表同时读取旧库及当前审核通过的新版发布；候选搜索和批量导入携带 `X-TSZ-Wordlist-Source: v1` 时返回可选的 `source_library`。撤销或重发后按新的资格重新取题。

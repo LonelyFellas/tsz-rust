@@ -109,7 +109,7 @@ fn current_signature(
         entry_id,
         archive_generation: publication.archive_generation,
         publication_id: publication.publication_id,
-        content: publication.content_v3()?,
+        content: publication.question_content(Some(&context.english_variant))?,
     };
     let pool = build_candidates(&[source], context)?;
     pool.candidates

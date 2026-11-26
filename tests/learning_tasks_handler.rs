@@ -437,6 +437,7 @@ async fn candidate_projection_obeys_cefr_context_and_form_relationships(pool: Pg
             archive_generation: generation,
             publication_id: publication,
             content: tsz_rust::lexicon::published::PublishedContentV3 {
+                excluded_form_ids: Default::default(),
                 forms: word.forms,
                 meanings: word.meanings,
             },

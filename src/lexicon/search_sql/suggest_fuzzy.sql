@@ -11,11 +11,11 @@ WITH nearest AS MATERIALIZED (
     ORDER BY s.surface <-> $1
     LIMIT 32
 )
-SELECT s.entry_id
+SELECT s.entry_id,s.publication_id
 FROM nearest s
 JOIN lexicon.entries e ON e.id=s.entry_id AND e.current_publication_id=s.publication_id
 WHERE e.archived_at IS NULL AND e.content_schema_version=3
   AND abs(char_length(s.surface)-char_length($1)) <= greatest(2,char_length($1)/3)
-GROUP BY s.entry_id
+GROUP BY s.entry_id,s.publication_id
 ORDER BY min(s.distance),s.entry_id
 LIMIT $3

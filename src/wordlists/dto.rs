@@ -361,9 +361,20 @@ pub struct MyWordlistItems {
     pub revision: i64,
     pub pagination: PaginationMeta,
 }
+#[derive(Serialize, ToSchema, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum WordlistSourceLibrary {
+    Legacy,
+    LexiconNext,
+}
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 #[serde(deny_unknown_fields)]
 pub struct WordlistCandidate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    #[schema(nullable = false)]
+    pub source_library: Option<WordlistSourceLibrary>,
     pub entry_id: Uuid,
     pub publication_id: Uuid,
     pub label: String,

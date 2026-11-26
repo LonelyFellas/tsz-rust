@@ -61,6 +61,64 @@ async fn excel_import_does_not_auto_bind_when_an_ambiguous_entry_changes_while_w
 }
 
 #[sqlx::test]
+async fn autocomplete_does_not_rebind_to_a_different_publication_after_waiting(pool: PgPool) {
+    let (state, user) = setup_bound(&pool).await;
+    let first = entry(&pool, "shared").await;
+    surface(&pool, first, "shared", "uk", None).await;
+    let mut writer = pool.begin().await.unwrap();
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM lexicon.entries WHERE id=$1 FOR UPDATE")
+        .bind(first)
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    let matching = tokio::spawn(async move {
+        call(
+            &state,
+            &user,
+            "GET",
+            "/api/v1/wordlists/suggestions?q=shared",
+            Value::Null,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(holder)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("matcher must wait for the publication writer");
+    let next = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entry_publications(id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id)
+        SELECT $2,entry_id,publication_number+1,source_revision+1,content_schema_version,jsonb_set(snapshot,'{presentation,label}',to_jsonb('different'::text)),decode(md5($2::text),'hex'),published_by_admin_id FROM lexicon.entry_publications WHERE id=(SELECT current_publication_id FROM lexicon.entries WHERE id=$1)")
+        .bind(first).bind(next).execute(&mut *writer).await.unwrap();
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=$2 WHERE id=$1")
+        .bind(first)
+        .bind(next)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    writer.commit().await.unwrap();
+    let result = matching.await.unwrap();
+    assert_eq!(result.0, StatusCode::OK, "{}", result.1);
+    assert_eq!(result.1["items"], json!([]));
+}
+
+#[sqlx::test]
 async fn excel_import_matches_are_exact_bounded_authorized_and_save_in_order(pool: PgPool) {
     let (state, user) = setup_bound(&pool).await;
     let apple = entry(&pool, "apple").await;

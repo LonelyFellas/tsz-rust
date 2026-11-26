@@ -11,7 +11,13 @@ CROSS JOIN LATERAL (
       AND e.archived_at IS NULL AND p.content_schema_version=3
       AND s.normalized_surface=q.surface
     GROUP BY s.entry_id, s.publication_id
-    ORDER BY s.entry_id
+    UNION ALL
+    SELECT p.entry_id,p.id AS publication_id
+    FROM learning_source.next_surfaces n
+    JOIN learning_source.reviewed_publications p ON p.id=n.publication_id
+    JOIN learning_source.next_entries e ON e.id=p.entry_id AND e.current_publication_id=p.id
+    WHERE n.surface=q.surface
+    ORDER BY entry_id
     LIMIT 3
 ) matched
 ORDER BY q.row_number, matched.entry_id

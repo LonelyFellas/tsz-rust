@@ -390,6 +390,7 @@ async fn english_levels_do_not_displace_eligible_chinese_definitions(pool: PgPoo
         archive_generation: 1,
         publication_id: publication,
         content: tsz_rust::lexicon::published::PublishedContentV3 {
+            excluded_form_ids: Default::default(),
             forms: word.forms,
             meanings: word.meanings,
         },

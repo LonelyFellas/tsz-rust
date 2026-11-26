@@ -54,6 +54,7 @@ pub fn capabilities() -> NextCapabilities {
         dictionary_refresh: None,
         publishing: true,
         form_editor: None,
+        form_question_eligibility: None,
         sense_groups: None,
     }
 }

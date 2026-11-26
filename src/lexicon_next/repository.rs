@@ -164,6 +164,7 @@ pub async fn create(
         forms: vec![],
         senses: vec![],
         form_editor: None,
+        form_question_eligibility: Default::default(),
     };
     snapshot(&mut tx, id, 1, auth.subject, &draft, &[]).await?;
     let result = sqlx::query_as::<_, EntryRow>(SELECT_ENTRY)
@@ -281,6 +282,7 @@ pub async fn save(
         .await
         .map_err(AppError::internal)?
         .entry()?;
+    super::forms::prepare_question_eligibility(conn, draft, &previous.draft).await?;
     if !capabilities.grammar_form_links {
         super::grammar::preserve_form_links(draft, &previous.draft);
     }

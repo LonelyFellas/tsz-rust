@@ -1,6 +1,6 @@
 -- No GROUP BY/top-N sort over the full match set. The caller deduplicates the
 -- small result and repeats with selected entry IDs excluded (at most 3 rounds).
-SELECT s.entry_id
+SELECT s.entry_id,s.publication_id
 FROM lexicon.surface_sources s
 JOIN LATERAL (
     SELECT e.id FROM lexicon.entries e
