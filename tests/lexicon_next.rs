@@ -942,13 +942,29 @@ async fn candidate_lookup_and_dictionary_reference_check_edit_access_and_revisio
     let owner = admin(&pool, EDIT).await;
     let outsider = admin(&pool, EDIT).await;
     let read_only = admin(&pool, &["words.access"]).await;
+    let coworker = admin(&pool, &["words.access", "words.edit", "words.edit_others"]).await;
+    let sentence_editor = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.edit",
+            "words.edit_others",
+            "sentences.access",
+        ],
+    )
+    .await;
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream = axum::Router::new()
         .route(
             "/v2/lexicon/candidates",
             axum::routing::post({
                 let captured = captured.clone();
-                move |axum::Json(body): axum::Json<Value>| {
+                move |headers: axum::http::HeaderMap, axum::Json(mut body): axum::Json<Value>| {
+                    body["shared"] = json!(
+                        headers
+                            .get("x-tsz-next-shared-candidates")
+                            .is_some_and(|value| value == "v1")
+                    );
                     captured.lock().unwrap().push(body);
                     // A previous Agent version has generation but no candidate endpoint.
                     async { StatusCode::NOT_FOUND }
@@ -1010,7 +1026,7 @@ async fn candidate_lookup_and_dictionary_reference_check_edit_access_and_revisio
     assert!(captured.lock().unwrap().is_empty());
 
     assert_eq!(
-        call(&state, Some(owner), "POST", &path, input).await,
+        call(&state, Some(owner), "POST", &path, input.clone()).await,
         (StatusCode::OK, json!({"candidate": null}))
     );
     {
@@ -1018,6 +1034,52 @@ async fn candidate_lookup_and_dictionary_reference_check_edit_access_and_revisio
         assert_eq!(forwarded.len(), 1);
         assert_eq!(forwarded[0]["scope"]["actor_id"], json!(owner));
         assert_eq!(forwarded[0]["scope"]["entry_id"], id);
+        assert_eq!(forwarded[0]["shared"], false);
+    }
+    let shared_lookup = |actor, body: Value| {
+        let request = Request::post(format!("{ROOT}{path}"))
+            .header("content-type", "application/json")
+            .header("x-tsz-next-section-candidates", "v1")
+            .header(
+                "authorization",
+                format!(
+                    "Bearer {}",
+                    state.admin_token_manager.generate(actor, "admin").unwrap()
+                ),
+            )
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        async {
+            tsz_rust::router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(
+        shared_lookup(outsider, input.clone()).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(shared_lookup(coworker, input.clone()).await, StatusCode::OK);
+    let mut translation = input;
+    translation["sections"] = json!(["translations"]);
+    translation["examples"] = json!(["The centre is open."]);
+    assert_eq!(
+        shared_lookup(coworker, translation.clone()).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        shared_lookup(sentence_editor, translation).await,
+        StatusCode::OK
+    );
+    {
+        let forwarded = captured.lock().unwrap();
+        assert_eq!(forwarded.len(), 3);
+        assert_eq!(forwarded[1]["scope"]["actor_id"], json!(coworker));
+        assert_eq!(forwarded[1]["shared"], true);
+        assert_eq!(forwarded[2]["scope"]["actor_id"], json!(sentence_editor));
+        assert_eq!(forwarded[2]["shared"], true);
     }
     let reference_path = format!("/entries/{id}/generation/dictionary-reference");
     let reference = json!({
@@ -1049,7 +1111,7 @@ async fn candidate_lookup_and_dictionary_reference_check_edit_access_and_revisio
         .0,
         StatusCode::CONFLICT
     );
-    assert_eq!(captured.lock().unwrap().len(), 1);
+    assert_eq!(captured.lock().unwrap().len(), 3);
     for _ in 0..12 {
         let (status, output) = call(
             &state,
@@ -1064,9 +1126,9 @@ async fn candidate_lookup_and_dictionary_reference_check_edit_access_and_revisio
     }
     let (status, _) = call(&state, Some(owner), "POST", &reference_path, reference).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(captured.lock().unwrap().len(), 13);
+    assert_eq!(captured.lock().unwrap().len(), 15);
     assert_eq!(
-        captured.lock().unwrap()[1],
+        captured.lock().unwrap()[3],
         json!({ "headword": "centre", "source": "Cambridge Dictionary" })
     );
     server.abort();

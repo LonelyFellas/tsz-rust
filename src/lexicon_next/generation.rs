@@ -267,9 +267,18 @@ async fn editable(
     auth: &AdminAuth,
     id: Uuid,
     revision: i64,
+    sections: &[NextAgentSection],
 ) -> Result<(String, String), AppError> {
     let access = permissions::reload(state, auth).await?;
     access.require("words.access")?;
+    if sections.iter().any(|section| {
+        matches!(
+            section,
+            NextAgentSection::Examples | NextAgentSection::Translations
+        )
+    }) {
+        access.require("sentences.access")?;
+    }
     let (owner,status,current,kind,medium):(Uuid,String,i64,String,String)=sqlx::query_as("SELECT owner_id,status,revision,kind,medium_locale FROM lexicon_next.entries WHERE id=$1")
         .bind(id).fetch_optional(&state.pool).await.map_err(AppError::internal)?.ok_or_else(||AppError::not_found("entry not found"))?;
     access.require_owned_action("words.edit", owner)?;
@@ -366,6 +375,7 @@ fn reusable_section(sections: &[NextAgentSection], extended: bool) -> Option<Nex
 }
 
 const SECTION_CANDIDATES_HEADER: &str = "x-tsz-next-section-candidates";
+const SHARED_CANDIDATES_HEADER: &str = "x-tsz-next-shared-candidates";
 
 pub(super) fn supports_section_candidates(headers: &HeaderMap) -> bool {
     headers
@@ -499,7 +509,7 @@ async fn send(
     operation: &str,
     body: &str,
     timeout: Duration,
-    section_candidates: bool,
+    shared_candidates: bool,
 ) -> Result<Response, AppError> {
     let request = config
         .client
@@ -508,8 +518,10 @@ async fn send(
         .header("Content-Type", "application/json")
         .body(body.to_owned())
         .timeout(timeout);
-    let request = if section_candidates {
-        request.header(SECTION_CANDIDATES_HEADER, "v1")
+    let request = if shared_candidates {
+        request
+            .header(SECTION_CANDIDATES_HEADER, "v1")
+            .header(SHARED_CANDIDATES_HEADER, "v1")
     } else {
         request
     };
@@ -557,23 +569,21 @@ pub async fn advance(
     headers: HeaderMap,
     ApiJson(input): ApiJson<NextAgentInput>,
 ) -> Result<Json<NextAgentResult>, AppError> {
-    let entry = editable(&state, &auth, id, input.base_revision).await?;
+    let entry = editable(&state, &auth, id, input.base_revision, &input.sections).await?;
     let (config, body, grammar_sub_pos) =
         prepare(&state, &auth, id, &input, entry, &headers).await?;
-    let section_candidates =
-        reusable_section(&input.sections, supports_section_candidates(&headers)).is_some_and(
-            |section| !matches!(section, NextAgentSection::Forms | NextAgentSection::Grammar),
-        );
+    let shared_candidates =
+        supports_section_candidates(&headers) && reusable_section(&input.sections, true).is_some();
     let timeout = Duration::from_secs(50);
     let response = if input.force_refresh {
-        let refresh = send(config, "refresh", &body, timeout, section_candidates).await?;
+        let refresh = send(config, "refresh", &body, timeout, shared_candidates).await?;
         if endpoint_missing(&refresh) {
-            send(config, "advance", &body, timeout, section_candidates).await?
+            send(config, "advance", &body, timeout, shared_candidates).await?
         } else {
             refresh
         }
     } else {
-        send(config, "advance", &body, timeout, section_candidates).await?
+        send(config, "advance", &body, timeout, shared_candidates).await?
     };
     if response.status() == StatusCode::CONFLICT {
         return Err(AppError::conflict(
@@ -591,7 +601,7 @@ pub async fn advance(
     let mut output = decode(response).await?;
     validate_binding(&output, &input)?;
     retain_grammar_sub_pos(&mut output.proposals.grammar, &grammar_sub_pos);
-    editable(&state, &auth, id, input.base_revision).await?;
+    editable(&state, &auth, id, input.base_revision, &input.sections).await?;
     Ok(Json(output))
 }
 
@@ -638,7 +648,7 @@ pub async fn dictionary_reference(
 ) -> Result<Json<NextAgentSource>, AppError> {
     language::text(&input.headword, 200)?;
     let headword = input.headword.trim();
-    editable(&state, &auth, id, input.base_revision).await?;
+    editable(&state, &auth, id, input.base_revision, &[]).await?;
     let config = state.vocabulary_agent.as_deref().ok_or_else(unavailable)?;
     reserve_dictionary_refresh(&state, auth.subject).await?;
     let source = json!(input.source);
@@ -659,7 +669,7 @@ pub async fn dictionary_reference(
     {
         return Err(unavailable());
     }
-    editable(&state, &auth, id, input.base_revision).await?;
+    editable(&state, &auth, id, input.base_revision, &[]).await?;
     Ok(Json(output))
 }
 
@@ -672,20 +682,19 @@ pub async fn candidates(
     headers: HeaderMap,
     ApiJson(input): ApiJson<NextAgentInput>,
 ) -> Result<Json<NextGenerationCandidates>, AppError> {
-    let entry = editable(&state, &auth, id, input.base_revision).await?;
-    let section = reusable_section(&input.sections, supports_section_candidates(&headers))
+    let entry = editable(&state, &auth, id, input.base_revision, &input.sections).await?;
+    let shared_candidates = supports_section_candidates(&headers);
+    reusable_section(&input.sections, shared_candidates)
         .filter(|_| !input.force_refresh)
         .ok_or_else(language::invalid)?;
     let (config, body, grammar_sub_pos) =
         prepare(&state, &auth, id, &input, entry, &headers).await?;
-    let section_candidates =
-        !matches!(section, NextAgentSection::Forms | NextAgentSection::Grammar);
     let response = send(
         config,
         "candidates",
         &body,
         Duration::from_secs(8),
-        section_candidates,
+        shared_candidates,
     )
     .await?;
     let mut output: NextGenerationCandidates = if endpoint_missing(&response) {
@@ -721,7 +730,7 @@ pub async fn candidates(
         }
         retain_grammar_sub_pos(&mut result.proposals.grammar, &grammar_sub_pos);
     }
-    editable(&state, &auth, id, input.base_revision).await?;
+    editable(&state, &auth, id, input.base_revision, &input.sections).await?;
     Ok(Json(output))
 }
 
