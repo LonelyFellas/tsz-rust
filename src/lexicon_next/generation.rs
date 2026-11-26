@@ -59,7 +59,10 @@ pub struct NextAgentInput {
     pub existing_pos: Vec<String>,
     pub examples: Vec<String>,
     pub senses: Vec<NextAgentSenseContext>,
-    /// Bypass reuse for an independent forms, grammar or sense-group generation.
+    /// Bypass cached candidates when generating forms or grammar independently.
+    /// With the x-tsz-next-section-candidates: v1 header, also supports a single groups,
+    /// senses, definitions, equivalents, relations, examples or translations section,
+    /// or the ordered pair [senses, dialect].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force_refresh: bool,
 }
