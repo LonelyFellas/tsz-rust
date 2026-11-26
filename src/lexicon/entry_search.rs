@@ -78,24 +78,24 @@ pub(crate) async fn exact_batch(
     }
     Ok(rows)
 }
-fn exclusions(ids: &[Uuid], exclude: Option<Uuid>) -> Vec<Uuid> {
-    ids.iter().copied().chain(exclude).collect()
+fn exclusions(hits: &[(Uuid, Uuid)], exclude: Option<Uuid>) -> Vec<Uuid> {
+    hits.iter().map(|(id, _)| *id).chain(exclude).collect()
 }
 async fn append(
     tx: &mut Tx<'_>,
     sql: &'static str,
     query: &str,
-    ids: &mut Vec<Uuid>,
+    hits: &mut Vec<(Uuid, Uuid)>,
     exclude: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let found: Vec<Uuid> = sqlx::query_scalar(sql)
+    let found: Vec<(Uuid, Uuid)> = sqlx::query_as(sql)
         .bind(query)
-        .bind(exclusions(ids, exclude))
-        .bind((LIMIT - ids.len()) as i64)
+        .bind(exclusions(hits, exclude))
+        .bind((LIMIT - hits.len()) as i64)
         .fetch_all(&mut **tx)
         .await
         .map_err(AppError::internal)?;
-    ids.extend(found);
+    hits.extend(found);
     Ok(())
 }
 pub(crate) async fn search(
@@ -135,16 +135,16 @@ async fn search_sources(
     }
     let normalized = normalize_headword(q)
         .map_err(|_| AppError::bad_request(ErrorCode::InvalidQuery, "请输入 1–200 字的词条名称"))?;
-    let mut ids = Vec::with_capacity(LIMIT);
-    append(tx, exact, &normalized.key, &mut ids, exclude).await?;
+    let mut hits = Vec::with_capacity(LIMIT);
+    append(tx, exact, &normalized.key, &mut hits, exclude).await?;
     // Short words remain searchable, without broad prefix/fuzzy scans for a/an.
-    if normalized.key.chars().count() >= 3 && ids.len() < LIMIT {
+    if normalized.key.chars().count() >= 3 && hits.len() < LIMIT {
         if let Some(end) = prefix_end(&normalized.key) {
-            while ids.len() < LIMIT {
-                let found: Vec<Uuid> = sqlx::query_scalar(prefix)
+            while hits.len() < LIMIT {
+                let found: Vec<(Uuid, Uuid)> = sqlx::query_as(prefix)
                     .bind(&normalized.key)
-                    .bind(exclusions(&ids, exclude))
-                    .bind((LIMIT - ids.len()) as i64)
+                    .bind(exclusions(&hits, exclude))
+                    .bind((LIMIT - hits.len()) as i64)
                     .bind(&end)
                     .fetch_all(&mut **tx)
                     .await
@@ -152,44 +152,48 @@ async fn search_sources(
                 if found.is_empty() {
                     break;
                 }
-                for id in found {
-                    if !ids.contains(&id) {
-                        ids.push(id);
+                for hit in found {
+                    if !hits.iter().any(|(id, _)| *id == hit.0) {
+                        hits.push(hit);
                     }
                 }
             }
         }
-        if ids.len() < LIMIT && NormalizedHeadword::parse(q).is_ok() {
+        if hits.len() < LIMIT && NormalizedHeadword::parse(q).is_ok() {
             sqlx::query("SELECT set_config('pg_trgm.similarity_threshold','0.3',true)")
                 .execute(&mut **tx)
                 .await
                 .map_err(AppError::internal)?;
             if normalized.key.contains(' ') && normalized.key.chars().count() >= 8 {
-                while ids.len() < LIMIT {
-                    let before = ids.len();
-                    append(tx, fuzzy_phrase, &normalized.display, &mut ids, exclude).await?;
-                    if ids.len() == before {
+                while hits.len() < LIMIT {
+                    let before = hits.len();
+                    append(tx, fuzzy_phrase, &normalized.display, &mut hits, exclude).await?;
+                    if hits.len() == before {
                         break;
                     }
                 }
             } else {
-                append(tx, fuzzy_word, &normalized.display, &mut ids, exclude).await?;
+                append(tx, fuzzy_word, &normalized.display, &mut hits, exclude).await?;
             }
         }
     }
     // Serialize with archive/publication writers only for the selected entries.
     // Save still checks availability/revision; autocomplete cannot reserve a word.
+    let ids = exclusions(&hits, None);
     if wordlist {
         published::lock_learning_entries(tx, &ids).await?;
     } else {
         published::lock_entries_in(tx, &ids).await?;
     }
-    let items = sqlx::query_as(SUMMARY)
+    let items: Vec<EntrySuggestionSummary> = sqlx::query_as(SUMMARY)
         .bind(ids)
         .fetch_all(&mut **tx)
         .await
         .map_err(AppError::internal)?;
-    Ok(items)
+    Ok(items
+        .into_iter()
+        .filter(|r| hits.contains(&(r.entry_id, r.publication_id)))
+        .collect())
 }
 
 // The exclusive C-collation bound works for Unicode and treats %/_ literally.
