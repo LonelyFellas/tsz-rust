@@ -146,6 +146,24 @@ pub(crate) fn is_liaison_anchor_len_default(value: &usize) -> bool {
     *value == liaison_anchor_len_default()
 }
 
+pub(crate) fn liaison_adjustment_is_zero(value: &i8) -> bool {
+    *value == 0
+}
+
+pub(crate) fn deserialize_liaison_offset<'de, D>(deserializer: D) -> Result<i8, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = i8::deserialize(deserializer)?;
+    if (-100..=100).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "liaison offset must be between -100 and 100",
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RichTextAnnotation {
@@ -187,6 +205,22 @@ pub enum RichTextAnnotation {
         )]
         #[schema(default = 1, minimum = 1)]
         end_len: usize,
+        /// 左半弧在可调高度内的偏移百分比，正值向上。
+        #[serde(
+            default,
+            deserialize_with = "deserialize_liaison_offset",
+            skip_serializing_if = "liaison_adjustment_is_zero"
+        )]
+        #[schema(default = 0, minimum = -100, maximum = 100)]
+        left_offset_pct: i8,
+        /// 右半弧在可调高度内的偏移百分比，正值向上。
+        #[serde(
+            default,
+            deserialize_with = "deserialize_liaison_offset",
+            skip_serializing_if = "liaison_adjustment_is_zero"
+        )]
+        #[schema(default = 0, minimum = -100, maximum = 100)]
+        right_offset_pct: i8,
     },
     Highlight {
         start: usize,
@@ -209,6 +243,30 @@ pub enum RichTextAnnotation {
         start: usize,
         end: usize,
     },
+}
+
+impl RichTextAnnotation {
+    /// 排序与语音身份跟随锚点，不受显示偏移影响。
+    pub(crate) fn liaison_without_adjustments(&self) -> Option<Self> {
+        match *self {
+            Self::Liaison {
+                start,
+                end,
+                start_len,
+                end_len,
+                left_offset_pct,
+                right_offset_pct,
+            } if left_offset_pct != 0 || right_offset_pct != 0 => Some(Self::Liaison {
+                start,
+                end,
+                start_len,
+                end_len,
+                left_offset_pct: 0,
+                right_offset_pct: 0,
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -236,6 +294,16 @@ pub struct RichTextV2 {
     pub version: u8,
     pub text: String,
     pub annotations: Vec<RichTextAnnotation>,
+}
+
+impl RichTextV2 {
+    pub(crate) fn strip_liaison_adjustments(&mut self) {
+        for annotation in &mut self.annotations {
+            if let Some(automatic) = annotation.liaison_without_adjustments() {
+                *annotation = automatic;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

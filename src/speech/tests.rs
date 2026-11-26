@@ -100,6 +100,40 @@ fn final_effect_hash_ignores_teaching_marks_and_tracks_provider_version_and_soun
 }
 
 #[test]
+fn liaison_adjustments_preserve_ssml_and_preview_cache() {
+    let with_offsets = |left_offset_pct, right_offset_pct| {
+        let mut content = plain("pick it up");
+        content.annotations.push(RichTextAnnotation::Liaison {
+            start: 3,
+            end: 6,
+            start_len: 1,
+            end_len: 1,
+            left_offset_pct,
+            right_offset_pct,
+        });
+        // A distinct arc with the same outer range must not reorder when the
+        // first arc receives a display-only offset.
+        content.annotations.push(RichTextAnnotation::Liaison {
+            start: 3,
+            end: 6,
+            start_len: 2,
+            end_len: 1,
+            left_offset_pct: 0,
+            right_offset_pct: 0,
+        });
+        request(content)
+    };
+    let baseline = with_offsets(0, 0);
+    let adjusted = with_offsets(-25, 30);
+    assert_eq!(
+        build_ssml(&baseline).unwrap(),
+        build_ssml(&adjusted).unwrap()
+    );
+    assert_eq!(baseline.fingerprint(), adjusted.fingerprint());
+    assert_eq!(baseline.normalized_content(), adjusted.normalized_content());
+}
+
+#[test]
 fn special_reading_ssml_escapes_alias_and_rejects_overlap_or_unknown_types() {
     let content = |annotations| RichTextV2 {
         version: 2,

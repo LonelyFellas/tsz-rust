@@ -3,6 +3,21 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[test]
+fn liaison_adjustments_preserve_legacy_generated_audio_sources() {
+    let content =
+        json!({"version":2,"text":"pick it","annotations":[{"type":"liaison","start":3,"end":6}]});
+    let source = |content| -> GeneratedSpeechSource {
+        serde_json::from_value(json!({"kind":"text","content":content,"grammar":true})).unwrap()
+    };
+    let mut adjusted = content.clone();
+    adjusted["annotations"][0]["right_offset_pct"] = json!(20);
+    assert_eq!(
+        source(content).canonical().unwrap(),
+        source(adjusted).canonical().unwrap()
+    );
+}
+
+#[test]
 fn spelling_references_use_the_voice_accent_and_respect_explicit_empty_pauses() {
     let rich = |duration_ms| {
         json!({

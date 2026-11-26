@@ -441,9 +441,10 @@ impl SynthesisRequest {
         }
         let mut rich_text = RichText::V2(content);
         rich_text::canonicalize(&mut rich_text).map_err(|_| SpeechModelError::InvalidRichText)?;
-        let RichText::V2(content) = rich_text else {
+        let RichText::V2(mut content) = rich_text else {
             unreachable!("the input variant is V2")
         };
+        content.strip_liaison_adjustments();
         let normalized_content = serde_json::to_vec(&content)
             .expect("RichTextV2 serialization cannot fail for an in-memory value");
         Ok(Self {
