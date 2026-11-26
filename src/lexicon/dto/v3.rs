@@ -933,12 +933,20 @@ pub enum RichTextAnnotationV3 {
         )]
         #[schema(default = 1, minimum = 1)]
         end_len: usize,
-        /// 弧顶左半弧在可调高度内的偏移百分比，正值向上。
-        #[serde(default, skip_serializing_if = "liaison_adjustment_is_zero")]
+        /// 左半弧在可调高度内的偏移百分比，正值向上。
+        #[serde(
+            default,
+            deserialize_with = "deserialize_liaison_offset",
+            skip_serializing_if = "liaison_adjustment_is_zero"
+        )]
         #[schema(default = 0, minimum = -100, maximum = 100)]
         left_offset_pct: i8,
         /// 右半弧在可调高度内的偏移百分比，正值向上。
-        #[serde(default, skip_serializing_if = "liaison_adjustment_is_zero")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_liaison_offset",
+            skip_serializing_if = "liaison_adjustment_is_zero"
+        )]
         #[schema(default = 0, minimum = -100, maximum = 100)]
         right_offset_pct: i8,
     },

@@ -417,6 +417,22 @@ fn liaisons_stay_apart_and_only_exact_duplicates_collapse() {
 }
 
 #[test]
+fn liaison_adjustments_do_not_override_the_first_arc_with_the_same_anchors() {
+    let first = serde_json::json!({"type":"liaison","start":2,"end":6});
+    let mut duplicate = first.clone();
+    duplicate["left_offset_pct"] = serde_json::json!(10);
+    let mut value: RichText = serde_json::from_value(serde_json::json!({
+        "version":2,"text":"abcdef","annotations":[first,duplicate]
+    }))
+    .unwrap();
+    canonicalize(&mut value).unwrap();
+    assert_eq!(
+        serde_json::to_value(value).unwrap()["annotations"],
+        serde_json::json!([first])
+    );
+}
+
+#[test]
 fn adjacent_emphases_of_different_levels_stay_apart() {
     let mut value = RichText::V2(RichTextV2 {
         version: 2,

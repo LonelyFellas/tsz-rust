@@ -396,9 +396,10 @@ impl GeneratedSpeechSource {
 fn normalize_content(content: RichTextV2) -> Result<RichTextV2, crate::error::AppError> {
     let mut rich = crate::lexicon::dto::RichText::V2(content);
     crate::lexicon::rich_text::canonicalize(&mut rich).map_err(|_| invalid())?;
-    let crate::lexicon::dto::RichText::V2(content) = rich else {
+    let crate::lexicon::dto::RichText::V2(mut content) = rich else {
         unreachable!()
     };
+    content.strip_liaison_adjustments();
     Ok(content)
 }
 

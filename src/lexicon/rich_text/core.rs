@@ -582,7 +582,9 @@ fn annotation_type_rank(annotation: &RichTextAnnotation) -> u8 {
 }
 
 fn annotation_json(annotation: &RichTextAnnotation) -> String {
-    serde_json::to_string(annotation).expect("RichText annotation serialization is infallible")
+    let automatic = annotation.liaison_without_adjustments();
+    serde_json::to_string(automatic.as_ref().unwrap_or(annotation))
+        .expect("RichText annotation serialization is infallible")
 }
 
 pub(super) fn range_bounds(annotation: &RichTextAnnotation) -> Option<(usize, usize)> {

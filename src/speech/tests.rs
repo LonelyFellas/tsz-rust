@@ -111,6 +111,16 @@ fn liaison_adjustments_preserve_ssml_and_preview_cache() {
             left_offset_pct,
             right_offset_pct,
         });
+        // A distinct arc with the same outer range must not reorder when the
+        // first arc receives a display-only offset.
+        content.annotations.push(RichTextAnnotation::Liaison {
+            start: 3,
+            end: 6,
+            start_len: 2,
+            end_len: 1,
+            left_offset_pct: 0,
+            right_offset_pct: 0,
+        });
         request(content)
     };
     let baseline = with_offsets(0, 0);
