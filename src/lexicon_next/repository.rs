@@ -357,7 +357,7 @@ pub async fn save(
     super::sentence_drafts::save_changes(&mut tx, auth, &previous, draft, input.sentence_changes)
         .await?;
     let conn = &mut *tx;
-    super::forms::persist(conn, id, draft).await?;
+    super::forms::persist(conn, id, draft, &previous.draft).await?;
     super::grammar::persist(conn, id, draft).await?;
     super::audio::persist(conn, auth.subject, id, draft).await?;
     super::definitions::validate_bindings(conn, draft).await?;
