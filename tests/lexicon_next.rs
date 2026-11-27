@@ -2684,7 +2684,6 @@ async fn workspace_names_follow_saved_pos_and_form_group_order(pool: PgPool) {
         .unwrap()
         .push(verb["pos"][0].take());
 
-    let empty = workspace_list_with_names(&state, actor, "").await;
     let mut names = Vec::new();
     for revision in 1..=3 {
         draft["form_editor"] = editor.clone();
@@ -2717,8 +2716,45 @@ async fn workspace_names_follow_saved_pos_and_form_group_order(pool: PgPool) {
         ["Panama", "panama", "panamize"]
             .map(|spelling| json!([{"text": spelling, "dialects": ["uk", "us"]}]))
     );
-    assert_eq!(empty["items"][0]["id"], entry["id"]);
-    assert_eq!(empty["items"][0]["name_variants"], json!([]));
+}
+
+#[sqlx::test]
+async fn workspace_names_use_creation_headword_without_pos(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool);
+    let (status, entry) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entries",
+        json!({"target_language":"en", "kind":"phrase", "headword":"take it easy"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{entry}");
+    let expected_name = json!([{"text":"take it easy","dialects":[]}]);
+    let list = workspace_list_with_names(&state, actor, "").await;
+    assert_eq!(list["items"][0]["id"], entry["id"]);
+    assert_eq!(list["items"][0]["name_variants"], expected_name);
+
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut draft = entry["draft"].clone();
+    draft["headword"] = json!("edited draft headword");
+    draft["form_editor"] = json!({"forms_format":"shared_v1","pos":[],"contents":[]});
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let list = workspace_list_with_names(&state, actor, "").await;
+    let row = &list["items"][0];
+    assert_eq!(row["id"], entry["id"]);
+    assert_eq!(row["headword"], "edited draft headword");
+    assert_eq!(row["name_variants"], expected_name);
 }
 
 #[sqlx::test]
