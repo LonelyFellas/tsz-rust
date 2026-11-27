@@ -107,7 +107,7 @@ pub async fn candidates(
                             definition_id: *definition_id,
                             form_id: form.id,
                         };
-                        let other_definitions = content
+                        let mut other_definitions = content
                             .meanings
                             .pos
                             .iter()
@@ -124,6 +124,12 @@ pub async fn candidates(
                             .filter(|s| !s.is_empty())
                             .chain(publication.known_equivalents().map(str::to_owned))
                             .collect::<Vec<_>>();
+                        // Preserve fingerprints of existing candidates. Only compact a
+                        // reviewed publication's exclusion list if it would be rejected.
+                        if publication.is_next && other_definitions.len() > 100 {
+                            let mut keys = std::collections::HashSet::from([key_v1(text.text())]);
+                            other_definitions.retain(|text| keys.insert(key_v1(text)));
+                        }
                         if other_definitions.len() > 100 {
                             continue;
                         }

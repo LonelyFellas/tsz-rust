@@ -1858,6 +1858,79 @@ async fn shared_forms_slot_retirement_restore_and_reassignment_are_persistent(po
 }
 
 #[sqlx::test]
+async fn shared_forms_keep_same_phonetics_with_different_voices(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = fixture_state(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let initial = create_v3_forms_fixture(&state, &pool, &bearer, false, false).await;
+    let id = initial["word"]["id"].as_str().unwrap();
+    let entry_path = format!("{ROOT}/entries/{id}");
+    let (status, read) = shared_call(&state, &bearer, Method::GET, &entry_path, None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    let mut forms = read["word"]["forms"].clone();
+    let path = "/contents/0/regional_variants/uk/pronunciations";
+    let rows = forms.pointer_mut(path).unwrap().as_array_mut().unwrap();
+    rows[0]["voice_profile"] =
+        json!({"voices": [{"voice_id": "sonia", "enabled": true, "rate_percent": 0}]});
+    let mut second = rows[0].clone();
+    let second_slot = Uuid::now_v7();
+    second["id"] = json!(second_slot);
+    second["voice_profile"]["voices"][0]["voice_id"] = json!("ryan");
+    rows.push(second);
+    let expected_ids = [rows[0]["id"].clone(), rows[1]["id"].clone()];
+    let binding_path = "/pos/0/forms/0/regional_bindings/uk/pronunciations";
+    let second_binding = json!({"id": Uuid::now_v7(), "content_slot_id": second_slot});
+    forms
+        .pointer_mut(binding_path)
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .push(second_binding.clone());
+
+    let saved = save_shared(
+        &state,
+        &bearer,
+        id,
+        read["word"]["revision"].as_i64().unwrap(),
+        forms,
+    )
+    .await;
+    let (status, completed) = shared_call(
+        &state,
+        &bearer,
+        Method::PUT,
+        &format!("{entry_path}/steps/forms"),
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": saved["word"]["revision"],
+            "intent": "complete",
+            "content": saved["word"]["forms"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    let (status, fresh) = shared_call(&state, &bearer, Method::GET, &entry_path, None).await;
+    assert_eq!(status, StatusCode::OK, "{fresh}");
+    let rows = fresh["word"]["forms"]
+        .pointer(path)
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!([rows[0]["id"].clone(), rows[1]["id"].clone()], expected_ids);
+    assert_eq!(rows[0]["dict_phonetic"], rows[1]["dict_phonetic"]);
+    assert_eq!(rows[0]["actual_pron"], rows[1]["actual_pron"]);
+    assert_eq!(rows[0]["style"], rows[1]["style"]);
+    assert_eq!(rows[0]["voice_profile"]["voices"][0]["voice_id"], "sonia");
+    assert_eq!(rows[1]["voice_profile"]["voices"][0]["voice_id"], "ryan");
+    assert_eq!(
+        fresh["word"]["forms"].pointer(binding_path).unwrap()[1],
+        second_binding
+    );
+}
+
+#[sqlx::test]
 async fn shared_forms_pronunciation_correspondence_persists_and_cannot_be_reassigned(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = fixture_state(pool.clone(), redis)

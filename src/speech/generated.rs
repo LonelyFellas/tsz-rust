@@ -456,6 +456,7 @@ impl GeneratedAudioService {
                 &input.setting,
                 None,
                 None,
+                false,
             )
             .await?;
         }
@@ -874,6 +875,27 @@ pub(crate) async fn validate_bindings_with_forms(
     current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
     batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
 ) -> Result<(), AppError> {
+    validate_bindings_inner(conn, value, current, batch, None).await
+}
+
+pub(crate) async fn validate_draft_form_bindings(
+    conn: &mut sqlx::PgConnection,
+    entry: Uuid,
+    forms: &crate::lexicon::dto::DraftFormsStepContentV3,
+    previous: Option<&crate::lexicon::dto::DraftFormsStepContentV3>,
+) -> Result<(), AppError> {
+    let value = serde_json::json!({"pos": forms.pos});
+    let previous = previous.map(|forms| serde_json::json!({"pos": forms.pos}));
+    validate_bindings_inner(conn, &value, Some((entry, forms)), None, previous.as_ref()).await
+}
+
+async fn validate_bindings_inner(
+    conn: &mut sqlx::PgConnection,
+    value: &Value,
+    current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
+    batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
+    previous_draft_forms: Option<&Value>,
+) -> Result<(), AppError> {
     fn profiles(
         value: &Value,
         out: &mut Vec<crate::lexicon::dto::VoiceProfileV3>,
@@ -1103,6 +1125,15 @@ pub(crate) async fn validate_bindings_with_forms(
             && is_active(&reference)
             && let Some(profile) = &reference.profile
         {
+            // Exact variant equality includes its stable ID, selected sources,
+            // spelling, voice settings and the existing asset binding.
+            let retained_spelling = previous_draft_forms.is_some_and(|previous| {
+                reference
+                    .path
+                    .strip_suffix("/spelling_speech")
+                    .and_then(|path| previous.pointer(path).zip(value.pointer(path)))
+                    .is_some_and(|(before, after)| before == after)
+            });
             super::dubbing::validate_setting(
                 conn,
                 profile,
@@ -1110,6 +1141,7 @@ pub(crate) async fn validate_bindings_with_forms(
                 &reference.setting,
                 current,
                 batch,
+                retained_spelling,
             )
             .await?;
         }

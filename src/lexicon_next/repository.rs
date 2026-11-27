@@ -371,7 +371,7 @@ pub async fn save(
     )
     .await?;
     let conn = &mut *tx;
-    super::forms::persist(conn, id, draft).await?;
+    super::forms::persist(conn, id, draft, &previous.draft).await?;
     super::grammar::persist(conn, id, draft).await?;
     super::audio::persist(conn, auth.subject, id, draft).await?;
     super::definitions::validate_bindings(conn, draft).await?;
