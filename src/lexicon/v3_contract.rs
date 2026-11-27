@@ -1268,7 +1268,6 @@ fn validate_variant(
             variant_location,
         ));
     }
-    let mut complete_triples = HashSet::new();
     for pronunciation in pronunciations {
         let pronunciation_location = location_for(
             pronunciation.id,
@@ -1608,24 +1607,8 @@ fn validate_variant(
                 },
                 pronunciation.id,
                 "a complete pronunciation requires all fields",
-                pronunciation_location.clone(),
+                pronunciation_location,
             ));
-        }
-        if complete_row {
-            let triple = (
-                normalize_pronunciation_text(&pronunciation.dict_phonetic),
-                normalize_pronunciation_text(&pronunciation.actual_pron),
-                pronunciation.style.expect("complete rows have style"),
-            );
-            if !complete_triples.insert(triple) {
-                issues.push(issue(
-                    V3ValidationIssueCode::DuplicatePronunciation,
-                    "pronunciations",
-                    pronunciation.id,
-                    "complete normalized pronunciation triples must be unique per variant",
-                    pronunciation_location,
-                ));
-            }
         }
     }
 }
@@ -3029,42 +3012,24 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_complete_pronunciation_is_normalized_but_incomplete_draft_rows_are_ignored() {
-        let mut duplicate = valid_request();
-        duplicate["content"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"] = json!([{
-            "id": "019d2a80-0000-7000-8000-000000000004",
-            "dict_phonetic": " /KALA/ ",
-            "actual_pron": "ＫＡＬＡ",
-            "style": "normal"
-        }, {
-            "id": "019d2a80-0000-7000-8000-000000000009",
-            "dict_phonetic": "/kala/",
-            "actual_pron": "kala",
-            "style": "normal"
-        }]);
-        let duplicate = decode_valid(duplicate);
-        assert!(has_code(
-            &validate_forms(&duplicate.content, duplicate.intent),
-            V3ValidationIssueCode::DuplicatePronunciation
-        ));
+    fn identical_pronunciation_content_can_use_distinct_node_ids() {
+        let mut request = valid_request();
+        let path = "/content/pos/0/forms/0/regional_variants/common/pronunciations";
+        let rows = request.pointer_mut(path).unwrap().as_array_mut().unwrap();
+        let mut second = rows[0].clone();
+        second["id"] = json!("019d2a80-0000-7000-8000-000000000009");
+        rows.push(second);
 
-        let mut incomplete = valid_request();
-        incomplete["intent"] = json!("save");
-        incomplete["content"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"] = json!([{
-            "id": "019d2a80-0000-7000-8000-000000000004",
-            "dict_phonetic": "",
-            "actual_pron": "",
-            "style": "normal"
-        }, {
-            "id": "019d2a80-0000-7000-8000-000000000009",
-            "dict_phonetic": "",
-            "actual_pron": "",
-            "style": "normal"
-        }]);
-        let incomplete = decode_valid(incomplete);
-        assert!(!has_code(
-            &validate_forms(&incomplete.content, incomplete.intent),
-            V3ValidationIssueCode::DuplicatePronunciation
+        let valid = decode_valid(request.clone());
+        assert!(validate_forms(&valid.content, StepSaveIntent::Save).is_empty());
+        assert!(validate_forms(&valid.content, StepSaveIntent::Complete).is_empty());
+
+        let rows = request.pointer_mut(path).unwrap().as_array_mut().unwrap();
+        rows[1]["id"] = rows[0]["id"].clone();
+        let repeated_id = decode_valid(request);
+        assert!(has_code(
+            &validate_forms(&repeated_id.content, repeated_id.intent),
+            V3ValidationIssueCode::DuplicateNodeId
         ));
     }
 

@@ -2701,7 +2701,22 @@ async fn v1_forms_editor_round_trips_and_projects_without_legacy_entry_data(pool
     let entry = create(&state, actor).await;
     let path = format!("/entries/{}", entry["id"].as_str().unwrap());
     let mut draft = entry["draft"].clone();
-    let editor = form_editor();
+    let mut editor = form_editor();
+    // The active editor route must preserve two independent voices for the same phonetic text.
+    let pronunciations = editor["contents"][0]["regional_variants"]["uk"]["pronunciations"]
+        .as_array_mut()
+        .unwrap();
+    pronunciations[0]["voice_profile"] =
+        json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":0}]});
+    let slot_id = Uuid::now_v7();
+    let mut second = pronunciations[0].clone();
+    second["id"] = json!(slot_id);
+    second["voice_profile"]["voices"][0]["voice_id"] = json!("ryan");
+    pronunciations.push(second);
+    editor["pos"][0]["forms"][0]["regional_bindings"]["uk"]["pronunciations"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":Uuid::now_v7(),"content_slot_id":slot_id}));
     draft["form_editor"] = editor.clone();
     let (status, saved) = call(
         &state,
