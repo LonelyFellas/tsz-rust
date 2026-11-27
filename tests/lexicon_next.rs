@@ -2822,6 +2822,136 @@ async fn v1_forms_editor_round_trips_and_projects_without_legacy_entry_data(pool
 }
 
 #[sqlx::test]
+async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendation_change(
+    pool: PgPool,
+) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool.clone());
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let alias: String = sqlx::query_scalar(
+        "SELECT alias FROM speech.voices WHERE provider_voice_id='en-GB-SoniaNeural'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let version = Uuid::now_v7();
+    let group = Uuid::now_v7();
+    let groups = |rate: i16| {
+        json!([{"id":group,"name":"word","areas":["word"],"uk":[{
+            "id":version,"name":"自然","voice_alias":alias,"selected":true,
+            "parameters":{"rate_percent":rate,"pitch_semitones":0,"volume_percent":85,"style":null}
+        }],"us":[]}])
+    };
+    sqlx::query("UPDATE speech.dubbing_groups SET groups=$1 WHERE singleton")
+        .bind(groups(-10))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let asset = definition_recording(&pool, actor, "en-GB").await;
+    let original_text = json!({"version":2,"text":"centre","annotations":[]});
+    sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state) VALUES($1,$2,$3,$4,$5,$6,$7,'ready')")
+        .bind(Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap())
+        .bind(Uuid::now_v7()).bind(actor).bind(vec![0u8;32])
+        .bind(json!({"kind":"text","content":original_text,"form_links":[]}))
+        .bind(json!({"version_id":version,"voice_id":alias,"locale":"en-GB","rate_percent":-10,"pitch_semitones":0,"volume_percent":85,"style":""}))
+        .bind(&original_text).execute(&pool).await.unwrap();
+
+    let base_path = "/form_editor/contents/0/regional_variants/uk";
+    let plural_path = "/form_editor/contents/1/regional_variants/uk";
+    let mut draft = entry["draft"].clone();
+    let mut editor = form_editor();
+    let mut plural = form_editor();
+    for side in ["uk", "us"] {
+        plural["contents"][0]["regional_variants"][side]["spelling"] = json!("");
+    }
+    plural["pos"][0]["forms"][0]["form_type"] = json!("plural");
+    editor["contents"]
+        .as_array_mut()
+        .unwrap()
+        .push(plural["contents"][0].take());
+    for key in ["forms", "form_groups"] {
+        editor["pos"][0][key]
+            .as_array_mut()
+            .unwrap()
+            .push(plural["pos"][0][key][0].take());
+    }
+    draft["form_editor"] = editor;
+    draft.pointer_mut(base_path).unwrap()["spelling_speech"] = json!({
+        "content":original_text,
+        "voice_profile":{
+            "dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}},
+            "voices":[{"version_id":version,"version_name":"自然","voice_id":alias,"locale":"en-GB",
+                "rate_percent":-10,"volume_percent":85,"enabled":true,"audio_asset_id":asset["id"]}]
+        }
+    });
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    sqlx::query("UPDATE speech.dubbing_groups SET groups=$1 WHERE singleton")
+        .bind(groups(-20))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut copied = saved["draft"].clone();
+    let speech = json!({
+        "content":{"version":2,"text":"","annotations":[]},
+        "voice_profile":{
+            "dubbing":{"area":"word","uk":{"mode":"local"},"us":{"mode":"local"}},
+            "voices":[{"version_id":Uuid::now_v7(),"version_name":"自然","voice_id":alias,"locale":"en-GB",
+                "rate_percent":-20,"volume_percent":85,"enabled":true}]
+        }
+    });
+    copied.pointer_mut(plural_path).unwrap()["spelling_speech"] = speech.clone();
+    let (status, response) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":copied}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    let (status, reopened) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["revision"], 3);
+    let saved_plural = reopened["draft"].pointer(plural_path).unwrap();
+    assert_eq!(saved_plural["spelling"], "");
+    assert_eq!(saved_plural["spelling_speech"], speech);
+    assert_eq!(
+        reopened["draft"].pointer(base_path),
+        saved["draft"].pointer(base_path)
+    );
+
+    let mut changed_binding = reopened["draft"].clone();
+    changed_binding.pointer_mut(base_path).unwrap()["spelling_speech"]["voice_profile"]["voices"]
+        [0]["volume_percent"] = json!(75);
+    let (status, rejected) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":changed_binding}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(rejected["code"], "revision_conflict");
+}
+
+#[sqlx::test]
 async fn form_editor_recordings_are_canonical_owned_and_protected(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let state = AppState::for_test(pool.clone());

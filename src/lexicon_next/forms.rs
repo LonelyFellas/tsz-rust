@@ -195,21 +195,25 @@ async fn identity(
 pub(super) async fn persist(
     conn: &mut PgConnection,
     entry: Uuid,
-    draft: &mut NextDraft,
+    draft: &NextDraft,
+    previous: &NextDraft,
 ) -> Result<(), AppError> {
-    let Some(editor) = &mut draft.form_editor else {
+    let Some(editor) = &draft.form_editor else {
         return Ok(());
     };
     let resolved = editor
         .clone()
         .resolve()
         .map_err(|error| error.into_app_error())?;
-    let expanded = serde_json::json!({"pos": resolved.pos});
-    crate::speech::generated::validate_bindings_with_forms(
+    let previous = previous
+        .form_editor
+        .as_ref()
+        .and_then(|editor| editor.clone().resolve().ok());
+    crate::speech::generated::validate_draft_form_bindings(
         conn,
-        &expanded,
-        Some((entry, &resolved)),
-        None,
+        entry,
+        &resolved,
+        previous.as_ref(),
     )
     .await?;
     let editor_nodes = nodes(editor);

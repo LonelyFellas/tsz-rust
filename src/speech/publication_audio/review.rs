@@ -330,6 +330,7 @@ async fn inspect_impl(
                     setting,
                     current_forms,
                     options.batch,
+                    false,
                 )
                 .await
                 {
