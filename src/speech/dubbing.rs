@@ -412,6 +412,7 @@ pub(crate) async fn validate_setting(
     setting: &VoiceSettingV3,
     current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
     batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
+    retained_spelling: bool,
 ) -> Result<(), AppError> {
     if profile.dubbing.is_none() {
         return Ok(());
@@ -470,9 +471,10 @@ pub(crate) async fn validate_setting(
             .remove("output_format");
         value
     };
-    if !resolved
-        .iter()
-        .any(|candidate| effect(candidate) == effect(setting))
+    if !(retained_spelling && profile.mode(&accent) == Some(VoiceProfileModeV3::Inherit))
+        && !resolved
+            .iter()
+            .any(|candidate| effect(candidate) == effect(setting))
     {
         return Err(AppError::conflict(
             crate::error::ErrorCode::RevisionConflict,
