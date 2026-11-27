@@ -1488,6 +1488,86 @@ async fn form_question_eligibility_survives_legacy_writes_and_freezes_at_publica
 }
 
 #[sqlx::test]
+async fn assessment_limits_distinct_choice_definitions(pool: PgPool) {
+    let author = admin(&pool, PUBLISH).await;
+    let reviewer = admin(&pool, &["words.access", "words.review_assessment"]).await;
+    let state = AppState::for_test(pool.clone());
+    for overlapping in [true, false] {
+        let (path, saved) = fixture(&state, &pool, author).await;
+        let mut draft = saved["draft"].clone();
+        let sense = &mut draft["senses"][0];
+        let definitions = sense["definitions"].as_array_mut().unwrap();
+        definitions.retain(|row| row["locale"] != "zh-Hans");
+        let mut equivalents = Vec::new();
+        for i in 0..51 {
+            let text = format!("中文释义{i}");
+            definitions.push(
+                json!({"id":Uuid::now_v7(),"locale":"zh-Hans","style":"definition",
+                "level":"A1","grammar_unbound":true,"text":text}),
+            );
+            let equivalent = if overlapping {
+                text
+            } else {
+                format!("其他译词{i}")
+            };
+            equivalents.push(json!({"id":Uuid::now_v7(),"locale":"zh-Hans","text":equivalent}));
+        }
+        sense["equivalents"] = json!(equivalents);
+        let (s, edited) = full_call(
+            &state,
+            author,
+            "PUT",
+            &path,
+            json!({"expected_revision":saved["revision"],"draft":draft}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{edited}");
+        let preview = checked(
+            &state,
+            author,
+            &path,
+            edited["revision"].as_i64().unwrap(),
+            1,
+        )
+        .await;
+        let (s, published) = full_call(
+            &state,
+            author,
+            "POST",
+            &format!("{path}/publications"),
+            command(&preview),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{published}");
+        let url = format!("{path}/assessment");
+        let mut decision = json!({"publication_id":published["id"],"lifecycle_revision":published["lifecycle_revision"],"expected_version":0,"approved":true});
+        let (s, review) = full_call(&state, reviewer, "PUT", &url, decision.clone()).await;
+        assert_eq!(s, StatusCode::OK, "{review}");
+        let publication: Uuid = published["id"].as_str().unwrap().parse().unwrap();
+        let count = || {
+            sqlx::query_scalar::<_, i64>("SELECT count(DISTINCT definition_id) FROM learning_source.next_choice_candidates WHERE publication_id=$1")
+            .bind(publication).fetch_one(&pool)
+        };
+        assert_eq!(count().await.unwrap(), if overlapping { 51 } else { 0 });
+        if overlapping {
+            // Model an already-approved publication indexed by the previous version.
+            sqlx::query(
+                "DELETE FROM learning_source.next_choice_candidates WHERE publication_id=$1",
+            )
+            .bind(publication)
+            .execute(&pool)
+            .await
+            .unwrap();
+            decision["expected_version"] = review["version"].clone();
+            let (s, repaired) = full_call(&state, reviewer, "PUT", &url, decision).await;
+            assert_eq!(s, StatusCode::OK, "{repaired}");
+            assert_eq!(repaired, review);
+            assert_eq!(count().await.unwrap(), 51);
+        }
+    }
+}
+
+#[sqlx::test]
 async fn reviewed_publication_enters_mixed_wordlist_and_revocation_blocks_new_answers(
     pool: PgPool,
 ) {

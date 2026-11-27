@@ -91,6 +91,12 @@ pub async fn decide(
         ));
     }
     if current.approved == input.approved {
+        if current.approved {
+            // Replaying the current approval can repair its derived index without
+            // recording a new decision or invalidating active learning sessions.
+            index_candidates(&mut tx, id, input.publication_id).await?;
+            tx.commit().await.map_err(AppError::internal)?;
+        }
         return Ok(Json(current));
     }
     if input.approved {
