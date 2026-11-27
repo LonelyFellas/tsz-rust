@@ -274,9 +274,14 @@ impl GeneratedAudioService {
         }
     }
 
-    fn with_test_run(mut self, run: Option<String>) -> Self {
+    pub(crate) fn with_test_run(mut self, run: Option<String>) -> Self {
         self.test_run = run;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_run(&self) -> Option<&str> {
+        self.test_run.as_deref()
     }
 
     async fn authorize(&self, actor: Uuid, security_version: i64) -> Result<(), AppError> {
