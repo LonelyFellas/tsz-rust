@@ -154,6 +154,7 @@ pub async fn create(
     sqlx::query("INSERT INTO lexicon_next.entries(id,target_language,medium_locale,kind,headword,owner_id,revision,creation_detection) VALUES($1,$2,$3,$4,$5,$6,1,$7)")
         .bind(id).bind(&input.target_language).bind(&input.medium_locale).bind(kind).bind(&input.headword).bind(auth.subject).bind(creation_detection).execute(&mut *tx).await.map_err(AppError::internal)?;
     if let Some(run) = test_run {
+        crate::test_resources::lock_run(&mut tx, auth.subject, run).await?;
         crate::test_resources::register_entry(&mut tx, run, auth.subject, id).await?;
     }
     let draft = NextDraft {
@@ -231,6 +232,7 @@ pub async fn save(
     auth: &AdminAuth,
     id: Uuid,
     mut input: SaveNextDraft,
+    run: Option<&str>,
     capabilities: SaveCapabilities,
 ) -> Result<NextEntry, AppError> {
     if !input.sentence_changes.is_empty() && !capabilities.sentence_drafts {
@@ -245,6 +247,9 @@ pub async fn save(
         .map_err(AppError::internal)?;
     permissions::lock_session(&mut tx, auth, "words.edit").await?;
     lock_list_writers(&mut tx).await?;
+    if let Some(run) = run {
+        crate::test_resources::lock_run(&mut tx, auth.subject, run).await?;
+    }
     let (language, owner, revision, status): (String, Uuid, i64, String) = sqlx::query_as(
         "SELECT target_language,owner_id,revision,status FROM lexicon_next.entries WHERE id=$1 FOR UPDATE",
     )
@@ -255,6 +260,8 @@ pub async fn save(
     .ok_or_else(|| AppError::not_found("lexicon-next entry not found"))?;
     let access = permissions::lock(&mut tx, auth.subject).await?;
     access.require_owned_action("words.edit", owner)?;
+    let registered = crate::test_resources::entry_run(&mut tx, id).await?;
+    crate::test_resources::require_same_run(run, registered.as_deref())?;
     if status == "archived" {
         return Err(AppError::conflict(
             ErrorCode::EntryArchived,
@@ -354,8 +361,15 @@ pub async fn save(
             .await
             .map_err(crate::lexicon::handler::map_error)?;
     }
-    super::sentence_drafts::save_changes(&mut tx, auth, &previous, draft, input.sentence_changes)
-        .await?;
+    super::sentence_drafts::save_changes(
+        &mut tx,
+        auth,
+        &previous,
+        draft,
+        input.sentence_changes,
+        run,
+    )
+    .await?;
     let conn = &mut *tx;
     super::forms::persist(conn, id, draft).await?;
     super::grammar::persist(conn, id, draft).await?;

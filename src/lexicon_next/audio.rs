@@ -68,7 +68,12 @@ pub(super) async fn persist_value(
         .fetch_all(&mut *conn)
         .await
         .map_err(AppError::internal)?;
-    let rows = sqlx::query(r#"SELECT a.id,
+    let run = if sentence {
+        crate::test_resources::sentence_run(conn, entry).await?
+    } else {
+        crate::test_resources::entry_run(conn, entry).await?
+    };
+    let rows = sqlx::query(r#"SELECT a.id,a.object_key,
       (a.created_by_admin_id=$2 OR EXISTS(SELECT 1 FROM lexicon_next.audio_asset_references r WHERE r.asset_id=a.id AND r.entry_id=$3 AND NOT $4)
        OR EXISTS(SELECT 1 FROM lexicon_next.sentence_audio_asset_references r WHERE r.asset_id=a.id AND r.sentence_id=$3 AND $4)
        OR EXISTS(SELECT 1 FROM lexicon_next.publication_audio_references r WHERE r.asset_id=a.id AND r.resource_id=$3)) AS accessible,
@@ -86,6 +91,11 @@ pub(super) async fn persist_value(
         if !row.get::<bool, _>("accessible") || row.get::<bool, _>("taken") {
             return Err(language::invalid());
         }
+        let key: &str = row.get("object_key");
+        crate::test_resources::require_same_run(
+            run.as_deref(),
+            crate::platform::storage::test_key_parts(key).map(|(run, _, _)| run),
+        )?;
         canonical.insert(
             row.get::<Uuid, _>("id"),
             serde_json::from_value(row.get::<Value, _>("metadata")).map_err(AppError::internal)?,

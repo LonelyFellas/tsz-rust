@@ -461,6 +461,17 @@ pub async fn command(
             NextListAction::Restore | NextListAction::Delete
         ) {
             super::test_purge::ensure_lifecycle_available(&mut tx, target.entry_id).await?;
+            if matches!(input.action, NextListAction::Delete)
+                && crate::test_resources::entry_run(&mut tx, target.entry_id)
+                    .await?
+                    .is_some()
+            {
+                return Err(AppError::conflict(
+                    ErrorCode::RevisionConflict,
+                    None,
+                    "已登记的测试词条必须通过专用清理回收",
+                ));
+            }
         }
         if matches!(
             input.action,

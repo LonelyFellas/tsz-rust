@@ -299,6 +299,15 @@ pub(super) async fn persist(
                     {
                         return Err(language::invalid());
                     }
+                    if matches!(
+                        link.target_source,
+                        Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
+                    ) && let Some(target_run) =
+                        crate::test_resources::entry_run(conn, link.target_word_id).await?
+                    {
+                        let run = crate::test_resources::entry_run(conn, entry).await?;
+                        crate::test_resources::require_same_run(run.as_deref(), Some(&target_run))?;
+                    }
                     validate_form_target(
                         conn,
                         link.target_source.as_ref(),

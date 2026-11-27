@@ -184,6 +184,12 @@ impl PreviewService {
         provider_version: &str,
         request: SynthesisRequest,
     ) -> Result<PreviewResponse, PreviewServiceError> {
+        let run_write = crate::test_resources::start_run_write(
+            &self.authorization_pool,
+            actor_id,
+            self.test_run.as_deref(),
+        )
+        .await?;
         let request_hash = scoped_hash(
             request.fingerprint().as_bytes(),
             provider_version,
@@ -216,6 +222,11 @@ impl PreviewService {
                     .synthesis_timeout()
                     .saturating_add(Duration::from_secs(30))
             });
+        if let Some(run) = self.test_run.as_deref() {
+            // Record the exact lease key before Redis can acquire it, even if synthesis never reaches storage.
+            sqlx::query("INSERT INTO lexicon_next.test_resource_preview_requests(run_id,request_hash) VALUES($1,$2) ON CONFLICT DO NOTHING")
+                .bind(run).bind(request_hash.as_slice()).execute(&self.authorization_pool).await?;
+        }
         let Some(lock) = PreviewLock::acquire(self.redis.clone(), &request_hash, lease)
             .await
             .map_err(|_| PreviewServiceError::Lock)?
@@ -262,6 +273,7 @@ impl PreviewService {
                     );
                     let _ = error;
                 }
+                drop(run_write);
                 result
             }
             .instrument(tracing::Span::current()),
@@ -322,6 +334,11 @@ impl PreviewService {
         let size_bytes = i64::try_from(audio.bytes.len())
             .map_err(|_| PreviewServiceError::InvalidRequest(SpeechModelError::InvalidRichText))?;
         self.authorize(actor_id, true).await?;
+        if let Some(run) = self.test_run.as_deref() {
+            // Keep older renditions and failed writes discoverable even after cache expiry.
+            sqlx::query("INSERT INTO lexicon_next.test_resource_previews(object_key,run_id,request_hash) VALUES($1,$2,$3)")
+                .bind(key.as_str()).bind(run).bind(request_hash.as_slice()).execute(&self.authorization_pool).await?;
+        }
         storage
             .put(
                 &key,

@@ -92,6 +92,7 @@ pub async fn create(
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     permissions::lock_session(&mut tx, &auth, "words.create").await?;
     repository::lock_list_writers(&mut tx).await?;
+    test_resources::lock_run(&mut tx, auth.subject, &run).await?;
     let british_entry = Uuid::now_v7();
     let american_entry = Uuid::now_v7();
     let british_sense = Uuid::now_v7();

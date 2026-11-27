@@ -7,6 +7,7 @@ pub mod router;
 mod service;
 
 pub use cleanup::run_worker;
+pub(crate) use lock::clear_test_locks;
 pub use repository::{CacheRecord, PreviewRepository, PreviewRepositoryPort, VoiceRecord};
 pub use service::{PreviewService, PreviewServiceError};
 

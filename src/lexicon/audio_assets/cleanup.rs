@@ -72,6 +72,8 @@ pub async fn reclaim_once(
             FROM lexicon.audio_assets asset
             WHERE asset.created_at < now() - make_interval(days => $1)
               AND asset.id <> ALL($2)
+              -- Managed test generations keep their version journal until the exact purge.
+              AND NOT EXISTS (SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=asset.id AND g.test_run_id IS NOT NULL)
               AND NOT EXISTS (
                   SELECT 1 FROM lexicon.v3_audio_asset_references reference
                   WHERE reference.asset_id = asset.id

@@ -24,7 +24,7 @@ impl PreviewLock {
         hash: &[u8],
         ttl: Duration,
     ) -> Result<Option<Self>, LockError> {
-        let key = format!("speech:preview:lock:{}", encode_hex(hash));
+        let key = lock_key(hash);
         let token = Uuid::now_v7().to_string();
         let mut connection = pool.get().await?;
         let result: Option<String> = redis::cmd("SET")
@@ -54,6 +54,41 @@ impl PreviewLock {
 
 pub async fn wait_interval() {
     tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+fn lock_key(hash: &[u8]) -> String {
+    format!("speech:preview:lock:{}", encode_hex(hash))
+}
+
+pub(crate) async fn clear_test_locks<'a>(
+    pool: &Pool,
+    hashes: impl Iterator<Item = &'a [u8]>,
+) -> Result<(), crate::error::AppError> {
+    use crate::error::{AppError, ErrorCode};
+    let unavailable = || {
+        AppError::unavailable(
+            ErrorCode::ServiceUnavailable,
+            "test preview lock cleanup failed",
+        )
+    };
+    let mut connection = pool.get().await.map_err(|_| unavailable())?;
+    for hash in hashes {
+        let key = lock_key(hash);
+        let _: i64 = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut connection)
+            .await
+            .map_err(|_| unavailable())?;
+        let exists: bool = redis::cmd("EXISTS")
+            .arg(&key)
+            .query_async(&mut connection)
+            .await
+            .map_err(|_| unavailable())?;
+        if exists {
+            return Err(unavailable());
+        }
+    }
+    Ok(())
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

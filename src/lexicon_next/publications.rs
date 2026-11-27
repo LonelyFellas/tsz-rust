@@ -615,7 +615,7 @@ pub async fn preview(
     Ok(Json(prepared.preview))
 }
 
-#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries/{id}/publications", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("id"=Uuid, Path)), request_body=NextPublishInput, responses((status=200, body=NextPublication), (status=401), (status=403), (status=404), (status=409), (status=422)))]
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries/{id}/publications", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("X-TSZ-Test-Run"=Option<String>, Header, description="专用测试管理员的独占批次"),("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("id"=Uuid, Path)), request_body=NextPublishInput, responses((status=200, body=NextPublication), (status=401), (status=403), (status=404), (status=409), (status=422)))]
 pub async fn publish(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -640,6 +640,12 @@ pub async fn publish(
         .map_err(AppError::internal)?
         .ok_or_else(|| AppError::not_found("entry not found"))?;
     access.require_owned_action("words.publish", owner)?;
+    let (_, run) = crate::test_resources::scoped_write(&state, &headers, auth.subject)?;
+    let registered = crate::test_resources::entry_run(&mut tx, id).await?;
+    crate::test_resources::require_same_run(run.as_deref(), registered.as_deref())?;
+    if let Some(run) = run.as_deref() {
+        crate::test_resources::lock_run(&mut tx, auth.subject, run).await?;
+    }
     let request = serde_json::json!({"entry_id":id,"input":input});
     let existing: Option<(Value, Uuid)> = sqlx::query_as("SELECT request,publication_id FROM lexicon_next.publication_commands WHERE actor_id=$1 AND request_id=$2").bind(auth.subject).bind(input.request_id).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
     if let Some((old, publication)) = existing {
