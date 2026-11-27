@@ -14,7 +14,8 @@ use uuid::Uuid;
 use crate::lexicon::{
     dto::{
         Dialect, DialectModeV3, DraftFormsStepContentV3, EntryNameVariantV3, EntryPresentationV3,
-        WordFormTypeV3, WordHeadwordsV2, WordRegionalVariantsV3,
+        WordConcreteFormV3, WordFormTypeV3, WordHeadwordsV2, WordPosFormsV3,
+        WordRegionalVariantsV3,
     },
     normalization::{
         HEADWORD_NORMALIZATION_VERSION, HeadwordNormalizationError, NormalizedHeadword,
@@ -146,25 +147,48 @@ pub(crate) fn name_variants_from_native_forms(
     forms: &DraftFormsStepContentV3,
     initial_headwords: Option<&WordHeadwordsV2>,
 ) -> Result<Vec<EntryNameVariantV3>, V3ProjectionError> {
-    project_name_variants(forms, initial_headwords, |variant_id, spelling| {
-        projectable_surface(variant_id, spelling).map(|surface| surface.map(|name| name.display))
-    })
+    let candidates = forms
+        .pos
+        .iter()
+        .flat_map(|pos| pos.forms.iter().map(move |form| (pos, form)));
+    project_name_variants(
+        forms,
+        candidates,
+        initial_headwords,
+        |variant_id, spelling| {
+            projectable_surface(variant_id, spelling)
+                .map(|surface| surface.map(|name| name.display))
+        },
+    )
 }
 
-pub(crate) fn name_variants_from_saved_forms(
+pub(crate) fn workspace_name_variants_from_saved_forms(
     forms: &DraftFormsStepContentV3,
 ) -> Vec<EntryNameVariantV3> {
+    let Some(pos) = forms.pos.first() else {
+        return Vec::new();
+    };
+    let Some(group) = pos.form_groups.first() else {
+        return Vec::new();
+    };
+    let forms_by_id: HashMap<_, _> = pos.forms.iter().map(|form| (form.id, form)).collect();
+    let candidates = group
+        .members
+        .iter()
+        .filter_map(|member| forms_by_id.get(&member.form_id).map(|&form| (pos, form)));
+
     // V2 drafts can already contain spellings that exceed the V1 limit after
     // normalization. Display saved text without reapplying input validation.
-    project_name_variants(forms, None, |_, spelling| {
+    project_name_variants(forms, candidates, None, |_, spelling| {
         let display = display_v1(spelling);
         Ok::<_, Infallible>((!display.is_empty()).then_some(display))
     })
     .unwrap_or_else(|never| match never {})
 }
 
-fn project_name_variants<E>(
-    forms: &DraftFormsStepContentV3,
+fn project_name_variants<'a, E>(
+    forms: &'a DraftFormsStepContentV3,
+    candidates: impl Iterator<Item = (&'a WordPosFormsV3, &'a WordConcreteFormV3)>,
     initial_headwords: Option<&WordHeadwordsV2>,
     project_display: impl Fn(Uuid, &str) -> Result<Option<String>, E>,
 ) -> Result<Vec<EntryNameVariantV3>, E> {
@@ -191,37 +215,33 @@ fn project_name_variants<E>(
         Ok(())
     };
     let mut has_current_name = false;
-    for pos in &forms.pos {
-        for form in &pos.forms {
-            if form.form_type != "base" {
-                continue;
-            }
-            for v in form.regional_variants.variants() {
-                let mode = forms
-                    .content_rules(form.id)
-                    .map(|rules| rules.spelling_mode)
-                    .or_else(|| {
-                        pos.form_groups
-                            .iter()
-                            .find(|group| {
-                                group.members.iter().any(|member| member.form_id == form.id)
-                            })
-                            .map(|group| group.dialect_rules.spelling_mode)
-                    });
-                has_current_name |= !v.spelling.trim().is_empty();
-                let dialect = if v.dialect == Dialect::Common {
-                    Some(Dialect::Common)
-                } else {
-                    mode.map(|mode| {
-                        if mode == DialectModeV3::Unified {
-                            Dialect::Common
-                        } else {
-                            v.dialect
-                        }
-                    })
-                };
-                push(v.id, v.spelling, dialect)?;
-            }
+    for (pos, form) in candidates {
+        if form.form_type != "base" {
+            continue;
+        }
+        let mode = forms
+            .content_rules(form.id)
+            .map(|rules| rules.spelling_mode)
+            .or_else(|| {
+                pos.form_groups
+                    .iter()
+                    .find(|group| group.members.iter().any(|member| member.form_id == form.id))
+                    .map(|group| group.dialect_rules.spelling_mode)
+            });
+        for v in form.regional_variants.variants() {
+            has_current_name |= !v.spelling.trim().is_empty();
+            let dialect = if v.dialect == Dialect::Common {
+                Some(Dialect::Common)
+            } else {
+                mode.map(|mode| {
+                    if mode == DialectModeV3::Unified {
+                        Dialect::Common
+                    } else {
+                        v.dialect
+                    }
+                })
+            };
+            push(v.id, v.spelling, dialect)?;
         }
     }
     if !has_current_name && let Some(headwords) = initial_headwords {
@@ -578,7 +598,7 @@ mod tests {
                 dialects: vec![Dialect::Uk, Dialect::Us],
             },
         ];
-        assert_eq!(name_variants_from_saved_forms(&forms), expected);
+        assert_eq!(workspace_name_variants_from_saved_forms(&forms), expected);
         assert_eq!(
             name_variants_from_native_forms(&forms, None).unwrap(),
             expected

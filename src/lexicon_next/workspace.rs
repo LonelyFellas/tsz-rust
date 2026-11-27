@@ -3,7 +3,9 @@ use super::{language, list_model::*};
 use crate::{
     admin::{AdminAuth, permissions},
     error::{AppError, ErrorCode},
-    lexicon::{dto::SharedFormsStepContentV3, v3_projection::name_variants_from_saved_forms},
+    lexicon::{
+        dto::SharedFormsStepContentV3, v3_projection::workspace_name_variants_from_saved_forms,
+    },
 };
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -181,12 +183,16 @@ struct WorkspaceNameRow {
 impl WorkspaceNameRow {
     fn into_entry(self) -> Result<NextWorkspaceEntry, AppError> {
         let mut entry = self.entry;
-        if let Some(sqlx::types::Json(editor)) = self.name_source {
-            let forms = editor.resolve().map_err(|error| {
-                AppError::internal(anyhow::anyhow!("invalid workspace form editor: {error}"))
-            })?;
-            entry.name_variants = Some(name_variants_from_saved_forms(&forms));
-        }
+        let variants = match self.name_source {
+            Some(sqlx::types::Json(editor)) => {
+                let forms = editor.resolve().map_err(|error| {
+                    AppError::internal(anyhow::anyhow!("invalid workspace form editor: {error}"))
+                })?;
+                workspace_name_variants_from_saved_forms(&forms)
+            }
+            None => Vec::new(),
+        };
+        entry.name_variants = Some(variants);
         Ok(entry)
     }
 }
