@@ -127,7 +127,7 @@ pub async fn candidates(
                         // Preserve fingerprints of existing candidates. Only compact a
                         // reviewed publication's exclusion list if it would be rejected.
                         if publication.is_next && other_definitions.len() > 100 {
-                            let mut keys = std::collections::HashSet::new();
+                            let mut keys = std::collections::HashSet::from([key_v1(text.text())]);
                             other_definitions.retain(|text| keys.insert(key_v1(text)));
                         }
                         if other_definitions.len() > 100 {

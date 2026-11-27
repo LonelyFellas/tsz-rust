@@ -1499,7 +1499,8 @@ async fn assessment_limits_distinct_choice_definitions(pool: PgPool) {
         let definitions = sense["definitions"].as_array_mut().unwrap();
         definitions.retain(|row| row["locale"] != "zh-Hans");
         let mut equivalents = Vec::new();
-        for i in 0..51 {
+        let definition_count = if overlapping { 101 } else { 51 };
+        for i in 0..definition_count {
             let text = format!("中文释义{i}");
             definitions.push(
                 json!({"id":Uuid::now_v7(),"locale":"zh-Hans","style":"definition",
@@ -1548,7 +1549,10 @@ async fn assessment_limits_distinct_choice_definitions(pool: PgPool) {
             sqlx::query_scalar::<_, i64>("SELECT count(DISTINCT definition_id) FROM learning_source.next_choice_candidates WHERE publication_id=$1")
             .bind(publication).fetch_one(&pool)
         };
-        assert_eq!(count().await.unwrap(), if overlapping { 51 } else { 0 });
+        assert_eq!(
+            count().await.unwrap(),
+            if overlapping { definition_count } else { 0 }
+        );
         if overlapping {
             // Model an already-approved publication indexed by the previous version.
             sqlx::query(
@@ -1562,7 +1566,7 @@ async fn assessment_limits_distinct_choice_definitions(pool: PgPool) {
             let (s, repaired) = full_call(&state, reviewer, "PUT", &url, decision).await;
             assert_eq!(s, StatusCode::OK, "{repaired}");
             assert_eq!(repaired, review);
-            assert_eq!(count().await.unwrap(), 51);
+            assert_eq!(count().await.unwrap(), definition_count);
         }
     }
 }
