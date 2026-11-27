@@ -966,9 +966,13 @@ async fn v3_regional_shape_is_deferred_and_can_switch_atomically(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn v3_pronunciation_allows_draft_null_style_and_rejects_duplicate_complete_triple(
-    pool: PgPool,
-) {
+async fn v3_pronunciation_allows_draft_null_style_and_repeated_complete_content(pool: PgPool) {
+    let down =
+        include_str!("../migrations/20261127140000_allow_repeated_pronunciation_content.down.sql");
+    let up =
+        include_str!("../migrations/20261127140000_allow_repeated_pronunciation_content.up.sql");
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+
     let admin_id = insert_admin(&pool).await;
     let entry_id = insert_v3_entry(&pool, admin_id).await;
     let noun_id = catalog_pos_id(&pool, "noun").await;
@@ -1057,6 +1061,8 @@ async fn v3_pronunciation_allows_draft_null_style_and_rejects_duplicate_complete
     .unwrap();
     tx.commit().await.unwrap();
 
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+
     let mut duplicate_tx = pool.begin().await.unwrap();
     let duplicate_id = Uuid::now_v7();
     insert_node(
@@ -1069,7 +1075,7 @@ async fn v3_pronunciation_allows_draft_null_style_and_rejects_duplicate_complete
         false,
     )
     .await;
-    let duplicate = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO lexicon.v3_pronunciations (
             id, entry_id, form_variant_id, dict_phonetic, actual_pron,
@@ -1082,12 +1088,23 @@ async fn v3_pronunciation_allows_draft_null_style_and_rejects_duplicate_complete
     .bind(entry_id)
     .bind(variant_id)
     .execute(&mut *duplicate_tx)
-    .await;
+    .await
+    .unwrap();
+    duplicate_tx.commit().await.unwrap();
+
     assert_db_error(
-        duplicate,
+        sqlx::raw_sql(down).execute(&pool).await,
         UNIQUE_VIOLATION,
         "lexicon_v3_pronunciations_complete_triple_key",
     );
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM lexicon.v3_pronunciations WHERE form_variant_id = $1 ORDER BY ordinal",
+    )
+    .bind(variant_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ids, [draft_id, second_draft_id, complete_id, duplicate_id]);
 }
 
 #[sqlx::test]
