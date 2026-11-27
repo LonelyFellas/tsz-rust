@@ -18,7 +18,7 @@ use crate::lexicon::{
     },
     normalization::{
         HEADWORD_NORMALIZATION_VERSION, HeadwordNormalizationError, NormalizedHeadword,
-        normalize_headword, normalize_text_key,
+        normalize_headword,
     },
 };
 
@@ -146,7 +146,9 @@ pub(crate) fn name_variants_from_native_forms(
     forms: &DraftFormsStepContentV3,
     initial_headwords: Option<&WordHeadwordsV2>,
 ) -> Result<Vec<EntryNameVariantV3>, V3ProjectionError> {
-    project_name_variants(forms, initial_headwords, projectable_surface)
+    project_name_variants(forms, initial_headwords, |variant_id, spelling| {
+        projectable_surface(variant_id, spelling).map(|surface| surface.map(|name| name.display))
+    })
 }
 
 pub(crate) fn name_variants_from_saved_forms(
@@ -156,10 +158,7 @@ pub(crate) fn name_variants_from_saved_forms(
     // normalization. Display saved text without reapplying input validation.
     project_name_variants(forms, None, |_, spelling| {
         let display = display_v1(spelling);
-        Ok::<_, Infallible>((!display.is_empty()).then(|| NormalizedHeadword {
-            key: normalize_text_key(&display),
-            display,
-        }))
+        Ok::<_, Infallible>((!display.is_empty()).then_some(display))
     })
     .unwrap_or_else(|never| match never {})
 }
@@ -167,15 +166,15 @@ pub(crate) fn name_variants_from_saved_forms(
 fn project_name_variants<E>(
     forms: &DraftFormsStepContentV3,
     initial_headwords: Option<&WordHeadwordsV2>,
-    project: impl Fn(Uuid, &str) -> Result<Option<NormalizedHeadword>, E>,
+    project_display: impl Fn(Uuid, &str) -> Result<Option<String>, E>,
 ) -> Result<Vec<EntryNameVariantV3>, E> {
     let mut names = Vec::<EntryNameVariantV3>::new();
     let mut indices = HashMap::<String, usize>::new();
     let mut push = |variant_id, spelling: &str, dialect: Option<Dialect>| -> Result<(), E> {
-        let Some(normalized) = project(variant_id, spelling)? else {
+        let Some(display) = project_display(variant_id, spelling)? else {
             return Ok(());
         };
-        if let Some(&index) = indices.get(&normalized.key) {
+        if let Some(&index) = indices.get(&display) {
             let dialects = &mut names[index].dialects;
             if let Some(dialect) = dialect
                 && !dialects.contains(&dialect)
@@ -183,9 +182,9 @@ fn project_name_variants<E>(
                 dialects.push(dialect);
             }
         } else {
-            indices.insert(normalized.key, names.len());
+            indices.insert(display.clone(), names.len());
             names.push(EntryNameVariantV3 {
-                text: normalized.display,
+                text: display,
                 dialects: dialect.into_iter().collect(),
             });
         }
@@ -547,6 +546,42 @@ mod tests {
                     dialects: vec![Dialect::Us]
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn list_names_keep_case_variants_with_reversed_dialect_order() {
+        let mut first = uk_us_form(id(1), id(2), "Braille", id(3), "braille");
+        let second = uk_us_form(id(4), id(5), "braille", id(6), "Braille");
+        let (
+            WordRegionalVariantsV3::UkUs { uk, us },
+            WordRegionalVariantsV3::UkUs {
+                uk: second_uk,
+                us: second_us,
+            },
+        ) = (first.regional_variants, second.regional_variants)
+        else {
+            unreachable!();
+        };
+        first.regional_variants = WordRegionalVariantsV3::UkUsMany {
+            uk: vec![uk, second_uk],
+            us: vec![us, second_us],
+        };
+        let forms = name_forms(vec![first], DialectRulesV3::DISTINGUISH);
+        let expected = vec![
+            EntryNameVariantV3 {
+                text: "Braille".into(),
+                dialects: vec![Dialect::Uk, Dialect::Us],
+            },
+            EntryNameVariantV3 {
+                text: "braille".into(),
+                dialects: vec![Dialect::Uk, Dialect::Us],
+            },
+        ];
+        assert_eq!(name_variants_from_saved_forms(&forms), expected);
+        assert_eq!(
+            name_variants_from_native_forms(&forms, None).unwrap(),
+            expected
         );
     }
 
