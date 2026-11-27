@@ -2537,9 +2537,9 @@ async fn merge_pronunciations_keeping_us_saves_and_reopens(pool: PgPool) {
     merge_regional_pronunciations(pool, "us", "uk").await;
 }
 
-async fn workspace_list_with_names(state: &AppState, actor: Uuid) -> Value {
+async fn workspace_list_with_names(state: &AppState, actor: Uuid, query: &str) -> Value {
     let req = Request::builder()
-        .uri(format!("{ROOT}/workspace/entries?headword=center&pos=noun"))
+        .uri(format!("{ROOT}/workspace/entries{query}"))
         .header("x-tsz-next-name-variants", "v1")
         .header(
             "authorization",
@@ -2602,7 +2602,8 @@ async fn workspace_names_use_saved_base_forms_and_deduplicate_shared_spellings(p
     assert_eq!(old_row["id"], entry["id"]);
     assert!(old_row.get("name_variants").is_none());
 
-    let list = workspace_list_with_names(&state, actor).await;
+    let query = "?headword=center&pos=noun";
+    let list = workspace_list_with_names(&state, actor, query).await;
     assert_eq!(list["items"][0]["id"], entry["id"]);
     assert_eq!(
         list["items"][0]["name_variants"],
@@ -2622,7 +2623,7 @@ async fn workspace_names_use_saved_base_forms_and_deduplicate_shared_spellings(p
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let list = workspace_list_with_names(&state, actor).await;
+    let list = workspace_list_with_names(&state, actor, query).await;
     assert_eq!(
         list["items"][0]["name_variants"],
         json!([{"text":"center","dialects":["uk","us"]}])
@@ -2640,7 +2641,7 @@ async fn workspace_names_use_saved_base_forms_and_deduplicate_shared_spellings(p
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let list = workspace_list_with_names(&state, actor).await;
+    let list = workspace_list_with_names(&state, actor, query).await;
     assert_eq!(
         list["items"][0]["name_variants"],
         json!([
@@ -2648,6 +2649,76 @@ async fn workspace_names_use_saved_base_forms_and_deduplicate_shared_spellings(p
             {"text":"center","dialects":["us"]}
         ])
     );
+}
+
+#[sqlx::test]
+async fn workspace_names_follow_saved_pos_and_form_group_order(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool);
+    let entry = create(&state, actor).await;
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut draft = entry["draft"].clone();
+    let mut editor = form_editor();
+    let mut second_group = form_editor();
+    let mut verb = form_editor();
+    for dialect in ["uk", "us"] {
+        editor["contents"][0]["regional_variants"][dialect]["spelling"] = json!("Panama");
+        second_group["contents"][0]["regional_variants"][dialect]["spelling"] = json!("panama");
+        verb["contents"][0]["regional_variants"][dialect]["spelling"] = json!("panamize");
+    }
+    verb["pos"][0]["pos"] = json!("verb");
+    editor["contents"].as_array_mut().unwrap().extend([
+        second_group["contents"][0].take(),
+        verb["contents"][0].take(),
+    ]);
+    editor["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_group["pos"][0]["forms"][0].take());
+    editor["pos"][0]["form_groups"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_group["pos"][0]["form_groups"][0].take());
+    editor["pos"]
+        .as_array_mut()
+        .unwrap()
+        .push(verb["pos"][0].take());
+
+    let empty = workspace_list_with_names(&state, actor, "").await;
+    let mut names = Vec::new();
+    for revision in 1..=3 {
+        draft["form_editor"] = editor.clone();
+        let (status, saved) = call(
+            &state,
+            Some(actor),
+            "PUT",
+            &path,
+            json!({"expected_revision":revision,"draft":draft}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        // The noun spelling is still searchable after the verb moves first.
+        let list = workspace_list_with_names(&state, actor, "?headword=panama").await;
+        let row = &list["items"][0];
+        assert_eq!(row["id"], entry["id"]);
+        assert_eq!(row["revision"], revision + 1);
+        names.push(row["name_variants"].clone());
+        match revision {
+            1 => editor["pos"][0]["form_groups"]
+                .as_array_mut()
+                .unwrap()
+                .swap(0, 1),
+            2 => editor["pos"].as_array_mut().unwrap().swap(0, 1),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        names,
+        ["Panama", "panama", "panamize"]
+            .map(|spelling| json!([{"text": spelling, "dialects": ["uk", "us"]}]))
+    );
+    assert_eq!(empty["items"][0]["id"], entry["id"]);
+    assert_eq!(empty["items"][0]["name_variants"], json!([]));
 }
 
 #[sqlx::test]
