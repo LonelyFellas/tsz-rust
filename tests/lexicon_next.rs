@@ -3010,6 +3010,19 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
     let mut changed_binding = reopened["draft"].clone();
     changed_binding.pointer_mut(base_path).unwrap()["spelling_speech"]["voice_profile"]["voices"]
         [0]["volume_percent"] = json!(75);
+    let (status, stale_revision) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":changed_binding}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale_revision}");
+    assert_eq!(stale_revision["code"], "revision_conflict");
+    assert_eq!(stale_revision["field"], "expected_revision");
+    assert!(stale_revision.get("meta").is_none());
+
     let (status, rejected) = call(
         &state,
         Some(actor),
@@ -3020,6 +3033,38 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
     assert_eq!(rejected["code"], "revision_conflict");
+    assert_eq!(rejected["meta"]["code"], "speech_recommendation_changed");
+    assert!(rejected.get("field").is_none());
+    let (status, after_conflict) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after_conflict}");
+    assert_eq!(after_conflict["revision"], 3);
+    assert_eq!(after_conflict["draft"], reopened["draft"]);
+
+    let regenerated = definition_recording(&pool, actor, "en-GB").await;
+    let regenerated_id = Uuid::parse_str(regenerated["id"].as_str().unwrap()).unwrap();
+    sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state) VALUES($1,$2,$3,$4,$5,$6,$7,'ready')")
+        .bind(regenerated_id).bind(Uuid::now_v7()).bind(actor).bind(vec![1u8;32])
+        .bind(json!({"kind":"text","content":original_text,"form_links":[]}))
+        .bind(json!({"version_id":version,"voice_id":alias,"locale":"en-GB","rate_percent":-20,"pitch_semitones":0,"volume_percent":85,"style":""}))
+        .bind(&original_text).execute(&pool).await.unwrap();
+    let mut recovered = reopened["draft"].clone();
+    let voice = &mut recovered.pointer_mut(base_path).unwrap()["spelling_speech"]["voice_profile"]
+        ["voices"][0];
+    voice["rate_percent"] = json!(-20);
+    voice["audio_asset_id"] = json!(regenerated_id);
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":recovered}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, reopened) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["revision"], 4);
+    assert_eq!(reopened["draft"], recovered);
 }
 
 #[sqlx::test]
