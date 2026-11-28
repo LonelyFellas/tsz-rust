@@ -6625,3 +6625,6 @@ async fn archived_fixture_cannot_be_restored_or_deleted_during_audio_purge(pool:
 mod account_deletion_support;
 mod learning_tasks_support;
 mod wordlists_support;
+
+#[path = "lexicon_next/components.rs"]
+mod components;

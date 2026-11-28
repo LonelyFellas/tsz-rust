@@ -59,6 +59,7 @@ pub async fn find(
     input: NextEntryMatchInput,
     include_annotation_rule: bool,
     annotation_kind: Option<NextEntryKind>,
+    component_words: bool,
 ) -> Result<NextEntryMatches, AppError> {
     language::require_language(&input.target_language)?;
     if let Some(locale) = &input.medium_locale {
@@ -82,6 +83,9 @@ pub async fn find(
         &input.target_language,
         input.medium_locale.as_deref(),
     );
+    if component_words {
+        count.push(" AND e.kind='word'");
+    }
     let total = count
         .build_query_scalar()
         .fetch_one(&mut *tx)
@@ -96,6 +100,9 @@ pub async fn find(
         &input.target_language,
         input.medium_locale.as_deref(),
     );
+    if component_words {
+        rows.push(" AND e.kind='word'");
+    }
     rows.push(" ORDER BY e.updated_at DESC,e.id DESC LIMIT ")
         .push_bind(i64::from(size))
         .push(" OFFSET ")
