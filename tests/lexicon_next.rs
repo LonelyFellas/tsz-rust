@@ -2988,6 +2988,16 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
             .unwrap()
             .push(plural["pos"][0][key][0].take());
     }
+    let mut verb = form_editor();
+    verb["pos"][0]["pos"] = json!("verb");
+    editor["contents"]
+        .as_array_mut()
+        .unwrap()
+        .push(verb["contents"][0].take());
+    editor["pos"]
+        .as_array_mut()
+        .unwrap()
+        .push(verb["pos"][0].take());
     draft["form_editor"] = editor;
     draft.pointer_mut(base_path).unwrap()["spelling_speech"] = json!({
         "content":original_text,
@@ -3013,6 +3023,10 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
         .await
         .unwrap();
     let mut copied = saved["draft"].clone();
+    copied["form_editor"]["pos"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
     let speech = json!({
         "content":{"version":2,"text":"","annotations":[]},
         "voice_profile":{
@@ -3035,6 +3049,10 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
     let (status, reopened) = call(&state, Some(actor), "GET", &path, Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{reopened}");
     assert_eq!(reopened["revision"], 3);
+    assert_eq!(
+        reopened["draft"]["form_editor"]["pos"][0]["pos_id"],
+        saved["draft"]["form_editor"]["pos"][1]["pos_id"]
+    );
     let saved_plural = reopened["draft"].pointer(plural_path).unwrap();
     assert_eq!(saved_plural["spelling"], "");
     assert_eq!(saved_plural["spelling_speech"], speech);

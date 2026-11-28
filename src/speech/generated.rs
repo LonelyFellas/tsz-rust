@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::{
     Json,
@@ -24,7 +27,7 @@ use crate::{
     error::{AppError, ErrorCode},
     lexicon::{
         audio_assets::dto::{AudioAsset, AudioAssetGender, AudioAssetLocale},
-        dto::VoiceSettingV3,
+        dto::{DraftFormsStepContentV3, VoiceSettingV3, WordFormVariantRefV3},
     },
     platform::storage::{ObjectContentType, ObjectKey, ObjectStore, PutOptions, StorageSpace},
     state::AppState,
@@ -847,7 +850,21 @@ pub(crate) async fn validate_bindings_with_forms(
     current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
     batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
 ) -> Result<(), AppError> {
-    validate_bindings_inner(conn, value, current, batch, None).await
+    validate_bindings_inner(conn, value, current, batch, &HashSet::new()).await
+}
+
+fn spelling_variants(
+    forms: &DraftFormsStepContentV3,
+) -> impl Iterator<Item = ((Uuid, Uuid, Uuid), WordFormVariantRefV3<'_>)> {
+    forms.pos.iter().flat_map(|pos| {
+        pos.forms.iter().flat_map(move |form| {
+            form.regional_variants
+                .variants()
+                .into_iter()
+                .filter(|variant| variant.spelling_speech.is_some())
+                .map(move |variant| ((pos.pos_id, form.id, variant.id), variant))
+        })
+    })
 }
 
 pub(crate) async fn validate_draft_form_bindings(
@@ -857,8 +874,16 @@ pub(crate) async fn validate_draft_form_bindings(
     previous: Option<&crate::lexicon::dto::DraftFormsStepContentV3>,
 ) -> Result<(), AppError> {
     let value = serde_json::json!({"pos": forms.pos});
-    let previous = previous.map(|forms| serde_json::json!({"pos": forms.pos}));
-    validate_bindings_inner(conn, &value, Some((entry, forms)), None, previous.as_ref()).await
+    let mut retained = HashSet::new();
+    if let Some(previous) = previous {
+        let before: HashMap<_, _> = spelling_variants(previous).collect();
+        for (key, variant) in spelling_variants(forms) {
+            if before.get(&key) == Some(&variant) {
+                retained.insert(variant.id.to_string());
+            }
+        }
+    }
+    validate_bindings_inner(conn, &value, Some((entry, forms)), None, &retained).await
 }
 
 async fn validate_bindings_inner(
@@ -866,7 +891,7 @@ async fn validate_bindings_inner(
     value: &Value,
     current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
     batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
-    previous_draft_forms: Option<&Value>,
+    retained_spelling_ids: &HashSet<String>,
 ) -> Result<(), AppError> {
     fn profiles(
         value: &Value,
@@ -1097,15 +1122,12 @@ async fn validate_bindings_inner(
             && is_active(&reference)
             && let Some(profile) = &reference.profile
         {
-            // Exact variant equality includes its stable ID, selected sources,
-            // spelling, voice settings and the existing asset binding.
-            let retained_spelling = previous_draft_forms.is_some_and(|previous| {
-                reference
-                    .path
-                    .strip_suffix("/spelling_speech")
-                    .and_then(|path| previous.pointer(path).zip(value.pointer(path)))
-                    .is_some_and(|(before, after)| before == after)
-            });
+            let retained_spelling = reference
+                .path
+                .strip_suffix("/spelling_speech")
+                .and_then(|path| value.pointer(path))
+                .and_then(|variant| variant.get("id")?.as_str())
+                .is_some_and(|id| retained_spelling_ids.contains(id));
             super::dubbing::validate_setting(
                 conn,
                 profile,
