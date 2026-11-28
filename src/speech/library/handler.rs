@@ -162,7 +162,7 @@ pub async fn save_order(
     post, path = "/api/v1/admin/speech/groups", tag = "admin-speech", security(("bearer_auth"=[])),
     params(("X-TSZ-Dubbing-Groups" = String, Header, description = "v4 独立单侧分组写入；旧版本只读并拒绝写入", example = "v4")),
     request_body = SaveDubbingGroupRequest,
-    responses((status=200,body=DubbingGroupsResponse),(status=400),(status=403),(status=409),(status=422))
+    responses((status=200,body=DubbingGroupsResponse),(status=400,description="无效配置。同组同侧官方音色重复时，field 为 uk 或 us，meta.code 为 duplicate_dubbing_voice"),(status=403),(status=409),(status=422))
 )]
 pub async fn create_group(
     State(state): State<AppState>,
@@ -177,7 +177,7 @@ pub async fn create_group(
 #[utoipa::path(
     put, path = "/api/v1/admin/speech/groups/{id}", tag = "admin-speech", security(("bearer_auth"=[])),
     params(("X-TSZ-Dubbing-Groups" = String, Header, description = "v4 独立单侧分组写入；旧版本只读并拒绝写入", example = "v4"), ("id"=uuid::Uuid,Path)), request_body = SaveDubbingGroupRequest,
-    responses((status=200,body=DubbingGroupsResponse),(status=400),(status=403),(status=409),(status=422))
+    responses((status=200,body=DubbingGroupsResponse),(status=400,description="无效配置。同组同侧官方音色重复时，field 为 uk 或 us，meta.code 为 duplicate_dubbing_voice"),(status=403),(status=409),(status=422))
 )]
 pub async fn save_group(
     State(state): State<AppState>,
