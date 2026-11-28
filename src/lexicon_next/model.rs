@@ -199,6 +199,7 @@ pub struct NextSense {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextPhraseComponentUsage {
+    /// New links must use `lexicon_next`. Existing `v3` links may be retained in a draft.
     pub target_source: crate::lexicon::dto::AssociationTargetSource,
     pub usage: crate::lexicon::dto::PhraseComponentUsageV3,
 }

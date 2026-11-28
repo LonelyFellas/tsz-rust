@@ -292,3 +292,148 @@ async fn phrase_components_roundtrip_and_legacy_save_keeps_links(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK, "{archived}");
 }
+
+#[sqlx::test]
+async fn phrase_components_reject_new_v1_links_and_allow_clearing_existing_ones(pool: PgPool) {
+    let actor = admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "words.publish",
+        ],
+    )
+    .await;
+    let state = AppState::for_test(pool.clone());
+    sqlx::query(
+        "INSERT INTO catalog.parts_of_speech(id, kind, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en)
+        VALUES($1, 'phrase', 'phrase_noun', '名词性成分', 'Nominal constituent', '名词性成分', 'np.', 'nominal constituent')",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let word = Uuid::now_v7();
+    let sense = Uuid::now_v7();
+    let forms = form_editor();
+    let pos = &forms["pos"][0];
+    let form = &pos["forms"][0];
+    sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,revision,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word',1,'{}',$2,$2)")
+        .bind(word)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO lexicon.entry_editor_projection(entry_id,forms,meanings,rebuilt_revision) VALUES($1,$2,$3,1)")
+        .bind(word)
+        .bind(&forms)
+        .bind(json!({"sense_groups":[],"pos":[{"pos_id":pos["pos_id"],"grammar_structures":[],"senses":[{
+            "id":sense,"sub_pos":"N-COUNT","level":"A1","depends_on_context":false,
+            "definitions":[{"id":Uuid::now_v7(),"content_id":Uuid::now_v7(),"level":"A1","definition_mode":"zh_definition",
+                "content":{"version":2,"text":"中心","annotations":[]}}],"sentences":[],"relations":[]
+        }]}]}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, phrase) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entries",
+        json!({"target_language":"en","kind":"phrase","headword":"centre stage"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase}");
+    let phrase_id: Uuid = serde_json::from_value(phrase["id"].clone()).unwrap();
+    let path = format!("/entries/{phrase_id}");
+    let mut draft = phrase["draft"].clone();
+    let phrase_sense = Uuid::now_v7();
+    let usages = json!([{
+        "target_source":"v3",
+        "usage":{
+            "state":"resolved","id":Uuid::now_v7(),"literal":"centre",
+            "target_word_id":word,"target_pos_id":pos["pos_id"],
+            "target_base_form_id":form["id"],"target_form_id":form["id"],
+            "target_variant_id":form["regional_bindings"]["uk"]["id"],
+            "target_sense_id":sense,"target_dialect":"uk","target_form_type":"base",
+            "target_headword":"centre","target_gloss":"中心"
+        }
+    }]);
+    draft["senses"] = json!([{
+        "id":phrase_sense,"part_of_speech":"phrase_noun","definitions":[],"equivalents":[],"component_usages":usages
+    }]);
+    let (status, rejected) = component_request(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(rejected["detail"].as_str().unwrap().contains("新版词条"));
+
+    // Simulate a draft saved before the same-catalog restriction.
+    sqlx::query(
+        "UPDATE lexicon_next.draft_revisions SET document=$2 WHERE entry_id=$1 AND revision=1",
+    )
+    .bind(phrase_id)
+    .bind(&draft)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, reopened) = component_request(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["draft"]["senses"][0]["component_usages"], usages);
+
+    draft["senses"][0]["definitions"] = json!([
+        {"id":Uuid::now_v7(),"locale":"zh-Hans","style":"definition","text":"中心位置"}
+    ]);
+    let (status, mut saved) = component_request(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["draft"]["senses"][0]["component_usages"], usages);
+
+    let (status, preview) = component_request(
+        &state,
+        actor,
+        "POST",
+        &format!("{path}/publication-preview"),
+        json!({"base_revision":2,"base_lifecycle_revision":1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(
+        preview["issues"].as_array().unwrap().iter().any(|issue| {
+            issue["node_id"] == json!(phrase_sense)
+                && issue["field"] == "component_usages"
+                && issue["message"].as_str().unwrap().contains("V1 关联")
+        }),
+        "{preview}"
+    );
+
+    saved["draft"]["senses"][0]["component_usages"] = json!([]);
+    let (status, cleared) = component_request(
+        &state,
+        actor,
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":saved["draft"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    let (_, reopened) = component_request(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(
+        reopened["draft"]["senses"][0]["component_usages"],
+        json!([])
+    );
+}
