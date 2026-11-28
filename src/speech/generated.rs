@@ -261,6 +261,7 @@ pub struct GeneratedAudioService {
     pool: PgPool,
     provider: Option<Arc<dyn SpeechProvider>>,
     storage: Option<Arc<dyn ObjectStore>>,
+    test_run: Option<String>,
 }
 
 impl GeneratedAudioService {
@@ -273,7 +274,18 @@ impl GeneratedAudioService {
             pool,
             provider,
             storage,
+            test_run: None,
         }
+    }
+
+    pub(crate) fn with_test_run(mut self, run: Option<String>) -> Self {
+        self.test_run = run;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_run(&self) -> Option<&str> {
+        self.test_run.as_deref()
     }
 
     async fn authorize(&self, actor: Uuid, security_version: i64) -> Result<(), AppError> {
@@ -319,7 +331,16 @@ impl GeneratedAudioService {
             .acquire()
             .await
             .map_err(|_| in_progress())?;
-        let mut lease = self.pool.begin().await.map_err(AppError::internal)?;
+        let mut lease = match crate::test_resources::start_run_write(
+            &self.pool,
+            actor,
+            self.test_run.as_deref(),
+        )
+        .await?
+        {
+            Some(tx) => tx,
+            None => self.pool.begin().await.map_err(AppError::internal)?,
+        };
         let acquired: bool =
             sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,1))")
                 .bind(format!("generated:{actor}:{}", input.request_id))
@@ -537,8 +558,8 @@ impl GeneratedAudioService {
         if previous.is_none() {
             sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,$8,1,$4,$5,$6,$7)")
             .bind(id).bind(key.as_str()).bind(format!("generated/{actor}/{}",input.request_id)).bind(asset_locale.as_str()).bind(gender.as_str()).bind(&name).bind(actor).bind(format.content_type()).execute(&mut *tx).await.map_err(AppError::internal)?;
-            sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state) VALUES($1,$2,$3,$4,$5,$6,$7,'pending')")
-            .bind(id).bind(input.request_id).bind(actor).bind(&hash).bind(&source).bind(&setting).bind(&resolved_content).execute(&mut *tx).await.map_err(AppError::internal)?;
+            sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state,test_run_id) VALUES($1,$2,$3,$4,$5,$6,$7,'pending',$8)")
+            .bind(id).bind(input.request_id).bind(actor).bind(&hash).bind(&source).bind(&setting).bind(&resolved_content).bind(self.test_run.as_deref()).execute(&mut *tx).await.map_err(AppError::internal)?;
         } else {
             sqlx::query("UPDATE lexicon.audio_assets SET created_at=now() WHERE id=$1")
                 .bind(id)
@@ -708,9 +729,20 @@ impl GeneratedAudioService {
         request: Uuid,
         hash: &[u8],
     ) -> Result<Option<AudioAsset>, AppError> {
-        let row = sqlx::query("SELECT a.*,g.state,g.input_hash FROM lexicon.audio_generations g JOIN lexicon.audio_assets a ON a.id=g.asset_id WHERE g.created_by_admin_id=$1 AND g.request_id=$2 AND a.reclamation_started_at IS NULL")
+        let row = sqlx::query("SELECT a.*,g.state,g.input_hash,g.test_run_id FROM lexicon.audio_generations g JOIN lexicon.audio_assets a ON a.id=g.asset_id WHERE g.created_by_admin_id=$1 AND g.request_id=$2")
             .bind(actor).bind(request).fetch_optional(&self.pool).await.map_err(AppError::internal)?;
         let Some(row) = row else { return Ok(None) };
+        let run: Option<&str> = row.get("test_run_id");
+        let key: &str = row.get("object_key");
+        let object_run = crate::platform::storage::test_key_parts(key).map(|(run, _, _)| run);
+        if run != self.test_run.as_deref()
+            || run != object_run
+            || row
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("reclamation_started_at")
+                .is_some()
+        {
+            return Err(crate::test_resources::scope_conflict());
+        }
         if row.get::<Vec<u8>, _>("input_hash") != hash {
             return Err(AppError::conflict(
                 ErrorCode::IdempotencyConflict,
@@ -803,7 +835,7 @@ pub async fn generate(
             ));
         }
     }
-    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    let (state, run) = crate::test_resources::scoped_write(&state, &headers, auth.subject)?;
     let service = GeneratedAudioService::new(
         state.pool.clone(),
         state.speech_provider.clone(),
@@ -811,7 +843,8 @@ pub async fn generate(
             .object_storage
             .get(&StorageSpace::parse("audio").expect("constant space"))
             .ok(),
-    );
+    )
+    .with_test_run(run);
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         crate::lexicon::voice_versions::MODELS_HEADER,

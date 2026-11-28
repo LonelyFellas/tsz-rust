@@ -246,6 +246,17 @@ impl OssAdapter {
         let operator = config
             .operator()
             .map_err(|error| map_opendal_error(&space, StorageOperation::Configure, None, error))?;
+        Ok(Self::object_store_using_operator(
+            space, policy, config, operator,
+        ))
+    }
+
+    pub(crate) fn object_store_using_operator(
+        space: StorageSpace,
+        policy: StoragePolicy,
+        config: OssAdapterConfig,
+        operator: Operator,
+    ) -> Arc<dyn ObjectStore> {
         let presign_write_endpoint = format!(
             "https://{}.{}",
             config.bucket,
@@ -269,7 +280,7 @@ impl OssAdapter {
             root: config.root,
             presign_write_signer,
         });
-        Ok(Arc::new(StorageService::new(space, policy, backend)))
+        Arc::new(StorageService::new(space, policy, backend))
     }
 
     fn map_error(

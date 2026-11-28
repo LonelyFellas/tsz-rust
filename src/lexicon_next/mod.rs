@@ -308,7 +308,7 @@ pub async fn create(
     headers: axum::http::HeaderMap,
     ApiJson(input): ApiJson<CreateNextEntry>,
 ) -> Result<(StatusCode, Json<NextEntry>), AppError> {
-    let (_, test_run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    let (_, test_run) = crate::test_resources::scoped_write(&state, &headers, auth.subject)?;
     permissions::load(&state, &auth)
         .await?
         .require("words.create")?;
@@ -362,7 +362,7 @@ pub async fn read(
     }
     Ok(Json(entry_for_client(entry, &headers)))
 }
-#[utoipa::path(put, path="/api/v1/admin/lexicon-next/entries/{id}", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-component-usages"=Option<String>,Header,description="v1 includes phrase component word links by sense."),("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save."), ("id"=Uuid, Path)), request_body=SaveNextDraft, responses((status=200, body=NextEntry), (status=401), (status=403), (status=404), (status=409, description="Draft conflict, including stable_node_id_changed and entry_archived. For revision_conflict, field expected_revision identifies a stale entry revision, and meta.code speech_recommendation_changed means voice recommendations must be resolved and audio regenerated."), (status=422)))]
+#[utoipa::path(put, path="/api/v1/admin/lexicon-next/entries/{id}", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("X-TSZ-Test-Run"=Option<String>, Header, description="专用测试管理员的独占批次"),("x-tsz-next-component-usages"=Option<String>,Header,description="v1 includes phrase component word links by sense."),("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("x-tsz-next-creation-snapshot"=Option<String>,Header,description="v1 negotiates the immutable create-step detection snapshot"),("x-tsz-next-dialect-pairs"=Option<String>,Header,description="v1: reciprocal sense pairs and atomic dialect_changes"),("x-tsz-next-relations"=Option<String>, Header, description="v1 negotiates V1 relation editing; omission hides and preserves relations on existing senses."), ("x-tsz-next-sentence-drafts"=Option<String>, Header, description="v1 negotiates inline sentence drafts: optional sentence_resources and atomic sentence_changes saved with the complete word draft. Requires sentences/details v1."),("x-tsz-next-definitions"=Option<String>, Header, description="v1 negotiates definition_details: per-definition level, explicit unbound grammar, English rich content and audio. Omission returns legacy fields and preserves hidden metadata by stable ID on save."), ("id"=Uuid, Path)), request_body=SaveNextDraft, responses((status=200, body=NextEntry), (status=401), (status=403), (status=404), (status=409, description="Draft conflict, including stable_node_id_changed and entry_archived. For revision_conflict, field expected_revision identifies a stale entry revision, and meta.code speech_recommendation_changed means voice recommendations must be resolved and audio regenerated."), (status=422)))]
 pub async fn save(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -459,12 +459,14 @@ pub async fn save(
     permissions::load(&state, &auth)
         .await?
         .require("words.edit")?;
+    let (_, run) = crate::test_resources::scoped_write(&state, &headers, auth.subject)?;
     Ok(Json(entry_for_client(
         repository::save(
             &state.pool,
             &auth,
             id,
             input,
+            run.as_deref(),
             repository::SaveCapabilities {
                 sentence_drafts: supports_sentence_drafts(&headers),
                 pairs: supports_pairs(&headers),

@@ -115,6 +115,10 @@ pub(super) async fn prepare(
             if target == entry {
                 return Err(invalid("拓展词不能关联当前词条自身"));
             }
+            if let Some(target_run) = crate::test_resources::entry_run(conn, target).await? {
+                let run = crate::test_resources::entry_run(conn, entry).await?;
+                crate::test_resources::require_same_run(run.as_deref(), Some(&target_run))?;
+            }
             let valid: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM lexicon_next.entries e
                  JOIN lexicon_next.senses s ON s.id=$2

@@ -59,6 +59,7 @@ pub(super) async fn save_changes(
     entry: &NextEntry,
     draft: &NextDraft,
     changes: Vec<NextSentenceDraftChange>,
+    run: Option<&str>,
 ) -> Result<(), AppError> {
     if changes.is_empty() {
         return Ok(());
@@ -105,6 +106,8 @@ pub(super) async fn save_changes(
         let mut document;
         if let Some((owner, language, revision, value)) = existing {
             access.require_owned_action("sentences.edit", owner)?;
+            let existing_run = crate::test_resources::sentence_run(conn, id).await?;
+            crate::test_resources::require_same_run(run, existing_run.as_deref())?;
             if language != entry.target_language || expected != Some(revision) {
                 return Err(AppError::conflict(
                     ErrorCode::RevisionConflict,
@@ -144,6 +147,9 @@ pub(super) async fn save_changes(
                     Some("sentence_changes"),
                     "例句身份已使用，草稿已保留，请重新加载比较",
                 ));
+            }
+            if let Some(run) = run {
+                crate::test_resources::register_sentence(conn, run, id).await?;
             }
         }
         let changed_locales: Vec<_> = changes.iter().map(|c| c.target_locale.clone()).collect();

@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use axum::http::HeaderMap;
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -14,7 +14,126 @@ use crate::{
     state::AppState,
 };
 
+#[cfg(test)]
+mod lifecycle_tests;
+mod object_versions;
+use object_versions::{object_keys_with_versions, purge_object_versions};
+
 pub const HEADER: &str = "x-tsz-test-run";
+
+pub(crate) fn scope_conflict() -> AppError {
+    AppError::conflict(
+        ErrorCode::RevisionConflict,
+        None,
+        "测试资源批次不匹配或已封存",
+    )
+}
+
+pub(crate) fn require_same_run(
+    expected: Option<&str>,
+    actual: Option<&str>,
+) -> Result<(), AppError> {
+    if expected != actual {
+        return Err(scope_conflict());
+    }
+    Ok(())
+}
+
+/// A shared row lock fences generation and other writes until their last side effect.
+pub(crate) async fn lock_run(
+    conn: &mut PgConnection,
+    actor: Uuid,
+    run: &str,
+) -> Result<(), AppError> {
+    sqlx::query("INSERT INTO lexicon_next.test_resource_runs(run_id,actor_id) VALUES ($1,$2) ON CONFLICT DO NOTHING")
+        .bind(run).bind(actor).execute(&mut *conn).await.map_err(AppError::internal)?;
+    let (owner, purge): (Uuid, Option<Uuid>) = sqlx::query_as(
+        "SELECT actor_id,purge_request_id FROM lexicon_next.test_resource_runs WHERE run_id=$1 FOR SHARE",
+    )
+    .bind(run)
+    .fetch_one(conn)
+    .await
+    .map_err(AppError::internal)?;
+    if owner != actor || purge.is_some() {
+        return Err(scope_conflict());
+    }
+    Ok(())
+}
+
+pub(crate) async fn start_run_write(
+    pool: &PgPool,
+    actor: Uuid,
+    run: Option<&str>,
+) -> Result<Option<Transaction<'static, Postgres>>, AppError> {
+    let Some(run) = run else { return Ok(None) };
+    // The registration must be visible to writes performed on another connection.
+    sqlx::query("INSERT INTO lexicon_next.test_resource_runs(run_id,actor_id) VALUES ($1,$2) ON CONFLICT DO NOTHING")
+        .bind(run).bind(actor).execute(pool).await.map_err(AppError::internal)?;
+    let mut tx = pool.begin().await.map_err(AppError::internal)?;
+    lock_run(&mut tx, actor, run).await?;
+    Ok(Some(tx))
+}
+
+pub(crate) async fn entry_run(
+    conn: &mut PgConnection,
+    id: Uuid,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar("SELECT run_id FROM lexicon_next.test_resource_entries WHERE entry_id=$1")
+        .bind(id)
+        .fetch_optional(conn)
+        .await
+        .map_err(AppError::internal)
+}
+
+pub(crate) async fn sentence_run(
+    conn: &mut PgConnection,
+    id: Uuid,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar(
+        "SELECT run_id FROM lexicon_next.test_resource_sentences WHERE sentence_id=$1",
+    )
+    .bind(id)
+    .fetch_optional(conn)
+    .await
+    .map_err(AppError::internal)
+}
+
+pub(crate) async fn register_sentence(
+    conn: &mut PgConnection,
+    run: &str,
+    sentence: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO lexicon_next.test_resource_sentences(sentence_id,run_id) VALUES ($1,$2)",
+    )
+    .bind(sentence)
+    .bind(run)
+    .execute(conn)
+    .await
+    .map_err(AppError::internal)?;
+    Ok(())
+}
+
+pub(crate) fn scoped_write(
+    state: &AppState,
+    headers: &HeaderMap,
+    actor: Uuid,
+) -> Result<(AppState, Option<String>), AppError> {
+    let (scoped, run) = scoped_state(state, headers, actor, true)?;
+    if run.is_none()
+        && state.test_resource_purge_enabled
+        && state
+            .test_resources
+            .as_ref()
+            .is_some_and(|config| config.admins.contains(&actor))
+    {
+        return Err(AppError::forbidden(
+            ErrorCode::Forbidden,
+            "专用测试管理员必须提供测试批次",
+        ));
+    }
+    Ok((scoped, run))
+}
 
 pub async fn register_entry(
     conn: &mut PgConnection,
@@ -40,6 +159,8 @@ pub struct TestResourcesConfig {
     spaces: ObjectStorageConfig,
     admins: Vec<Uuid>,
     users: Vec<Uuid>,
+    #[cfg(test)]
+    cleanup_operator_for_test: Option<opendal::Operator>,
 }
 
 impl TestResourcesConfig {
@@ -110,7 +231,17 @@ impl TestResourcesConfig {
             spaces: spaces.clone(),
             admins,
             users,
+            #[cfg(test)]
+            cleanup_operator_for_test: None,
         }))
+    }
+
+    fn cleanup_operator(&self) -> opendal::Result<opendal::Operator> {
+        #[cfg(test)]
+        if let Some(operator) = &self.cleanup_operator_for_test {
+            return Ok(operator.clone());
+        }
+        self.adapter.operator()
     }
 
     pub(crate) async fn purge_audio<'a>(
@@ -123,7 +254,7 @@ impl TestResourcesConfig {
         if self.spaces.policy("audio").is_none() {
             return Err(unavailable());
         }
-        let operator = self.adapter.operator().map_err(|_| unavailable())?;
+        let operator = self.cleanup_operator().map_err(|_| unavailable())?;
         for key in keys {
             let Some((owner, "audio", inner)) = test_key_parts(key.as_str()) else {
                 return Err(unavailable());
@@ -143,42 +274,98 @@ impl TestResourcesConfig {
         Ok(())
     }
 
+    pub(crate) async fn purge_run_objects<'a>(
+        &self,
+        run: &str,
+        keys: impl Iterator<Item = &'a ObjectKey>,
+    ) -> Result<(), AppError> {
+        use std::collections::BTreeSet;
+        let unavailable =
+            || AppError::unavailable(ErrorCode::ServiceUnavailable, "test object cleanup failed");
+        let operator = self.cleanup_operator().map_err(|_| unavailable())?;
+        let mut exact = BTreeSet::new();
+        for key in keys {
+            let Some((owner, space @ ("audio" | "speech"), inner)) = test_key_parts(key.as_str())
+            else {
+                return Err(scope_conflict());
+            };
+            if owner != run || (space == "speech" && !inner.starts_with("previews/")) {
+                return Err(scope_conflict());
+            }
+            exact.insert(format!("{run}/{space}/{inner}"));
+        }
+
+        let prefixes = [
+            format!("{run}/audio/assets/generated/"),
+            format!("{run}/speech/previews/"),
+        ];
+        // A missing DB registration is not permission to delete an object.
+        for prefix in &prefixes {
+            let listed = tokio::time::timeout(
+                Duration::from_secs(30),
+                object_keys_with_versions(&operator, prefix),
+            )
+            .await
+            .map_err(|_| unavailable())?
+            .map_err(|_| unavailable())?;
+            if listed.iter().any(|key| !exact.contains(key)) {
+                return Err(AppError::conflict(
+                    ErrorCode::RevisionConflict,
+                    None,
+                    "测试存储存在未登记对象",
+                ));
+            }
+        }
+        for key in exact {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                purge_object_versions(&operator, &key),
+            )
+            .await
+            .map_err(|_| unavailable())?
+            .map_err(|_| unavailable())?;
+        }
+        for prefix in &prefixes {
+            let listed = tokio::time::timeout(
+                Duration::from_secs(30),
+                object_keys_with_versions(&operator, prefix),
+            )
+            .await
+            .map_err(|_| unavailable())?
+            .map_err(|_| unavailable())?;
+            if !listed.is_empty() {
+                return Err(unavailable());
+            }
+        }
+        Ok(())
+    }
+
     pub fn registry(
         &self,
         run: Option<&str>,
     ) -> Result<StorageRegistry, crate::platform::storage::StorageError> {
+        #[cfg(test)]
+        if let Some(operator) = &self.cleanup_operator_for_test {
+            use crate::platform::storage::{ObjectStore, OssAdapter, TestRoutedStore};
+            return StorageRegistry::from_stores(["audio", "speech"].into_iter().filter_map(
+                |name| {
+                    let policy = self.spaces.policy(name)?.clone();
+                    let store = OssAdapter::object_store_using_operator(
+                        name.parse().unwrap(),
+                        policy,
+                        self.adapter.clone(),
+                        operator.clone(),
+                    );
+                    Some(std::sync::Arc::new(TestRoutedStore {
+                        normal: store.clone(),
+                        temporary: store,
+                        run: run.map(str::to_owned),
+                    }) as std::sync::Arc<dyn ObjectStore>)
+                },
+            ));
+        }
         self.spaces.build_test_routed_registry(&self.adapter, run)
     }
-}
-
-async fn purge_object_versions(operator: &opendal::Operator, key: &str) -> opendal::Result<()> {
-    // OSS lists by prefix. A longer object key sharing that prefix belongs to a different asset.
-    let list = || {
-        operator
-            .list_with(key)
-            .versions(true)
-            .deleted(true)
-            .recursive(true)
-    };
-    for entry in list().await? {
-        if entry.path() == key {
-            let version = entry
-                .metadata()
-                .version()
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    opendal::Error::new(opendal::ErrorKind::Unexpected, "missing object version")
-                })?;
-            operator.delete_with(key).version(version).await?;
-        }
-    }
-    if list().await?.iter().any(|entry| entry.path() == key) {
-        return Err(opendal::Error::new(
-            opendal::ErrorKind::Unexpected,
-            "object versions remain",
-        ));
-    }
-    Ok(())
 }
 
 /// Header validation occurs after the handler's usual realm authentication; it never grants business permissions.

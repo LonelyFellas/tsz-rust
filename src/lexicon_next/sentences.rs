@@ -5,6 +5,7 @@ use crate::{
     api::{ApiJson, ApiPath, ApiQuery},
     error::{AppError, ErrorCode},
     state::AppState,
+    test_resources,
 };
 use axum::{
     Json,
@@ -189,6 +190,7 @@ pub(super) async fn hydrate(
 
 async fn validate_target(
     conn: &mut PgConnection,
+    sentence_id: Uuid,
     target: &NextSentenceTarget,
 ) -> Result<(), AppError> {
     let (source, entry, publication, pos, sense, base_form, form, variant) = match target {
@@ -231,6 +233,13 @@ async fn validate_target(
         source,
         Some(crate::lexicon::dto::AssociationTargetSource::LexiconNext)
     );
+    if next
+        && let Some(id) = entry
+        && let Some(target_run) = test_resources::entry_run(conn, id).await?
+    {
+        let source_run = test_resources::sentence_run(conn, sentence_id).await?;
+        test_resources::require_same_run(source_run.as_deref(), Some(&target_run))?;
+    }
     let valid = if let (Some(entry), Some(publication)) = (entry, publication.filter(|_| !next)) {
         sqlx::query_scalar(
             "SELECT EXISTS(
@@ -583,7 +592,7 @@ pub(super) async fn prepare(
                         gloss.as_deref(),
                     ),
                 };
-                validate_target(conn, &association.target).await?;
+                validate_target(conn, id, &association.target).await?;
                 sqlx::query(
                     "INSERT INTO lexicon_next.sentence_associations (id,sentence_id,source_variant_id,source_dialect,source_segments,source_start,source_end,source_surface,state,target_kind,target_source,target_word_id,target_publication_id,target_pos_id,target_base_form_id,target_sense_id,target_form_id,target_variant_id,target_dialect,pending_headword,pending_gloss) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
                 )
@@ -708,7 +717,7 @@ pub async fn read(
         .into_response())
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon-next/sentences",tag="admin-lexicon-next",security(("bearer_auth"=[])),request_body=CreateNextSentence,params(("x-tsz-next-sentence-details"=Option<String>, Header, description="v1 negotiates sentence_details: freedom, taxonomy and manual source metadata. Omission hides metadata; legacy writes to enhanced content are refused.")),responses((status=201,body=NextSentence),(status=401),(status=403),(status=409),(status=422)))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon-next/sentences",tag="admin-lexicon-next",security(("bearer_auth"=[])),request_body=CreateNextSentence,params(("X-TSZ-Test-Run"=Option<String>, Header, description="专用测试管理员的独占批次"),("x-tsz-next-sentence-details"=Option<String>, Header, description="v1 negotiates sentence_details: freedom, taxonomy and manual source metadata. Omission hides metadata; legacy writes to enhanced content are refused.")),responses((status=201,body=NextSentence),(status=401),(status=403),(status=409),(status=422)))]
 pub async fn create(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -734,8 +743,12 @@ pub async fn create(
         variants: vec![input.variant],
     };
     validate(input.id, &draft)?;
+    let (_, run) = test_resources::scoped_write(&state, &headers, auth.subject)?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     permissions::lock_session(&mut tx, &auth, "sentences.create").await?;
+    if let Some(run) = run.as_deref() {
+        test_resources::lock_run(&mut tx, auth.subject, run).await?;
+    }
     let foreign:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.shared_sentences WHERE id=$1 UNION ALL SELECT 1 FROM lexicon_next.entries WHERE id=$1)").bind(input.id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     if foreign {
         return Err(AppError::conflict(
@@ -753,6 +766,8 @@ pub async fn create(
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+        let registered = test_resources::sentence_run(&mut tx, input.id).await?;
+        test_resources::require_same_run(run.as_deref(), registered.as_deref())?;
         if existing != (auth.subject, digest) {
             return Err(AppError::conflict(
                 ErrorCode::IdempotencyConflict,
@@ -761,6 +776,9 @@ pub async fn create(
             ));
         }
     } else {
+        if let Some(run) = run.as_deref() {
+            test_resources::register_sentence(&mut tx, run, input.id).await?;
+        }
         prepare(
             &mut tx,
             auth.subject,
@@ -785,7 +803,7 @@ pub async fn create(
         .into_response())
 }
 
-#[utoipa::path(put,path="/api/v1/admin/lexicon-next/sentences/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("x-tsz-next-sentence-details"=Option<String>, Header, description="v1 negotiates sentence_details: freedom, taxonomy and manual source metadata. Omission hides metadata; legacy writes to enhanced content are refused.")),request_body=SaveNextSentence,responses((status=200,body=NextSentence),(status=401),(status=403),(status=404),(status=409),(status=422)))]
+#[utoipa::path(put,path="/api/v1/admin/lexicon-next/sentences/{id}",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(("X-TSZ-Test-Run"=Option<String>, Header, description="专用测试管理员的独占批次"),("id"=Uuid,Path),("x-tsz-next-sentence-details"=Option<String>, Header, description="v1 negotiates sentence_details: freedom, taxonomy and manual source metadata. Omission hides metadata; legacy writes to enhanced content are refused.")),request_body=SaveNextSentence,responses((status=200,body=NextSentence),(status=401),(status=403),(status=404),(status=409),(status=422)))]
 pub async fn save(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -799,8 +817,12 @@ pub async fn save(
         return Err(language::invalid());
     }
     scoped_variant(&input.target_locale, &input.medium_locale, &input.variant)?;
+    let (_, run) = test_resources::scoped_write(&state, &headers, auth.subject)?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     permissions::lock_session(&mut tx, &auth, "sentences.edit").await?;
+    if let Some(run) = run.as_deref() {
+        test_resources::lock_run(&mut tx, auth.subject, run).await?;
+    }
     let existing: Option<(Uuid, i64, serde_json::Value)> = sqlx::query_as(
         "SELECT owner_id,revision,document FROM lexicon_next.sentences WHERE id=$1 FOR UPDATE",
     )
@@ -812,6 +834,8 @@ pub async fn save(
     permissions::lock(&mut tx, auth.subject)
         .await?
         .require_owned_action("sentences.edit", owner)?;
+    let registered = test_resources::sentence_run(&mut tx, id).await?;
+    test_resources::require_same_run(run.as_deref(), registered.as_deref())?;
     if revision != input.expected_revision {
         return Err(AppError::conflict(
             ErrorCode::RevisionConflict,
@@ -1016,9 +1040,15 @@ pub(super) async fn persist_references(
             .require("sentences.access")?;
     }
     let conn = &mut **tx;
-    let existing:Vec<(Uuid,String)>=sqlx::query_as("SELECT id,target_language FROM lexicon_next.sentences WHERE id=ANY($1) ORDER BY id FOR SHARE").bind(&ids).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
-    if existing.len() != ids.len() || existing.iter().any(|(_, value)| value != language) {
+    let existing:Vec<(Uuid,String,Option<String>)>=sqlx::query_as("SELECT s.id,s.target_language,t.run_id FROM lexicon_next.sentences s LEFT JOIN lexicon_next.test_resource_sentences t ON t.sentence_id=s.id WHERE s.id=ANY($1) ORDER BY s.id FOR SHARE OF s").bind(&ids).fetch_all(&mut *conn).await.map_err(AppError::internal)?;
+    if existing.len() != ids.len() || existing.iter().any(|(_, value, _)| value != language) {
         return Err(language::invalid());
+    }
+    if !existing.is_empty() {
+        let run = test_resources::entry_run(conn, entry).await?;
+        for (_, _, sentence_run) in &existing {
+            test_resources::require_same_run(run.as_deref(), sentence_run.as_deref())?;
+        }
     }
     sqlx::query("DELETE FROM lexicon_next.sentence_references WHERE entry_id=$1")
         .bind(entry)

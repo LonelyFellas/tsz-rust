@@ -319,6 +319,10 @@ pub(super) async fn apply(
             if id == entry.id {
                 return Err(invalid("请选择另一个词条的词义"));
             }
+            if let Some(target_run) = crate::test_resources::entry_run(conn, id).await? {
+                let run = crate::test_resources::entry_run(conn, entry.id).await?;
+                crate::test_resources::require_same_run(run.as_deref(), Some(&target_run))?;
+            }
             if keep {
                 let peer = load_peer(
                     conn,

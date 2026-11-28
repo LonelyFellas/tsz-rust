@@ -577,6 +577,15 @@ async fn finish(
     tx.commit().await.map_err(AppError::internal)
 }
 
+fn scoped_service(
+    pool: PgPool,
+    provider: Option<Arc<dyn SpeechProvider>>,
+    storage: Option<Arc<dyn ObjectStore>>,
+    test_run: Option<&str>,
+) -> GeneratedAudioService {
+    GeneratedAudioService::new(pool, provider, storage).with_test_run(test_run.map(str::to_owned))
+}
+
 pub async fn sweep(
     pool: &PgPool,
     provider: Option<Arc<dyn SpeechProvider>>,
@@ -585,7 +594,7 @@ pub async fn sweep(
     sweep_in(pool, provider, storage, None).await
 }
 
-async fn sweep_in(
+pub(crate) async fn sweep_in(
     pool: &PgPool,
     provider: Option<Arc<dyn SpeechProvider>>,
     storage: Option<Arc<dyn ObjectStore>>,
@@ -618,7 +627,12 @@ async fn sweep_in(
         };
         let result = match selected_storage {
             Ok(storage) => {
-                let service = GeneratedAudioService::new(pool.clone(), provider.clone(), storage);
+                let service = scoped_service(
+                    pool.clone(),
+                    provider.clone(),
+                    storage,
+                    claim.test_run.as_deref(),
+                );
                 run(pool, &service, &claim).await
             }
             Err(error) => Err(error),
@@ -654,4 +668,19 @@ pub fn run_worker(state: crate::state::AppState) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn claim_test_run_scopes_generated_service() {
+        let pool = PgPool::connect_lazy("postgres://unused").unwrap();
+        assert_eq!(
+            scoped_service(pool.clone(), None, None, Some("batch")).test_run(),
+            Some("batch")
+        );
+        assert_eq!(scoped_service(pool, None, None, None).test_run(), None);
+    }
 }

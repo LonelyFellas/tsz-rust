@@ -127,7 +127,7 @@ pub async fn create_preview(
             ));
         }
     }
-    let (state, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    let (state, run) = crate::test_resources::scoped_write(&state, &headers, auth.subject)?;
     let response = service(&state)
         .with_test_run(run)
         .create_preview(auth.subject, request)
@@ -162,7 +162,7 @@ pub async fn render_ssml(
     }))
 }
 
-#[utoipa::path(post,path="/api/v1/admin/speech/previews/ssml",tag="admin-speech",security(("bearer_auth"=[])),request_body=super::dto::ManualPreviewRequest,responses((status=200,body=PreviewResponse),(status=400),(status=403),(status=503)))]
+#[utoipa::path(post,path="/api/v1/admin/speech/previews/ssml",tag="admin-speech",security(("bearer_auth"=[])),request_body=super::dto::ManualPreviewRequest,params(("X-TSZ-Test-Run"=Option<String>, Header, description="专用测试管理员的独占批次")),responses((status=200,body=PreviewResponse),(status=400),(status=403),(status=409),(status=503)))]
 pub async fn manual_preview(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -170,7 +170,7 @@ pub async fn manual_preview(
     ApiJson(input): ApiJson<super::dto::ManualPreviewRequest>,
 ) -> Result<Json<PreviewResponse>, AppError> {
     require_active_admin(&state, &auth).await?;
-    let (state, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    let (state, run) = crate::test_resources::scoped_write(&state, &headers, auth.subject)?;
     Ok(Json(
         service(&state)
             .with_test_run(run)
