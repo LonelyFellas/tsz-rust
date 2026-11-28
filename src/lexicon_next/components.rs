@@ -188,6 +188,12 @@ pub(super) async fn prepare(
             }) {
                 continue;
             }
+            if matches!(row.target_source, AssociationTargetSource::V3) {
+                return Err(AppError::unprocessable(
+                    ErrorCode::InvalidRequestBody,
+                    "成分用词只能关联新版词条",
+                ));
+            }
             if !resolve(tx, previous.id, previous.medium_locale.as_deref(), row).await? {
                 return Err(AppError::unprocessable(
                     ErrorCode::InvalidRequestBody,
@@ -206,8 +212,9 @@ pub(super) async fn publication_issues(
     let mut issues = Vec::new();
     for sense in &mut entry.draft.senses {
         for row in sense.component_usages.iter_mut().flatten() {
-            let available = resolve(tx, entry.id, entry.medium_locale.as_deref(), row).await?;
-            let message = if !available {
+            let message = if matches!(row.target_source, AssociationTargetSource::V3) {
+                "成分用词仍有关联到 V1 词条，请清除 V1 关联或改选新版词条"
+            } else if !resolve(tx, entry.id, entry.medium_locale.as_deref(), row).await? {
                 "成分用词关联的词形或词义已不可用，请重新选择"
             } else if matches!(
                 row.usage,
@@ -247,12 +254,6 @@ async fn resolve(
     if *target_word_id == entry_id {
         return Ok(false);
     }
-    if matches!(row.target_source, AssociationTargetSource::V3) {
-        return crate::lexicon::service::v3::prepare_external_phrase_component(tx, &mut row.usage)
-            .await
-            .map_err(crate::lexicon::handler::map_error);
-    }
-
     let pinned = *target_publication_id;
     let target = sqlx::query_as::<_, (Value, Option<Uuid>, Option<Value>)>(
         "SELECT r.document,p.id,p.snapshot->'draft'
