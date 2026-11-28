@@ -95,10 +95,12 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         "/lexicon-next/entries/{id}/publications",
         RoutePolicy::All(&["words.access", "words.publish"]),
     ),
+    // The handler also requires words.create for creation matching. Component
+    // matching is read-only and available to editors without creation rights.
     (
         "POST",
         "/lexicon-next/entry-matches",
-        RoutePolicy::All(&["words.access", "words.create"]),
+        RoutePolicy::All(&["words.access"]),
     ),
     (
         "POST",

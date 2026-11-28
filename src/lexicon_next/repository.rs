@@ -298,6 +298,8 @@ pub async fn save(
     }
     super::definitions::validate(draft)?;
     super::sentences::preserve(draft, &previous.draft, capabilities.sentences)?;
+    super::components::prepare(&mut tx, draft, &previous).await?;
+    let conn = &mut *tx;
     super::relations::prepare(conn, id, draft, &previous, capabilities.relations).await?;
     language::validate(&language, draft)?;
     let taxonomy_refs = super::equivalents::prepare(

@@ -584,11 +584,25 @@ pub async fn command(
             }
         }
     }
+    let entry_ids: Vec<_> = input.items.iter().map(|item| item.entry_id).collect();
+    if matches!(
+        input.action,
+        NextListAction::Archive | NextListAction::Delete
+    ) {
+        super::components::ensure_target_not_referenced(
+            &mut tx,
+            crate::lexicon::dto::AssociationTargetSource::LexiconNext,
+            &entry_ids,
+            &entry_ids,
+            matches!(input.action, NextListAction::Delete),
+        )
+        .await?;
+    }
     if matches!(input.action, NextListAction::Restore) {
         // Check the final batch state so restoring a source and its target is order independent.
-        let restored: Vec<_> = input.items.iter().map(|item| item.entry_id).collect();
+        super::components::ensure_restorable(&mut tx, &entry_ids).await?;
         let unavailable: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon_next.entries e JOIN LATERAL (SELECT snapshot FROM lexicon_next.publications WHERE entry_id=e.id ORDER BY lifecycle_revision DESC LIMIT 1) p ON true CROSS JOIN LATERAL jsonb_array_elements(p.snapshot->'relation_targets') r WHERE e.id=ANY($1) AND e.status='published' AND NOT EXISTS(SELECT 1 FROM lexicon_next.entries target WHERE target.id=(r->>'entry_id')::uuid AND target.status='published'))")
-            .bind(&restored).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+            .bind(&entry_ids).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
         if unavailable {
             return Err(AppError::conflict(
                 ErrorCode::RevisionConflict,
@@ -597,9 +611,7 @@ pub async fn command(
             ));
         }
     }
-    let result = NextListCommandResult {
-        entry_ids: input.items.iter().map(|v| v.entry_id).collect(),
-    };
+    let result = NextListCommandResult { entry_ids };
     sqlx::query("INSERT INTO lexicon_next.list_commands(actor_id,request_id,request,result) VALUES($1,$2,$3,$4)")
         .bind(auth.subject).bind(input.request_id).bind(request).bind(serde_json::to_value(&result).map_err(AppError::internal)?)
         .execute(&mut *tx).await.map_err(AppError::internal)?;

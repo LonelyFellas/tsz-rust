@@ -1,5 +1,5 @@
 use super::*;
-use crate::lexicon::dto::{EntryArchiveImpact, EntryArchiveImpactInput};
+use crate::lexicon::dto::{AssociationTargetSource, EntryArchiveImpact, EntryArchiveImpactInput};
 use crate::wordlists::service::VISIBLE_OWNER;
 use chrono::DateTime;
 
@@ -356,6 +356,14 @@ impl LexiconService {
             batch_members,
         )
         .await?;
+        crate::lexicon_next::components::ensure_target_not_referenced(
+            transaction,
+            AssociationTargetSource::V3,
+            &[entry_id],
+            &[],
+            true,
+        )
+        .await?;
         if LexiconRepository::has_inbound_prebound_relations(transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -698,6 +706,14 @@ impl LexiconService {
                     &mut transaction,
                     current.id,
                     &excluded_sources,
+                )
+                .await?;
+                crate::lexicon_next::components::ensure_target_not_referenced(
+                    &mut transaction,
+                    AssociationTargetSource::V3,
+                    &[current.id],
+                    &[],
+                    false,
                 )
                 .await?;
                 // Shared sentences remain published even when their source word is in this batch.

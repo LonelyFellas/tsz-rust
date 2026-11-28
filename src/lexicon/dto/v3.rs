@@ -1405,7 +1405,7 @@ pub struct GrammarFormLinkV3 {
     pub reading_reference: Option<ReadingReferenceV3>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AssociationTargetSource {
     V3,

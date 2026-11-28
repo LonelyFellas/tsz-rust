@@ -4060,6 +4060,52 @@ pub(super) async fn resolve_component_target_in(
     ComponentTargetWord::from_draft_row(row).map(Some)
 }
 
+/// Resolve a V1 component selected by the independent lexicon editor.
+pub(crate) async fn prepare_external_phrase_component(
+    tx: &mut Transaction<'_, Postgres>,
+    component: &mut PhraseComponentUsageV3,
+) -> Result<bool, LexiconServiceError> {
+    let Some((word_id, publication_id)) = resolved_component_key(component) else {
+        return Ok(false);
+    };
+    // Lifecycle writers use the same target row when checking external references.
+    if publication_id.is_some()
+        && LexiconRepository::component_target_draft_for_share(tx, word_id)
+            .await
+            .map_err(repository_error)?
+            .is_none()
+    {
+        return Ok(false);
+    }
+    let target = resolve_component_target(tx, word_id, publication_id, |candidate| {
+        resolved_component_matches(candidate, component)
+    })
+    .await?;
+    let Some(target) = target else {
+        return Ok(false);
+    };
+    if !resolved_component_matches(&target, component)
+        || phrase_component_target_is_nested(tx, &target).await?
+    {
+        return Ok(false);
+    }
+    if let PhraseComponentUsageV3::Resolved {
+        target_publication_id,
+        target_pos_id,
+        target_sense_id,
+        target_headword,
+        target_gloss,
+        ..
+    } = component
+    {
+        *target_publication_id = target.publication_id();
+        *target_headword = target.label.clone();
+        *target_gloss =
+            component_target_gloss(&target, *target_pos_id, *target_sense_id).unwrap_or_default();
+    }
+    Ok(true)
+}
+
 /// 短语套短语只放一层：目标短语自身的成分不得再指向另一个短语。
 async fn phrase_component_target_is_nested(
     tx: &mut Transaction<'_, Postgres>,

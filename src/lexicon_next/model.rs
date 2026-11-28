@@ -128,6 +128,14 @@ pub struct NextEquivalentScore {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NextSense {
+    /// Omission preserves saved links. An empty array clears them.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_component_usages"
+    )]
+    #[schema(nullable = false, max_items = 100)]
+    pub component_usages: Option<Vec<NextPhraseComponentUsage>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -186,6 +194,13 @@ pub struct NextSense {
     pub part_of_speech: Option<String>,
     pub definitions: Vec<NextDefinition>,
     pub equivalents: Vec<NextEquivalent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextPhraseComponentUsage {
+    pub target_source: crate::lexicon::dto::AssociationTargetSource,
+    pub usage: crate::lexicon::dto::PhraseComponentUsageV3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -363,6 +378,9 @@ pub struct NextLanguageCapability {
 #[serde(deny_unknown_fields)]
 pub struct NextCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sense_component_usages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub form_question_eligibility: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -485,6 +503,9 @@ pub struct NextEntryList {
 #[serde(deny_unknown_fields)]
 pub struct NextSenseView {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_items = 100)]
+    pub component_usages: Option<Vec<NextPhraseComponentUsage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub relations: Option<Vec<crate::lexicon::dto::WordRelationWritableV3>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -538,6 +559,12 @@ pub struct NextEntryView {
     pub forms: Vec<NextForm>,
     pub missing_forms: bool,
     pub senses: Vec<NextSenseView>,
+}
+
+fn non_null_component_usages<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<NextPhraseComponentUsage>>, D::Error> {
+    Vec::<NextPhraseComponentUsage>::deserialize(deserializer).map(Some)
 }
 
 fn non_null_form_editor<'de, D: serde::Deserializer<'de>>(
