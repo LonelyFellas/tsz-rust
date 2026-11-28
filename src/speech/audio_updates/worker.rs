@@ -594,7 +594,7 @@ pub async fn sweep(
     sweep_in(pool, provider, storage, None).await
 }
 
-async fn sweep_in(
+pub(crate) async fn sweep_in(
     pool: &PgPool,
     provider: Option<Arc<dyn SpeechProvider>>,
     storage: Option<Arc<dyn ObjectStore>>,

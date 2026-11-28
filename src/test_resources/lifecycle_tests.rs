@@ -18,7 +18,18 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use super::{HEADER, TestResourcesConfig};
-use crate::{platform::storage::ObjectStorageConfig, state::AppState};
+use crate::{
+    platform::storage::ObjectStorageConfig,
+    speech::{
+        audio_updates,
+        dubbing::replace_dependencies,
+        library::{
+            VoiceLibraryRepository,
+            dto::{DubbingGroup, SaveDubbingGroupRequest},
+        },
+    },
+    state::AppState,
+};
 
 const RUN: &str = "lifecycle-fixture";
 const OTHER_RUN: &str = "lifecycle-neighbor";
@@ -118,6 +129,7 @@ impl<'a> Client<'a> {
             .header("x-tsz-next-sentences", "v1")
             .header("x-tsz-next-sentence-details", "v1")
             .header("x-tsz-next-sentence-drafts", "v1")
+            .header("x-tsz-next-dialect-pairs", "v1")
             .header("x-tsz-voice-versions", "v6")
             .header("x-tsz-voice-locales", "v1")
             .header("x-tsz-voice-models", "v1");
@@ -847,4 +859,176 @@ async fn purge_keeps_registrations_on_oss_failure_and_retries_original_empty_sel
     let bucket = bucket.lock().unwrap();
     assert_eq!(bucket.versions, outside);
     assert_eq!(bucket.deletes.len(), deletes);
+}
+
+fn dubbing_group(id: Uuid, version: Uuid) -> DubbingGroup {
+    serde_json::from_value(json!({"id":id,"name":"examples","areas":["example"],"revision":0,"is_global":false,
+        "uk":[{"id":version,"name":"British","voice_alias":"sonia","selected":true,"parameters":{"rate_percent":-12,"pitch_semitones":0,"style":null}}],
+        "us":[{"id":Uuid::from_u128(version.as_u128()+1),"name":"American","voice_alias":"jenny","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}]}))
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn dialect_pairing_rejects_a_target_from_another_batch(pool: PgPool) {
+    let actor = admin(&pool).await;
+    let (operator, _) = versioned_bucket().await;
+    let state = app(&pool, &[actor], operator);
+    let owner = Client::new(&state, actor, Some(RUN));
+    let other = Client::new(&state, actor, Some(OTHER_RUN));
+    let source = id(&owner
+        .call(
+            Method::POST,
+            "/entries",
+            entry_input("centre"),
+            StatusCode::CREATED,
+        )
+        .await);
+    let target = id(&other
+        .call(
+            Method::POST,
+            "/entries",
+            entry_input("center"),
+            StatusCode::CREATED,
+        )
+        .await);
+    let source_sense = Uuid::now_v7();
+    let target_sense = Uuid::now_v7();
+    let saved_source = owner
+        .call(
+            Method::PUT,
+            &format!("/entries/{source}"),
+            json!({"expected_revision":1,"draft":draft("centre",source_sense,&[])}),
+            StatusCode::OK,
+        )
+        .await;
+    let saved_target = other
+        .call(
+            Method::PUT,
+            &format!("/entries/{target}"),
+            json!({"expected_revision":1,"draft":draft("center",target_sense,&[])}),
+            StatusCode::OK,
+        )
+        .await;
+    let pairing = json!({"expected_revision":saved_source["revision"],
+        "draft":draft("centre",source_sense,&[]),
+        "dialect_changes":[{"sense_id":source_sense,"usage":"en-GB","no_equivalent":false,"note":"",
+            "target":{"entry_id":target,"sense_id":target_sense,"revision":saved_target["revision"]},
+            "previous_target_revision":null}]});
+    owner
+        .call(
+            Method::PUT,
+            &format!("/entries/{source}"),
+            pairing,
+            StatusCode::CONFLICT,
+        )
+        .await;
+    let pairs: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon_next.dialect_pairs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pairs, 0);
+}
+
+#[sqlx::test]
+async fn worker_retry_reuses_scoped_generation_after_content_rollback(pool: PgPool) {
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1,unnest(ARRAY['words.access','words.edit','speech.generate','speech.global_dubbing','sentences.access','sentences.edit']),$1")
+        .bind(actor).execute(&pool).await.unwrap();
+    for (alias, provider, locale) in [
+        ("sonia", "en-GB-SoniaNeural", "en-GB"),
+        ("jenny", "en-US-JennyNeural", "en-US"),
+    ] {
+        sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,$2,'azure',$3,$4,'female','[]','v1')")
+            .bind(Uuid::now_v7()).bind(alias).bind(provider).bind(locale).execute(&pool).await.unwrap();
+    }
+    let (operator, bucket) = versioned_bucket().await;
+    let mut state = app(&pool, &[actor], operator);
+    let provider = Arc::new(Provider(std::sync::atomic::AtomicUsize::new(0)));
+    state.speech_provider = Some(provider.clone());
+    let group = Uuid::now_v7();
+    let version = Uuid::now_v7();
+    let sentence = Uuid::now_v7();
+    let target = Uuid::now_v7();
+    let original = json!({"mode":"distinguish","source_dialect":"uk","uk":{"state":"ready","variant":{"id":target,"origin":"manual","value":{"version":2,"text":"Hello","annotations":[]},"voice_profile":{"voices":[],"dubbing":{"area":"example","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}}},"us":{"state":"missing"}});
+    sqlx::query("INSERT INTO lexicon.shared_sentences(id,content,create_digest,created_by_admin_id) VALUES($1,$2,'fixture',$3)")
+        .bind(sentence).bind(json!({"id":sentence,"level":"A1","en_text":original,"links":[]})).bind(actor).execute(&pool).await.unwrap();
+    replace_dependencies(
+        &mut pool.acquire().await.unwrap(),
+        "sentence",
+        sentence,
+        1,
+        &original,
+    )
+    .await
+    .unwrap();
+    VoiceLibraryRepository::new(pool.clone())
+        .save_group(
+            actor,
+            0,
+            SaveDubbingGroupRequest {
+                group: dubbing_group(group, version),
+                base_revision: 0,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    let update: Uuid =
+        sqlx::query_scalar("SELECT id FROM speech.dubbing_audio_updates WHERE group_id=$1")
+            .bind(group)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE speech.dubbing_audio_updates SET test_run=$2,due_at=now()-interval '1 second' WHERE id=$1")
+        .bind(update).bind(RUN).execute(&pool).await.unwrap();
+    audio_updates::sweep_in(&pool, Some(provider.clone()), None, Some(&state))
+        .await
+        .unwrap();
+    assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let (asset, run, key): (Uuid, Option<String>, String) = sqlx::query_as(
+        "SELECT a.id,g.test_run_id,a.object_key FROM lexicon.audio_generations g JOIN lexicon.audio_assets a ON a.id=g.asset_id WHERE g.created_by_admin_id=$1",
+    ).bind(actor).fetch_one(&pool).await.unwrap();
+    assert_eq!(run.as_deref(), Some(RUN));
+    assert!(
+        key.starts_with(&format!("temporary-tests/{RUN}/audio/assets/generated/")),
+        "{key}"
+    );
+    // Simulate a crash after synthesis but before the sentence draft was committed.
+    sqlx::query("UPDATE lexicon.shared_sentences SET content=$2 WHERE id=$1")
+        .bind(sentence)
+        .bind(json!({"id":sentence,"level":"A1","en_text":original,"links":[]}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state='pending',attempts=1,lease_token=NULL,lease_until=NULL,retry_at=now()-interval '1 second',error_code=NULL WHERE update_id=$1")
+        .bind(update).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE speech.dubbing_audio_updates SET state='running',due_at=now()-interval '1 second' WHERE id=$1")
+        .bind(update).execute(&pool).await.unwrap();
+    audio_updates::sweep_in(&pool, Some(provider.clone()), None, Some(&state))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "ready rendition must be replayed, not synthesized or rejected"
+    );
+    let target_state: (String, Option<String>) = sqlx::query_as(
+        "SELECT state,error_code FROM speech.dubbing_audio_update_targets WHERE update_id=$1",
+    )
+    .bind(update)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(target_state, ("completed".to_owned(), None));
+    let stored: Uuid = sqlx::query_scalar("SELECT (content->'en_text'->'uk'->'variant'->'voice_profile'->'voices'->0->>'audio_asset_id')::uuid FROM lexicon.shared_sentences WHERE id=$1")
+        .bind(sentence).fetch_one(&pool).await.unwrap();
+    assert_eq!(stored, asset);
+    assert!(
+        bucket
+            .lock()
+            .unwrap()
+            .versions
+            .iter()
+            .any(|(key, _, _)| key.ends_with(&format!("{asset}.mp3")))
+    );
 }

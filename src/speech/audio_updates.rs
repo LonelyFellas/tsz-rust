@@ -10,6 +10,8 @@ use crate::{
 };
 
 mod worker;
+#[cfg(test)]
+pub(crate) use worker::sweep_in;
 pub use worker::{run_worker, sweep};
 
 #[derive(Debug, Serialize, ToSchema)]
