@@ -474,24 +474,29 @@ async fn group_completion_preserves_saved_order_and_keeps_unchanged_accent_misma
         .unwrap();
     let repo = VoiceLibraryRepository::new(pool.clone());
     let mut draft = group("selected", &["word"]);
-    draft.uk = [false, true, true, false]
-        .into_iter()
-        .enumerate()
-        .map(|(index, selected)| DubbingRecommendation {
-            id: Uuid::now_v7(),
-            name: index.to_string(),
-            voice_alias: "en-gb-sonianeural".into(),
-            selected,
-            parameters: VoiceParameters {
-                rate_percent: 0,
-                pitch_semitones: 0,
-                volume_percent: None,
-                style: None,
-                style_degree: None,
-                role: None,
-            },
-        })
-        .collect();
+    draft.uk = [
+        ("en-gb-sonianeural", false),
+        ("en-gb-ryanneural", true),
+        ("en-gb-libbyneural", true),
+        ("en-gb-maisieneural", false),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (voice_alias, selected))| DubbingRecommendation {
+        id: Uuid::now_v7(),
+        name: index.to_string(),
+        voice_alias: voice_alias.into(),
+        selected,
+        parameters: VoiceParameters {
+            rate_percent: 0,
+            pitch_semitones: 0,
+            volume_percent: None,
+            style: None,
+            style_degree: None,
+            role: None,
+        },
+    })
+    .collect();
     let mut saved = repo
         .save_group(
             actor,
@@ -1083,8 +1088,63 @@ fn independent_input(name: &str) -> serde_json::Value {
     use serde_json::json;
     let item = |alias, name, selected| json!({"id":Uuid::now_v7(),"name":name,"selected":selected,"voice_alias":alias,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}});
     json!({"base_revision":0,"group":{"id":Uuid::now_v7(),"name":name,"areas":["word"],"is_global":false,
-        "uk":[item("en-gb-sonianeural","UK first",false),item("en-gb-sonianeural","UK second",true)],
+        "uk":[item("en-gb-sonianeural","UK first",false),item("en-gb-ryanneural","UK second",true)],
         "us":[item("en-us-jennyneural","US only",true)]}})
+}
+
+#[sqlx::test]
+async fn same_side_official_voice_must_be_unique_even_if_disabled_or_aliased(pool: PgPool) {
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO speech.voices (id, alias, provider, provider_voice_id, locale, gender, provider_version, accent) SELECT $1, 'legacy-sonia', provider, provider_voice_id, locale, gender, provider_version, accent FROM speech.voices WHERE alias = 'en-gb-sonianeural'")
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo = VoiceLibraryRepository::new(pool);
+    let valid = independent_input("Unique");
+    let mut duplicate = valid.clone();
+    duplicate["group"]["uk"][1]["voice_alias"] = "en-gb-sonianeural".into();
+    assert_eq!(
+        repo.save_group(actor, 0, serde_json::from_value(duplicate).unwrap(), true)
+            .await
+            .unwrap_err()
+            .code(),
+        ErrorCode::InvalidRequestBody
+    );
+
+    repo.save_group(
+        actor,
+        0,
+        serde_json::from_value(valid.clone()).unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let before = serde_json::to_value(repo.groups(actor).await.unwrap()).unwrap();
+    let mut duplicate = valid;
+    duplicate["base_revision"] = 1.into();
+    duplicate["group"]["uk"][1]["voice_alias"] = "legacy-sonia".into();
+    assert_eq!(
+        repo.save_group(actor, 0, serde_json::from_value(duplicate).unwrap(), false)
+            .await
+            .unwrap_err()
+            .code(),
+        ErrorCode::InvalidRequestBody
+    );
+    assert_eq!(
+        serde_json::to_value(repo.groups(actor).await.unwrap()).unwrap(),
+        before
+    );
+
+    let reused = independent_input("Reused in another group");
+    repo.save_group(actor, 0, serde_json::from_value(reused).unwrap(), true)
+        .await
+        .unwrap();
 }
 
 #[sqlx::test]

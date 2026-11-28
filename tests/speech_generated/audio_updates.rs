@@ -753,6 +753,7 @@ async fn delayed_updates_global_fallback_move_and_delete_reparse_current_source(
         let mut values = group(id, version, -27);
         let mut extra = values.uk[0].clone();
         extra.id = Uuid::now_v7();
+        extra.voice_alias = "fallback-gb".into();
         extra.selected = false;
         extra.parameters.rate_percent = 25;
         values.uk.push(extra);
