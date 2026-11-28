@@ -36,7 +36,7 @@ pub struct NextWorkspaceEntry {
     pub kind: String,
     pub headword: String,
     /// Spellings of the first base form in the first group of the first saved part of speech.
-    /// Without a part of speech, this uses the original creation search text.
+    /// Falls back to the original creation search text when no spelling can be displayed.
     /// Returned by the list only with x-tsz-next-name-variants: v1.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]

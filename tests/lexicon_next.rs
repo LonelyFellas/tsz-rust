@@ -2658,6 +2658,7 @@ async fn workspace_names_follow_saved_pos_group_and_member_order(pool: PgPool) {
     let entry = create(&state, actor).await;
     let path = format!("/entries/{}", entry["id"].as_str().unwrap());
     let mut draft = entry["draft"].clone();
+    draft["headword"] = json!("edited draft headword");
     let mut editor = form_editor();
     let mut second_base = form_editor();
     let mut second_group = form_editor();
@@ -2692,7 +2693,7 @@ async fn workspace_names_follow_saved_pos_group_and_member_order(pool: PgPool) {
         .push(verb["pos"][0].take());
 
     let mut names = Vec::new();
-    for revision in 1..=4 {
+    for revision in 1..=5 {
         draft["form_editor"] = editor.clone();
         let (status, saved) = call(
             &state,
@@ -2719,14 +2720,20 @@ async fn workspace_names_follow_saved_pos_group_and_member_order(pool: PgPool) {
                 .unwrap()
                 .swap(0, 1),
             3 => editor["pos"].as_array_mut().unwrap().swap(0, 1),
+            4 => {
+                let variants = &mut editor["contents"][3]["regional_variants"];
+                variants["uk"]["spelling"] = json!("");
+                variants["us"]["spelling"] = json!("");
+            }
             _ => {}
         }
     }
     assert_eq!(
-        names,
+        names[..4],
         ["Panama", "panamanian", "panama", "panamize"]
             .map(|spelling| json!([{"text": spelling, "dialects": ["uk", "us"]}]))
     );
+    assert_eq!(names[4], json!([{"text": "centre", "dialects": []}]));
 }
 
 #[sqlx::test]

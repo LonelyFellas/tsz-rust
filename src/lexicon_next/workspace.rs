@@ -196,7 +196,7 @@ impl WorkspaceNameRow {
             }
             None => Vec::new(),
         };
-        if entry.part_of_speech.is_empty()
+        if variants.is_empty()
             && let Some(text) = self.creation_headword
         {
             variants.push(EntryNameVariantV3 {
