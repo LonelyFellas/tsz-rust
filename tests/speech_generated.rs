@@ -483,10 +483,70 @@ async fn inherited_generation_rejects_stale_recommendations_before_provider_and_
 }
 
 #[sqlx::test]
+async fn dubbing_dependency_lifecycle_cascades_physical_deletes(pool: PgPool) {
+    let actor = actor(&pool).await;
+    let owner = Uuid::now_v7();
+    let entry_target = Uuid::now_v7();
+    let sentence_target = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word','{}',$2,$2)")
+        .bind(owner).bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.shared_sentences(id,content,create_digest,created_by_admin_id) VALUES($1,'{}','dependency owner',$2)")
+        .bind(owner).bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO speech.dubbing_dependencies(owner_kind,owner_id,target_id,target_path,area,content_revision) VALUES('entry',$1,$2,'/form','word',1),('sentence',$1,$3,'/common','example',1)")
+        .bind(owner).bind(entry_target).bind(sentence_target).execute(&pool).await.unwrap();
+
+    let job = Uuid::now_v7();
+    sqlx::query("INSERT INTO speech.dubbing_audio_updates(id,group_id,group_name,group_revision,areas,created_by_admin_id,security_version,state,due_at) VALUES($1,$2,'dependency history',1,ARRAY['word','example'],$3,0,'completed',now())")
+        .bind(job).bind(Uuid::now_v7()).bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO speech.dubbing_audio_update_targets(id,update_id,owner_kind,owner_id,target_id,target_path,state) VALUES($1,$2,'entry',$3,$4,'/form','skipped'),($5,$2,'sentence',$3,$6,'/common','skipped')")
+        .bind(Uuid::now_v7()).bind(job).bind(owner).bind(entry_target).bind(Uuid::now_v7()).bind(sentence_target).execute(&pool).await.unwrap();
+
+    sqlx::query("DELETE FROM lexicon.entries WHERE id=$1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let registrations = || {
+        sqlx::query_scalar::<_, String>(
+            "SELECT owner_kind FROM speech.dubbing_dependencies WHERE owner_id=$1 ORDER BY owner_kind",
+        )
+        .bind(owner)
+    };
+    assert_eq!(
+        registrations().fetch_all(&pool).await.unwrap(),
+        ["sentence"]
+    );
+
+    let missing_entry = sqlx::query("INSERT INTO speech.dubbing_dependencies(owner_kind,owner_id,target_id,target_path,area,content_revision) VALUES('entry',$1,$2,'/form','word',1)")
+        .bind(owner).bind(entry_target).execute(&pool).await.unwrap_err();
+    assert!(
+        missing_entry
+            .as_database_error()
+            .unwrap()
+            .is_foreign_key_violation()
+    );
+
+    sqlx::query("DELETE FROM lexicon.shared_sentences WHERE id=$1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(registrations().fetch_all(&pool).await.unwrap().is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM speech.dubbing_audio_update_targets WHERE update_id=$1 AND state='skipped'")
+            .bind(job).fetch_one(&pool).await.unwrap(),
+        2
+    );
+}
+
+#[sqlx::test]
 async fn inheritance_dependencies_are_removed_transactionally_when_switching_to_local(
     pool: PgPool,
 ) {
+    let actor = actor(&pool).await;
     let owner = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word','{}',$2,$2)")
+        .bind(owner).bind(actor).execute(&pool).await.unwrap();
     let target = Uuid::now_v7();
     let inherited = json!({"id":target,"voice_profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"inherit"},"us":{"mode":"inherit"}}}});
     let local = json!({"id":target,"voice_profile":{"voices":[],"dubbing":{"area":"word","uk":{"mode":"local"},"us":{"mode":"local"}}}});

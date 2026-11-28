@@ -48,8 +48,35 @@ async fn claim(pool: &PgPool) -> Result<Option<Claim>, AppError> {
         .fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
     if let Some(row) = due {
         let id: Uuid = row.get("id");
-        sqlx::query("INSERT INTO speech.dubbing_audio_update_targets(id,update_id,owner_kind,owner_id,target_id,target_path) SELECT gen_random_uuid(),$1,owner_kind,owner_id,target_id,target_path FROM speech.dubbing_dependencies d WHERE area=ANY($2) AND ($3::text IS NULL OR (owner_kind='entry' AND EXISTS(SELECT 1 FROM lexicon.entries e WHERE e.id=d.owner_id AND e.created_by_admin_id=$4)) OR (owner_kind='sentence' AND EXISTS(SELECT 1 FROM lexicon.shared_sentences s WHERE s.id=d.owner_id AND s.created_by_admin_id=$4))) ON CONFLICT DO NOTHING")
-            .bind(id).bind(row.get::<Vec<String>,_>("areas")).bind(row.get::<Option<String>,_>("test_run")).bind(row.get::<Uuid,_>("created_by_admin_id")).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query(
+            r#"
+            INSERT INTO speech.dubbing_audio_update_targets
+                (id, update_id, owner_kind, owner_id, target_id, target_path)
+            SELECT gen_random_uuid(), $1, d.owner_kind, d.owner_id, d.target_id, d.target_path
+            FROM speech.dubbing_dependencies d
+            WHERE d.area=ANY($2)
+              AND (
+                (d.owner_kind='entry' AND EXISTS (
+                    SELECT 1 FROM lexicon.entries e
+                    WHERE e.id=d.owner_id AND e.archived_at IS NULL AND e.content_schema_version=3
+                      AND ($3::text IS NULL OR e.created_by_admin_id=$4)
+                ))
+                OR (d.owner_kind='sentence' AND EXISTS (
+                    SELECT 1 FROM lexicon.shared_sentences s
+                    WHERE s.id=d.owner_id AND s.deleted_at IS NULL
+                      AND ($3::text IS NULL OR s.created_by_admin_id=$4)
+                ))
+              )
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(id)
+        .bind(row.get::<Vec<String>, _>("areas"))
+        .bind(row.get::<Option<String>, _>("test_run"))
+        .bind(row.get::<Uuid, _>("created_by_admin_id"))
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
         sqlx::query("UPDATE speech.dubbing_audio_updates SET state=CASE WHEN EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets WHERE update_id=$1) THEN 'running' ELSE 'completed' END,updated_at=now() WHERE id=$1")
             .bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     }
