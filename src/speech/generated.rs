@@ -27,7 +27,8 @@ use crate::{
     error::{AppError, ErrorCode},
     lexicon::{
         audio_assets::dto::{AudioAsset, AudioAssetGender, AudioAssetLocale},
-        dto::{DraftFormsStepContentV3, VoiceSettingV3, WordFormVariantRefV3},
+        dto::{DraftFormsStepContentV3, VoiceSettingV3},
+        shared_forms::serialized_variants,
     },
     platform::storage::{ObjectContentType, ObjectKey, ObjectStore, PutOptions, StorageSpace},
     state::AppState,
@@ -855,14 +856,13 @@ pub(crate) async fn validate_bindings_with_forms(
 
 fn spelling_variants(
     forms: &DraftFormsStepContentV3,
-) -> impl Iterator<Item = ((Uuid, Uuid, Uuid), WordFormVariantRefV3<'_>)> {
+) -> impl Iterator<Item = ((Uuid, Uuid, Uuid), Value)> {
     forms.pos.iter().flat_map(|pos| {
         pos.forms.iter().flat_map(move |form| {
-            form.regional_variants
-                .variants()
+            serialized_variants(&form.regional_variants)
                 .into_iter()
-                .filter(|variant| variant.spelling_speech.is_some())
-                .map(move |variant| ((pos.pos_id, form.id, variant.id), variant))
+                .filter(|(_, _, variant)| variant.get("spelling_speech").is_some())
+                .map(move |(_, id, variant)| ((pos.pos_id, form.id, id), variant))
         })
     })
 }
@@ -877,9 +877,9 @@ pub(crate) async fn validate_draft_form_bindings(
     let mut retained = HashSet::new();
     if let Some(previous) = previous {
         let before: HashMap<_, _> = spelling_variants(previous).collect();
-        for (key, variant) in spelling_variants(forms) {
+        for (key @ (_, _, variant_id), variant) in spelling_variants(forms) {
             if before.get(&key) == Some(&variant) {
-                retained.insert(variant.id.to_string());
+                retained.insert(variant_id.to_string());
             }
         }
     }

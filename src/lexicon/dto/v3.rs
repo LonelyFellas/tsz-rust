@@ -652,7 +652,6 @@ pub enum WordRegionalVariantsV3 {
     },
 }
 
-#[derive(PartialEq, Eq)]
 pub(crate) struct WordFormVariantRefV3<'a> {
     pub id: Uuid,
     pub dialect: Dialect,

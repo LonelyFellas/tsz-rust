@@ -3023,6 +3023,14 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
         .await
         .unwrap();
     let mut copied = saved["draft"].clone();
+    // Older clients omit empty component usages when saving an unchanged spelling.
+    let binding = copied
+        .pointer_mut("/form_editor/pos/0/forms/0/regional_bindings/uk")
+        .unwrap();
+    assert_eq!(
+        binding.as_object_mut().unwrap().remove("component_usages"),
+        Some(json!([]))
+    );
     copied["form_editor"]["pos"]
         .as_array_mut()
         .unwrap()
