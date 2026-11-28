@@ -551,6 +551,60 @@ async fn empty_audio_requirements_do_not_require_a_storage_space(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn trash_dubbing_dependency_lifecycle_rebuilds_current_dependency_on_restore(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let (status, sentence) = create(&state, actor, source, content(source)).await;
+    assert_eq!(status, StatusCode::OK, "{sentence}");
+    let id: Uuid = sentence["id"].as_str().unwrap().parse().unwrap();
+    let variant: Uuid = sentence["content"]["sentence"]["en_text"]["common"]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let profile = json!({"voices":[],"dubbing":{"area":"example","uk":{"mode":"inherit"},"us":{"mode":"local"}}});
+    let mut tx = pool.begin().await.unwrap();
+    let en_text: Value = sqlx::query_scalar("UPDATE lexicon.shared_sentences SET content=jsonb_set(content,'{en_text,common,voice_profile}',$2) WHERE id=$1 RETURNING content->'en_text'")
+        .bind(id).bind(profile).fetch_one(&mut *tx).await.unwrap();
+    tsz_rust::speech::dubbing::replace_dependencies(&mut tx, "sentence", id, 1, &en_text)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let dependencies = || {
+        sqlx::query_as::<_, (Uuid, String, String, i64, Vec<String>)>(
+            "SELECT target_id,target_path,area,content_revision,accents FROM speech.dubbing_dependencies WHERE owner_kind='sentence' AND owner_id=$1",
+        ).bind(id)
+    };
+    let expected = |revision| {
+        vec![(
+            variant,
+            "/common".into(),
+            "example".into(),
+            revision,
+            vec!["gb".into()],
+        )]
+    };
+    assert_eq!(dependencies().fetch_all(&pool).await.unwrap(), expected(1));
+    for (action, revision, wanted) in [
+        ("trash", 1, vec![]),
+        ("untrash", 2, expected(3)),
+        ("trash", 3, vec![]),
+    ] {
+        let (status, problem) = call(
+            &state,
+            actor,
+            Method::POST,
+            &format!("{ROOT}/{id}/{action}"),
+            Some(json!({"base_revision":revision})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{problem}");
+        assert_eq!(dependencies().fetch_all(&pool).await.unwrap(), wanted);
+    }
+}
+
+#[sqlx::test]
 async fn trash_retains_audio_reference_until_permanent_delete(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let actor = admin(&pool).await;
