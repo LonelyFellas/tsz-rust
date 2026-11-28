@@ -2652,29 +2652,36 @@ async fn workspace_names_use_saved_base_forms_and_deduplicate_shared_spellings(p
 }
 
 #[sqlx::test]
-async fn workspace_names_follow_saved_pos_and_form_group_order(pool: PgPool) {
+async fn workspace_names_follow_saved_pos_group_and_member_order(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let state = AppState::for_test(pool);
     let entry = create(&state, actor).await;
     let path = format!("/entries/{}", entry["id"].as_str().unwrap());
     let mut draft = entry["draft"].clone();
     let mut editor = form_editor();
+    let mut second_base = form_editor();
     let mut second_group = form_editor();
     let mut verb = form_editor();
     for dialect in ["uk", "us"] {
         editor["contents"][0]["regional_variants"][dialect]["spelling"] = json!("Panama");
+        second_base["contents"][0]["regional_variants"][dialect]["spelling"] = json!("panamanian");
         second_group["contents"][0]["regional_variants"][dialect]["spelling"] = json!("panama");
         verb["contents"][0]["regional_variants"][dialect]["spelling"] = json!("panamize");
     }
     verb["pos"][0]["pos"] = json!("verb");
     editor["contents"].as_array_mut().unwrap().extend([
+        second_base["contents"][0].take(),
         second_group["contents"][0].take(),
         verb["contents"][0].take(),
     ]);
-    editor["pos"][0]["forms"]
+    editor["pos"][0]["forms"].as_array_mut().unwrap().extend([
+        second_base["pos"][0]["forms"][0].take(),
+        second_group["pos"][0]["forms"][0].take(),
+    ]);
+    editor["pos"][0]["form_groups"][0]["members"]
         .as_array_mut()
         .unwrap()
-        .push(second_group["pos"][0]["forms"][0].take());
+        .push(second_base["pos"][0]["form_groups"][0]["members"][0].take());
     editor["pos"][0]["form_groups"]
         .as_array_mut()
         .unwrap()
@@ -2685,7 +2692,7 @@ async fn workspace_names_follow_saved_pos_and_form_group_order(pool: PgPool) {
         .push(verb["pos"][0].take());
 
     let mut names = Vec::new();
-    for revision in 1..=3 {
+    for revision in 1..=4 {
         draft["form_editor"] = editor.clone();
         let (status, saved) = call(
             &state,
@@ -2703,17 +2710,21 @@ async fn workspace_names_follow_saved_pos_and_form_group_order(pool: PgPool) {
         assert_eq!(row["revision"], revision + 1);
         names.push(row["name_variants"].clone());
         match revision {
-            1 => editor["pos"][0]["form_groups"]
+            1 => editor["pos"][0]["form_groups"][0]["members"]
                 .as_array_mut()
                 .unwrap()
                 .swap(0, 1),
-            2 => editor["pos"].as_array_mut().unwrap().swap(0, 1),
+            2 => editor["pos"][0]["form_groups"]
+                .as_array_mut()
+                .unwrap()
+                .swap(0, 1),
+            3 => editor["pos"].as_array_mut().unwrap().swap(0, 1),
             _ => {}
         }
     }
     assert_eq!(
         names,
-        ["Panama", "panama", "panamize"]
+        ["Panama", "panamanian", "panama", "panamize"]
             .map(|spelling| json!([{"text": spelling, "dialects": ["uk", "us"]}]))
     );
 }

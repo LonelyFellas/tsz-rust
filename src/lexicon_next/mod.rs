@@ -736,7 +736,7 @@ fn supports_sentences(headers: &axum::http::HeaderMap) -> bool {
 #[cfg(test)]
 mod tests;
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(NextWorkspaceQuery,("x-tsz-next-name-variants"=Option<String>,Header,description="v1 returns name variants from the saved base forms; omission preserves old strict responses."),("x-tsz-next-levels"=Option<String>,Header,description="v1 returns current saved sense levels; omission preserves old strict responses."),("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status; omitted maps published to draft for old strict clients.")),responses((status=200,body=NextWorkspaceList),(status=401),(status=403),(status=422)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon-next/workspace/entries",tag="admin-lexicon-next",security(("bearer_auth"=[])),params(NextWorkspaceQuery,("x-tsz-next-name-variants"=Option<String>,Header,description="v1 returns workspace list display names; omission preserves old strict responses."),("x-tsz-next-levels"=Option<String>,Header,description="v1 returns current saved sense levels; omission preserves old strict responses."),("x-tsz-next-publications"=Option<String>,Header,description="v1 returns published status; omitted maps published to draft for old strict clients.")),responses((status=200,body=NextWorkspaceList),(status=401),(status=403),(status=422)))]
 pub async fn workspace_list(
     State(state): State<AppState>,
     auth: AdminAuth,
