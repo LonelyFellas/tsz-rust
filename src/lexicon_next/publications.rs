@@ -37,6 +37,11 @@ fn decode(
             fields.remove("form_question_eligibility");
         }
     }
+    let mut snapshot: NextPublicationSnapshot =
+        serde_json::from_value(snapshot).map_err(AppError::internal)?;
+    if !super::supports_components(headers) {
+        super::components::strip(&mut snapshot.draft);
+    }
     Ok(NextPublication {
         id: row.get("id"),
         entry_id: row.get("entry_id"),
@@ -44,11 +49,11 @@ fn decode(
         lifecycle_revision: row.get("lifecycle_revision"),
         published_by_admin_id: row.get("published_by_admin_id"),
         published_at: row.get("published_at"),
-        snapshot: serde_json::from_value(snapshot).map_err(AppError::internal)?,
+        snapshot,
     })
 }
 
-#[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}/publication", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("id"=Uuid, Path),("x-tsz-next-dialect-pairs"=Option<String>, Header, description="v1: only reciprocal currently published peers are navigable")), responses((status=200, body=NextPublicationState), (status=401), (status=403), (status=404)))]
+#[utoipa::path(get, path="/api/v1/admin/lexicon-next/entries/{id}/publication", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-component-usages"=Option<String>,Header,description="v1 includes phrase component word links by sense."),("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("id"=Uuid, Path),("x-tsz-next-dialect-pairs"=Option<String>, Header, description="v1: only reciprocal currently published peers are navigable")), responses((status=200, body=NextPublicationState), (status=401), (status=403), (status=404)))]
 pub async fn read(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -145,7 +150,7 @@ async fn prepare(
         return Err(conflict("词条版本已变化，请重新加载并检查发布"));
     }
     // Writers hold the list lock, so the document cannot change between this read and commit.
-    let entry = super::repository::get_on(tx, id).await?;
+    let mut entry = super::repository::get_on(tx, id).await?;
     language::validate(&entry.target_language, &entry.draft)?;
     let mut checked = entry.draft.clone();
     super::equivalents::prepare(tx, &mut checked, &entry.draft, true).await?;
@@ -301,6 +306,7 @@ async fn prepare(
             }
         }
     }
+    issues.extend(super::components::publication_issues(tx, &mut entry).await?);
     let snapshot = NextPublicationSnapshot {
         draft: entry.draft,
         sentence_resources,
@@ -615,7 +621,7 @@ pub async fn preview(
     Ok(Json(prepared.preview))
 }
 
-#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries/{id}/publications", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("id"=Uuid, Path)), request_body=NextPublishInput, responses((status=200, body=NextPublication), (status=401), (status=403), (status=404), (status=409), (status=422)))]
+#[utoipa::path(post, path="/api/v1/admin/lexicon-next/entries/{id}/publications", tag="admin-lexicon-next", security(("bearer_auth"=[])), params(("x-tsz-next-component-usages"=Option<String>,Header,description="v1 includes phrase component word links by sense."),("x-tsz-next-form-questions"=Option<String>,Header,description="v1 exposes concrete form question eligibility"),("id"=Uuid, Path)), request_body=NextPublishInput, responses((status=200, body=NextPublication), (status=401), (status=403), (status=404), (status=409), (status=422)))]
 pub async fn publish(
     State(state): State<AppState>,
     auth: AdminAuth,

@@ -109,6 +109,14 @@ async fn ensure_no_external_references(
     conn: &mut PgConnection,
     entry_ids: &[Uuid],
 ) -> Result<(), AppError> {
+    super::components::ensure_target_not_referenced(
+        conn,
+        crate::lexicon::dto::AssociationTargetSource::LexiconNext,
+        entry_ids,
+        entry_ids,
+        true,
+    )
+    .await?;
     let used_by_students: bool = sqlx::query_scalar(
         "SELECT CASE WHEN EXISTS(SELECT FROM learning_source.reviews WHERE entry_id=ANY($1)) THEN
             EXISTS(SELECT FROM wordlist_items WHERE entry_id=ANY($1))

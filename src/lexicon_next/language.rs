@@ -24,6 +24,7 @@ pub(super) fn valid_pos(code: &str) -> bool {
 }
 pub fn capabilities() -> NextCapabilities {
     NextCapabilities {
+        sense_component_usages: None,
         creation_snapshot: None,
         sentence_drafts: None,
         relations: None,
@@ -131,7 +132,10 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
             .senses
             .iter()
             .map(|s| {
-                s.definitions.len() + s.equivalents.len() + s.relations.as_ref().map_or(0, Vec::len)
+                s.definitions.len()
+                    + s.equivalents.len()
+                    + s.relations.as_ref().map_or(0, Vec::len)
+                    + s.component_usages.as_ref().map_or(0, Vec::len)
             })
             .sum::<usize>();
     if count > 500 {
@@ -160,6 +164,7 @@ pub fn validate(language: &str, draft: &NextDraft) -> Result<(), AppError> {
     super::relations::validate(draft, &mut ids)?;
     for sense in &draft.senses {
         identity(&mut ids, sense.id)?;
+        super::components::validate(sense, &mut ids)?;
         if sense
             .level
             .as_deref()
@@ -285,6 +290,7 @@ pub fn view(
                 .cloned()
                 .collect();
             NextSenseView {
+                component_usages: sense.component_usages.clone(),
                 relations: sense.relations.clone(),
                 sentence_ids: sense.sentence_ids.clone(),
                 no_equivalents: Some(sense.no_equivalents.contains(&selection.medium_locale)),
