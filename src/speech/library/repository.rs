@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     admin::permissions,
-    error::{AppError, ErrorCode},
+    error::{AppError, ErrorCode, ProblemMeta},
     speech::{SpeechOptions, Voice},
 };
 
@@ -360,11 +360,15 @@ impl VoiceLibraryRepository {
             .await
             .map_err(AppError::internal)?;
         let mut ids = std::collections::BTreeSet::new();
-        for (accent, items) in [("gb", &mut request.group.uk), ("us", &mut request.group.us)] {
+        for (accent, side, items) in [
+            ("gb", "uk", &request.group.uk),
+            ("us", "us", &request.group.us),
+        ] {
             if items.len() > 20 {
                 return Err(invalid());
             }
-            for item in items.iter() {
+            let mut voice_identities = std::collections::BTreeSet::new();
+            for item in items {
                 if item.id.is_nil()
                     || !ids.insert(item.id)
                     || item.name.trim().is_empty()
@@ -390,6 +394,22 @@ impl VoiceLibraryRepository {
                     return Err(invalid());
                 }
                 let voice = lock_voice(&mut tx, &item.voice_alias).await?;
+                let provider: String = voice.get("provider");
+                let official_id: String = voice.get("provider_voice_id");
+                if !voice_identities.insert((provider, official_id.clone())) {
+                    let accent_name = if side == "uk" { "英式" } else { "美式" };
+                    return Err(AppError::validation(
+                        ErrorCode::InvalidRequestBody,
+                        side,
+                        format!(
+                            "{accent_name}推荐已使用音色「{official_id}」，请移除或替换重复推荐。"
+                        ),
+                    )
+                    .with_meta(ProblemMeta {
+                        code: Some("duplicate_dubbing_voice".into()),
+                        ..Default::default()
+                    }));
+                }
                 let stored = index.and_then(|i| {
                     if accent == "gb" {
                         groups[i].uk.iter().find(|old| old.id == item.id)
@@ -409,7 +429,7 @@ impl VoiceLibraryRepository {
                 }
                 if !unchanged {
                     if !crate::speech::capabilities::synthesis_available(
-                        &voice.get::<String, _>("provider_voice_id"),
+                        &official_id,
                         &voice.get::<String, _>("locale"),
                     ) {
                         return Err(invalid());

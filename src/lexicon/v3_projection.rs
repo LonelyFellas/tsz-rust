@@ -175,7 +175,9 @@ pub(crate) fn workspace_name_variants_from_saved_forms(
     let candidates = group
         .members
         .iter()
-        .filter_map(|member| forms_by_id.get(&member.form_id).map(|&form| (pos, form)));
+        .filter_map(|member| forms_by_id.get(&member.form_id).map(|&form| (pos, form)))
+        .filter(|(_, form)| form.form_type == "base")
+        .take(1);
 
     // V2 drafts can already contain spellings that exceed the V1 limit after
     // normalization. Display saved text without reapplying input validation.

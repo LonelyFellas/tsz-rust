@@ -2652,29 +2652,36 @@ async fn workspace_names_use_saved_base_forms_and_deduplicate_shared_spellings(p
 }
 
 #[sqlx::test]
-async fn workspace_names_follow_saved_pos_and_form_group_order(pool: PgPool) {
+async fn workspace_names_follow_saved_pos_group_and_member_order(pool: PgPool) {
     let actor = admin(&pool, EDIT).await;
     let state = AppState::for_test(pool);
     let entry = create(&state, actor).await;
     let path = format!("/entries/{}", entry["id"].as_str().unwrap());
     let mut draft = entry["draft"].clone();
     let mut editor = form_editor();
+    let mut second_base = form_editor();
     let mut second_group = form_editor();
     let mut verb = form_editor();
     for dialect in ["uk", "us"] {
         editor["contents"][0]["regional_variants"][dialect]["spelling"] = json!("Panama");
+        second_base["contents"][0]["regional_variants"][dialect]["spelling"] = json!("panamanian");
         second_group["contents"][0]["regional_variants"][dialect]["spelling"] = json!("panama");
         verb["contents"][0]["regional_variants"][dialect]["spelling"] = json!("panamize");
     }
     verb["pos"][0]["pos"] = json!("verb");
     editor["contents"].as_array_mut().unwrap().extend([
+        second_base["contents"][0].take(),
         second_group["contents"][0].take(),
         verb["contents"][0].take(),
     ]);
-    editor["pos"][0]["forms"]
+    editor["pos"][0]["forms"].as_array_mut().unwrap().extend([
+        second_base["pos"][0]["forms"][0].take(),
+        second_group["pos"][0]["forms"][0].take(),
+    ]);
+    editor["pos"][0]["form_groups"][0]["members"]
         .as_array_mut()
         .unwrap()
-        .push(second_group["pos"][0]["forms"][0].take());
+        .push(second_base["pos"][0]["form_groups"][0]["members"][0].take());
     editor["pos"][0]["form_groups"]
         .as_array_mut()
         .unwrap()
@@ -2684,9 +2691,8 @@ async fn workspace_names_follow_saved_pos_and_form_group_order(pool: PgPool) {
         .unwrap()
         .push(verb["pos"][0].take());
 
-    let empty = workspace_list_with_names(&state, actor, "").await;
     let mut names = Vec::new();
-    for revision in 1..=3 {
+    for revision in 1..=4 {
         draft["form_editor"] = editor.clone();
         let (status, saved) = call(
             &state,
@@ -2704,21 +2710,62 @@ async fn workspace_names_follow_saved_pos_and_form_group_order(pool: PgPool) {
         assert_eq!(row["revision"], revision + 1);
         names.push(row["name_variants"].clone());
         match revision {
-            1 => editor["pos"][0]["form_groups"]
+            1 => editor["pos"][0]["form_groups"][0]["members"]
                 .as_array_mut()
                 .unwrap()
                 .swap(0, 1),
-            2 => editor["pos"].as_array_mut().unwrap().swap(0, 1),
+            2 => editor["pos"][0]["form_groups"]
+                .as_array_mut()
+                .unwrap()
+                .swap(0, 1),
+            3 => editor["pos"].as_array_mut().unwrap().swap(0, 1),
             _ => {}
         }
     }
     assert_eq!(
         names,
-        ["Panama", "panama", "panamize"]
+        ["Panama", "panamanian", "panama", "panamize"]
             .map(|spelling| json!([{"text": spelling, "dialects": ["uk", "us"]}]))
     );
-    assert_eq!(empty["items"][0]["id"], entry["id"]);
-    assert_eq!(empty["items"][0]["name_variants"], json!([]));
+}
+
+#[sqlx::test]
+async fn workspace_names_use_creation_headword_without_pos(pool: PgPool) {
+    let actor = admin(&pool, EDIT).await;
+    let state = AppState::for_test(pool);
+    let (status, entry) = call(
+        &state,
+        Some(actor),
+        "POST",
+        "/entries",
+        json!({"target_language":"en", "kind":"phrase", "headword":"take it easy"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{entry}");
+    let expected_name = json!([{"text":"take it easy","dialects":[]}]);
+    let list = workspace_list_with_names(&state, actor, "").await;
+    assert_eq!(list["items"][0]["id"], entry["id"]);
+    assert_eq!(list["items"][0]["name_variants"], expected_name);
+
+    let path = format!("/entries/{}", entry["id"].as_str().unwrap());
+    let mut draft = entry["draft"].clone();
+    draft["headword"] = json!("edited draft headword");
+    draft["form_editor"] = json!({"forms_format":"shared_v1","pos":[],"contents":[]});
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":1,"draft":draft}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let list = workspace_list_with_names(&state, actor, "").await;
+    let row = &list["items"][0];
+    assert_eq!(row["id"], entry["id"]);
+    assert_eq!(row["headword"], "edited draft headword");
+    assert_eq!(row["name_variants"], expected_name);
 }
 
 #[sqlx::test]
@@ -2952,6 +2999,16 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
             .unwrap()
             .push(plural["pos"][0][key][0].take());
     }
+    let mut verb = form_editor();
+    verb["pos"][0]["pos"] = json!("verb");
+    editor["contents"]
+        .as_array_mut()
+        .unwrap()
+        .push(verb["contents"][0].take());
+    editor["pos"]
+        .as_array_mut()
+        .unwrap()
+        .push(verb["pos"][0].take());
     draft["form_editor"] = editor;
     draft.pointer_mut(base_path).unwrap()["spelling_speech"] = json!({
         "content":original_text,
@@ -2977,6 +3034,18 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
         .await
         .unwrap();
     let mut copied = saved["draft"].clone();
+    // Older clients omit empty component usages when saving an unchanged spelling.
+    let binding = copied
+        .pointer_mut("/form_editor/pos/0/forms/0/regional_bindings/uk")
+        .unwrap();
+    assert_eq!(
+        binding.as_object_mut().unwrap().remove("component_usages"),
+        Some(json!([]))
+    );
+    copied["form_editor"]["pos"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
     let speech = json!({
         "content":{"version":2,"text":"","annotations":[]},
         "voice_profile":{
@@ -2999,6 +3068,10 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
     let (status, reopened) = call(&state, Some(actor), "GET", &path, Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{reopened}");
     assert_eq!(reopened["revision"], 3);
+    assert_eq!(
+        reopened["draft"]["form_editor"]["pos"][0]["pos_id"],
+        saved["draft"]["form_editor"]["pos"][1]["pos_id"]
+    );
     let saved_plural = reopened["draft"].pointer(plural_path).unwrap();
     assert_eq!(saved_plural["spelling"], "");
     assert_eq!(saved_plural["spelling_speech"], speech);
@@ -3010,6 +3083,19 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
     let mut changed_binding = reopened["draft"].clone();
     changed_binding.pointer_mut(base_path).unwrap()["spelling_speech"]["voice_profile"]["voices"]
         [0]["volume_percent"] = json!(75);
+    let (status, stale_revision) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":2,"draft":changed_binding}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale_revision}");
+    assert_eq!(stale_revision["code"], "revision_conflict");
+    assert_eq!(stale_revision["field"], "expected_revision");
+    assert!(stale_revision.get("meta").is_none());
+
     let (status, rejected) = call(
         &state,
         Some(actor),
@@ -3020,6 +3106,38 @@ async fn empty_spelling_copy_saves_with_unchanged_form_audio_after_recommendatio
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
     assert_eq!(rejected["code"], "revision_conflict");
+    assert_eq!(rejected["meta"]["code"], "speech_recommendation_changed");
+    assert!(rejected.get("field").is_none());
+    let (status, after_conflict) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{after_conflict}");
+    assert_eq!(after_conflict["revision"], 3);
+    assert_eq!(after_conflict["draft"], reopened["draft"]);
+
+    let regenerated = definition_recording(&pool, actor, "en-GB").await;
+    let regenerated_id = Uuid::parse_str(regenerated["id"].as_str().unwrap()).unwrap();
+    sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state) VALUES($1,$2,$3,$4,$5,$6,$7,'ready')")
+        .bind(regenerated_id).bind(Uuid::now_v7()).bind(actor).bind(vec![1u8;32])
+        .bind(json!({"kind":"text","content":original_text,"form_links":[]}))
+        .bind(json!({"version_id":version,"voice_id":alias,"locale":"en-GB","rate_percent":-20,"pitch_semitones":0,"volume_percent":85,"style":""}))
+        .bind(&original_text).execute(&pool).await.unwrap();
+    let mut recovered = reopened["draft"].clone();
+    let voice = &mut recovered.pointer_mut(base_path).unwrap()["spelling_speech"]["voice_profile"]
+        ["voices"][0];
+    voice["rate_percent"] = json!(-20);
+    voice["audio_asset_id"] = json!(regenerated_id);
+    let (status, saved) = call(
+        &state,
+        Some(actor),
+        "PUT",
+        &path,
+        json!({"expected_revision":3,"draft":recovered}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, reopened) = call(&state, Some(actor), "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{reopened}");
+    assert_eq!(reopened["revision"], 4);
+    assert_eq!(reopened["draft"], recovered);
 }
 
 #[sqlx::test]

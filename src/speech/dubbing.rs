@@ -7,7 +7,7 @@ use super::{
     library::dto::{DubbingGroup, DubbingRecommendation},
 };
 use crate::{
-    error::AppError,
+    error::{AppError, ErrorCode, ProblemMeta},
     lexicon::dto::{DubbingAreaV3, VoiceProfileModeV3, VoiceProfileV3, VoiceSettingV3},
 };
 
@@ -477,10 +477,14 @@ pub(crate) async fn validate_setting(
             .any(|candidate| effect(candidate) == effect(setting))
     {
         return Err(AppError::conflict(
-            crate::error::ErrorCode::RevisionConflict,
+            ErrorCode::RevisionConflict,
             None,
             "有效推荐已变化，请重新解析并生成音频",
-        ));
+        )
+        .with_meta(ProblemMeta {
+            code: Some("speech_recommendation_changed".into()),
+            ..Default::default()
+        }));
     }
     Ok(())
 }

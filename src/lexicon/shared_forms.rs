@@ -193,19 +193,22 @@ pub(crate) fn project_response(
     Ok(())
 }
 
-fn variants(regional: &WordRegionalVariantsV3) -> Vec<(&str, Value)> {
+pub(crate) fn serialized_variants(regional: &WordRegionalVariantsV3) -> Vec<(&str, Uuid, Value)> {
     match regional {
         WordRegionalVariantsV3::Common { common } => vec![(
             "common",
+            common.id,
             serde_json::to_value(common).expect("serializable variant"),
         )],
         WordRegionalVariantsV3::UkUs { uk, us } => vec![
             (
                 "uk",
+                uk.id,
                 serde_json::to_value(uk).expect("serializable variant"),
             ),
             (
                 "us",
+                us.id,
                 serde_json::to_value(us).expect("serializable variant"),
             ),
         ],
@@ -214,12 +217,14 @@ fn variants(regional: &WordRegionalVariantsV3) -> Vec<(&str, Value)> {
             .map(|row| {
                 (
                     "uk",
+                    row.id,
                     serde_json::to_value(row).expect("serializable variant"),
                 )
             })
             .chain(us.iter().map(|row| {
                 (
                     "us",
+                    row.id,
                     serde_json::to_value(row).expect("serializable variant"),
                 )
             }))
@@ -333,17 +338,12 @@ impl DraftFormsStepContentV3 {
                     .flat_map(|binding| binding_variants(&binding.regional_bindings))
                     .map(|(_, row)| (row.id, row))
                     .collect();
-                let extracted = variants(&form.regional_variants)
+                let extracted = serialized_variants(&form.regional_variants)
                     .into_iter()
-                    .map(|(dialect, value)| {
+                    .map(|(dialect, id, value)| {
                         extract_variant(
                             &value,
-                            previous_variants
-                                .get(
-                                    &serde_json::from_value::<Uuid>(value["id"].clone())
-                                        .map_err(|e| e.to_string())?,
-                                )
-                                .copied(),
+                            previous_variants.get(&id).copied(),
                             group.is_regular,
                         )
                         .map(|(content, binding)| (dialect, content, binding))

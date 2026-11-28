@@ -753,6 +753,7 @@ async fn delayed_updates_global_fallback_move_and_delete_reparse_current_source(
         let mut values = group(id, version, -27);
         let mut extra = values.uk[0].clone();
         extra.id = Uuid::now_v7();
+        extra.voice_alias = "fallback-gb".into();
         extra.selected = false;
         extra.parameters.rate_percent = 25;
         values.uk.push(extra);
@@ -1900,6 +1901,39 @@ async fn catalog_fallback_is_deterministic_and_explicit_local_empty_never_falls_
 }
 
 #[sqlx::test]
+async fn dependency_owner_upgrade_keeps_old_rows_but_skips_missing_and_inactive_owners(
+    pool: PgPool,
+) {
+    const UP: &str =
+        include_str!("../../migrations/20261128120000_dubbing_dependency_owners.up.sql");
+    const DOWN: &str =
+        include_str!("../../migrations/20261128120000_dubbing_dependency_owners.down.sql");
+    let (actor, group_id, version, ..) = setup(&pool).await;
+    let archived = Uuid::now_v7();
+    let trashed = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,detection_snapshot,created_by_admin_id,updated_by_admin_id,archived_at,archived_by_admin_id) VALUES($1,3,'en','word','{}',$2,$2,now(),$2)")
+        .bind(archived).bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.shared_sentences(id,content,create_digest,created_by_admin_id,deleted_at,in_trash) VALUES($1,'{}','trashed dependency',$2,now(),true)")
+        .bind(trashed).bind(actor).execute(&pool).await.unwrap();
+    sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO speech.dubbing_dependencies(owner_kind,owner_id,target_id,target_path,area,content_revision) VALUES('entry',$1,gen_random_uuid(),'/form','word',1),('entry',$2,gen_random_uuid(),'/form','word',1),('sentence',$3,gen_random_uuid(),'/common','example',1),('sentence',$4,gen_random_uuid(),'/common','example',1)")
+        .bind(archived).bind(Uuid::now_v7()).bind(trashed).bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+    sqlx::raw_sql(UP).execute(&pool).await.unwrap();
+    let mut group = group(group_id, version, 0);
+    group.areas.push("word".into());
+    save(&pool, actor, group, 0).await;
+    due(&pool).await;
+    assert_eq!(audio_updates::sweep(&pool, None, None).await.unwrap(), 0);
+    let updates = audio_updates::list(&pool, group_id).await.unwrap();
+    assert_eq!(updates.updates[0].state, "completed");
+    assert_eq!(updates.updates[0].total, 0);
+    let count = || sqlx::query_scalar::<_, i64>("SELECT count(*) FROM speech.dubbing_dependencies");
+    assert_eq!(count().fetch_one(&pool).await.unwrap(), 4);
+    sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    assert_eq!(count().fetch_one(&pool).await.unwrap(), 4);
+}
+
+#[sqlx::test]
 async fn side_dependency_migration_preserves_registrations_and_refuses_lossy_rollback(
     pool: PgPool,
 ) {
@@ -1908,7 +1942,10 @@ async fn side_dependency_migration_preserves_registrations_and_refuses_lossy_rol
     const DOWN: &str =
         include_str!("../../migrations/20261112090000_dubbing_side_dependencies.down.sql");
     sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    let actor = actor(&pool).await;
     let owner = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word','{}',$2,$2)")
+        .bind(owner).bind(actor).execute(&pool).await.unwrap();
     let target = Uuid::now_v7();
     sqlx::query("INSERT INTO speech.dubbing_dependencies(owner_kind,owner_id,target_id,target_path,area,content_revision) VALUES('entry',$1,$2,'/text','word',1)").bind(owner).bind(target).execute(&pool).await.unwrap();
     sqlx::raw_sql(UP).execute(&pool).await.unwrap();

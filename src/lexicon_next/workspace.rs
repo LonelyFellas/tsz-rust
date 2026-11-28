@@ -4,7 +4,8 @@ use crate::{
     admin::{AdminAuth, permissions},
     error::{AppError, ErrorCode},
     lexicon::{
-        dto::SharedFormsStepContentV3, v3_projection::workspace_name_variants_from_saved_forms,
+        dto::{EntryNameVariantV3, SharedFormsStepContentV3},
+        v3_projection::workspace_name_variants_from_saved_forms,
     },
 };
 use sqlx::{PgPool, Postgres, QueryBuilder};
@@ -28,7 +29,9 @@ fn select_with_name_source(
     include_name_variants: bool,
 ) -> QueryBuilder<Postgres> {
     let name_source = if include_name_variants {
-        "NULLIF(current.document->'form_editor', 'null'::jsonb) AS name_source,"
+        "NULLIF(current.document->'form_editor', 'null'::jsonb) AS name_source,
+        (SELECT initial.document->>'headword' FROM lexicon_next.draft_revisions initial
+          WHERE initial.entry_id=e.id AND initial.revision=1) AS creation_headword,"
     } else {
         ""
     };
@@ -178,12 +181,13 @@ struct WorkspaceNameRow {
     #[sqlx(flatten)]
     entry: NextWorkspaceEntry,
     name_source: Option<sqlx::types::Json<SharedFormsStepContentV3>>,
+    creation_headword: Option<String>,
 }
 
 impl WorkspaceNameRow {
     fn into_entry(self) -> Result<NextWorkspaceEntry, AppError> {
         let mut entry = self.entry;
-        let variants = match self.name_source {
+        let mut variants = match self.name_source {
             Some(sqlx::types::Json(editor)) => {
                 let forms = editor.resolve().map_err(|error| {
                     AppError::internal(anyhow::anyhow!("invalid workspace form editor: {error}"))
@@ -192,6 +196,14 @@ impl WorkspaceNameRow {
             }
             None => Vec::new(),
         };
+        if entry.part_of_speech.is_empty()
+            && let Some(text) = self.creation_headword
+        {
+            variants.push(EntryNameVariantV3 {
+                text,
+                dialects: Vec::new(),
+            });
+        }
         entry.name_variants = Some(variants);
         Ok(entry)
     }

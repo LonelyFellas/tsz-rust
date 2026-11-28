@@ -58,8 +58,21 @@ async fn change(
         .await
         .map_err(crate::lexicon::handler::map_error)?;
     }
-    sqlx::query("UPDATE lexicon.shared_sentences SET in_trash=NOT $2,deleted_at=CASE WHEN $2 THEN NULL ELSE now() END,revision=revision+1,lifecycle_revision=lifecycle_revision+1,updated_at=now() WHERE id=$1")
-        .bind(id).bind(restoring).execute(&mut *tx).await.map_err(AppError::internal)?;
+    let revision = sqlx::query_scalar(
+        "UPDATE lexicon.shared_sentences SET in_trash=NOT $2,deleted_at=CASE WHEN $2 THEN NULL ELSE now() END,revision=revision+1,lifecycle_revision=lifecycle_revision+1,updated_at=now() WHERE id=$1 RETURNING revision",
+    )
+    .bind(id)
+    .bind(restoring)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    let content = if restoring {
+        serde_json::to_value(&sentence.content.sentence.en_text).map_err(AppError::internal)?
+    } else {
+        serde_json::Value::Null
+    };
+    crate::speech::dubbing::replace_dependencies(&mut tx, "sentence", id, revision, &content)
+        .await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(StatusCode::NO_CONTENT)
 }

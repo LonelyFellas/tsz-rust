@@ -35,7 +35,9 @@ pub struct NextWorkspaceEntry {
     #[schema(value_type=NextEntryKind)]
     pub kind: String,
     pub headword: String,
-    /// Saved base spellings. Returned by the list only with x-tsz-next-name-variants: v1.
+    /// Spellings of the first base form in the first group of the first saved part of speech.
+    /// Without a part of speech, this uses the original creation search text.
+    /// Returned by the list only with x-tsz-next-name-variants: v1.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     #[sqlx(skip)]
